@@ -1,5 +1,9 @@
 # Loom
 
+[![npm version](https://img.shields.io/npm/v/agenticloom.svg)](https://www.npmjs.com/package/agenticloom)
+[![license](https://img.shields.io/npm/l/agenticloom.svg)](https://github.com/gwaihir4031/agenticloom/blob/main/LICENSE)
+[![downloads](https://img.shields.io/npm/dm/agenticloom.svg)](https://www.npmjs.com/package/agenticloom)
+
 > _Weave your agents into pipelines._
 
 A meta-harness compiler that turns YAML pipelines into TypeScript scripts
