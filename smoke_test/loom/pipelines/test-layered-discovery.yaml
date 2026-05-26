@@ -1,0 +1,15 @@
+pipeline: test-layered-discovery
+cli: claude
+default_extra_args: ['--model', 'haiku']
+inputs: [ticket]
+
+# Exercises the project-layer `.claude/agents/` resolution path: the
+# referenced persona `loom-test-persona` exists ONLY at
+# `smoke_test/.claude/agents/loom-test-persona.md`, never globally — so
+# a successful compile from `smoke_test/` proves the project-layer probe
+# fires before the global-layer fallback.
+
+flow:
+  - step: loom-test-persona
+    input: $ticket
+    produces: out.md

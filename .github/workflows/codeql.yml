@@ -1,0 +1,31 @@
+name: CodeQL
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: '0 6 * * 1'
+
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    permissions:
+      security-events: write
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@v6
+      - uses: github/codeql-action/init@v4
+        with:
+          languages: javascript-typescript
+      # Code Scanning (which posts CodeQL results to the Security tab)
+      # is gated to public repos OR GitHub Advanced Security. While this
+      # repo is private, `upload: false` skips the SARIF upload — the
+      # scan itself still runs and surfaces findings in the workflow
+      # logs. REMOVE `upload: false` once the repo is flipped public.
+      - uses: github/codeql-action/analyze@v4
+        with:
+          category: '/language:javascript-typescript'
+          upload: false

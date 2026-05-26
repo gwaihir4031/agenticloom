@@ -1,0 +1,11 @@
+# Expected failure: BindName regex rejects 'bad-name' (hyphen).
+# Schema-level error from Zod parse; CLI surfaces it as "Pipeline schema error".
+pipeline: unhappy-1-bind-name-hyphen-claude
+cli: claude
+default_extra_args: ['--model', 'haiku']
+inputs: [topic]
+flow:
+  - step: ac-writer
+    input: $topic
+    produces: ACS.md
+    bind: bad-name

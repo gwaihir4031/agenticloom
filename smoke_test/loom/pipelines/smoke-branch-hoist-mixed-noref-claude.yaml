@@ -1,0 +1,65 @@
+pipeline: smoke-branch-hoist-mixed-noref-claude
+cli: claude
+default_extra_args: ['--model', 'haiku']
+inputs: [mode]
+
+# Smoke pipeline for branch arm bind hoisting — IDEAS design point 4
+# (consumability checks fire only at the $ref consumer site).
+#
+# Mixed-kind arms with NO $ref consumer:
+#  - then-arm terminal step is file-bound (produces: A.md).
+#  - else-arm terminal step is NOT file-bound (no produces:).
+#  - The branch.bind 'mixed' is used ONLY as a retry_from target — no
+#    downstream $ref consumes it.
+#
+# Per design point 4 / the explicit-rejoin design's consumability rule:
+#   "Setting branch.bind: alone does NOT trigger validation. ... When the
+#   bind is used only as a retry_from target (or not used at all), none of
+#   these checks fire."
+#
+# So this pipeline must compile cleanly — contrast with pattern 4
+# (smoke-branch-hoist-asymmetric-fail-claude.yaml), where the same shape
+# WITH a $ref consumer rejects.
+#
+# On retry: branch.when re-evaluates; the appropriate arm's terminal step
+# receives the revise prompt via position-based dispatch (file-bound terminal
+# in the then-arm; side-effect-step terminal in the else-arm, just as
+# pipeline #3's single-arm shape demonstrates).
+#
+# Verifies:
+#  - Mixed-kind arms compile clean as long as no $ref consumer reaches the bind
+#  - retry_from: mixed targets the non-consumable bind (admitted unconditionally)
+#  - Revise prompt threads to both arms' terminals on retry
+
+flow:
+  - step: ac-writer
+    input: $mode
+    produces: DRAFT.md
+    bind: draft
+
+  - branch:
+      bind: mixed
+      when: mode === 'bug'
+      then:
+        - step: spec-writer
+          input: $draft
+          produces: A.md
+      else:
+        - step: spec-writer
+          input: $draft
+
+  - step: ac-reviewer
+    input: $draft
+    produces: review.json
+    bind: rev
+
+  - aggregate:
+      inputs:
+        r: $rev
+      verdict_field: status
+      approve_when: pass
+      bind: overall
+      retry_from: mixed
+      max_retries: 1
+      revise_with:
+        prompt: 'Reviewer rejected; rerun the branch with adjusted draft state.'

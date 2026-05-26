@@ -1,0 +1,76 @@
+pipeline: multi-review-copilot
+cli: copilot
+default_extra_args: ['--model', 'gpt-4.1']
+inputs: [ticket]
+
+flow:
+  # Stage 1: Acceptance criteria
+  # Single-reviewer review_loop. Unchanged from Phase 1.6 — the AC
+  # phase has only one reviewer, so no compound semantics apply.
+  - review_loop:
+      writer: ac-writer
+      reviewer: ac-reviewer
+      input: $ticket
+      max_iters: 2
+      writer_produces: ACS.md
+      reviewer_produces: ac-review.json
+      verdict_field: status
+      approve_when: pass
+      bind: ac_final
+
+  - human_gate:
+      interactive: true
+      agent: ac-writer
+      input: $ac_final
+      extra_args: ['--model', 'gpt-4.1']
+      prompt: |
+        ACS.md has passed automated review. Iterate with the user on it
+        now — answer open questions, refine wording, surface gaps the
+        reviewer wouldn't catch. Iterate until the user is satisfied.
+
+  # Stage 2: Technical spec — compound review_loop (Phase 1.7).
+  # The reviewer subflow runs three independent reviewers in parallel
+  # against the latest draft, then aggregates their verdicts. On fail,
+  # spec-writer is re-invoked with all three reviewer paths in its
+  # revise prompt and iterates against the multi-reviewer feedback.
+  # The aggregate's verdict string is what the loop checks against
+  # approve_when. No derived REVIEW.md is written.
+  - review_loop:
+      writer: spec-writer
+      input: $ac_final
+      max_iters: 1
+      writer_produces: SPEC.md
+      approve_when: pass
+      bind: spec
+      reviewer:
+        - parallel:
+            - step: security-reviewer
+              input: $spec
+              produces: security-review.json
+              bind: sec
+            - step: api-design-reviewer
+              input: $spec
+              produces: api-review.json
+              bind: api
+            - step: edge-case-reviewer
+              input: $spec
+              produces: edge-review.json
+              bind: edge
+        - aggregate:
+            inputs:
+              security: $sec
+              api: $api
+              edge: $edge
+            verdict_field: status
+            approve_when: pass
+            require: all_approved
+            bind: spec_verdict
+
+  - human_gate:
+      interactive: true
+      agent: spec-writer
+      input: $spec
+      prompt: |
+        SPEC.md has passed multi-reviewer review. Iterate with the user
+        on it before implementation — answer questions, refine wording,
+        surface gaps the reviewers wouldn't catch.

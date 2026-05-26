@@ -1,0 +1,20 @@
+# Expected failure: retry_from='doesNotExist' resolves to no bind in scope.
+# Compile-level error with "available binds" hint listing real candidates.
+pipeline: unhappy-3-retry-from-nonexistent-claude
+cli: claude
+default_extra_args: ['--model', 'haiku']
+inputs: [topic]
+flow:
+  - step: ac-writer
+    input: $topic
+    produces: ACS.md
+    bind: acs
+  - step: ac-reviewer
+    input: $acs
+    produces: gate.json
+    bind: gate
+    on_fail:
+      verdict_field: status
+      retry_from: doesNotExist
+      revise_with:
+        prompt: 'Revise per findings.'

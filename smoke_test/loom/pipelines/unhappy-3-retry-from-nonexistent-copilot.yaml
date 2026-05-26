@@ -1,0 +1,19 @@
+# Expected failure: retry_from='doesNotExist' not in scope.
+pipeline: unhappy-3-retry-from-nonexistent-copilot
+cli: copilot
+default_extra_args: ['--model', 'gpt-4.1']
+inputs: [topic]
+flow:
+  - step: ac-writer
+    input: $topic
+    produces: ACS.md
+    bind: acs
+  - step: ac-reviewer
+    input: $acs
+    produces: gate.json
+    bind: gate
+    on_fail:
+      verdict_field: status
+      retry_from: doesNotExist
+      revise_with:
+        prompt: 'Revise per findings.'

@@ -1,0 +1,10 @@
+# Expected failure: BindName regex rejects 'bad-name' (hyphen).
+pipeline: unhappy-1-bind-name-hyphen-copilot
+cli: copilot
+default_extra_args: ['--model', 'gpt-4.1']
+inputs: [topic]
+flow:
+  - step: ac-writer
+    input: $topic
+    produces: ACS.md
+    bind: bad-name

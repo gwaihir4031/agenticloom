@@ -1,0 +1,43 @@
+pipeline: smoke-branch-hoist-asymmetric-fail-claude
+cli: claude
+default_extra_args: ['--model', 'haiku']
+inputs: [mode]
+
+# UNHAPPY smoke — IDEAS Common pattern 4.
+# Asymmetric arms WITH a downstream $ref consumer → compile-time rejection.
+#
+# Structure:
+#  - then-arm terminal step has produces: → file-bound.
+#  - else-arm terminal step has NO produces: → NOT file-bound.
+#  - Downstream step reads $outcome via $ref — triggers consumability check.
+#
+# Expected compile error format (per IDEAS):
+#
+#   Compile error: consumer.input references '$outcome'.
+#   branch (bind 'outcome') is consumed via $ref by consumer.input, but its
+#   else-arm terminal step 'b' is not file-bound. The bind would have no
+#   defined value when the else arm runs.
+#
+#   Either:
+#     - Add 'produces:' to step 'b' (or end the else arm with a different file-bound producer), OR
+#     - Remove the $ref consumer at consumer.input.
+#
+# Smoke verifies the compile fires the error message and does NOT produce
+# emit output.
+
+flow:
+  - branch:
+      bind: outcome
+      when: mode === 'bug'
+      then:
+        - step: ac-writer
+          input: $mode
+          produces: A.md
+      else:
+        - step: spec-writer
+          input: $mode
+
+  - step: ac-reviewer
+    input: $outcome
+    produces: review.json
+    bind: rev

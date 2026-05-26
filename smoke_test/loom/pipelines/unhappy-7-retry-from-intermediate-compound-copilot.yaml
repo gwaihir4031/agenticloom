@@ -1,0 +1,28 @@
+# Expected failure: parallel at intermediate position in retry zone. v0.1.x rejects.
+pipeline: unhappy-7-retry-from-intermediate-compound-copilot
+cli: copilot
+default_extra_args: ['--model', 'gpt-4.1']
+inputs: [topic]
+flow:
+  - step: ac-writer
+    input: $topic
+    produces: ACS.md
+    bind: acs
+  - parallel:
+      - step: spec-writer
+        input: $acs
+        produces: SPEC.md
+        bind: spec
+      - step: ac-reviewer
+        input: $acs
+        produces: REV.json
+        bind: rev
+  - step: ac-reviewer
+    input: $acs
+    produces: gate.json
+    bind: gate
+    on_fail:
+      verdict_field: status
+      retry_from: acs
+      revise_with:
+        prompt: 'Revise per findings.'

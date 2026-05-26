@@ -1,0 +1,19 @@
+# Expected failure: retry_from targets pipeline input. v0.1.x rejects.
+pipeline: unhappy-4-retry-from-pipeline-input-copilot
+cli: copilot
+default_extra_args: ['--model', 'gpt-4.1']
+inputs: [topic]
+flow:
+  - step: ac-writer
+    input: $topic
+    produces: ACS.md
+    bind: acs
+  - step: ac-reviewer
+    input: $acs
+    produces: gate.json
+    bind: gate
+    on_fail:
+      verdict_field: status
+      retry_from: topic
+      revise_with:
+        prompt: 'Revise per findings.'

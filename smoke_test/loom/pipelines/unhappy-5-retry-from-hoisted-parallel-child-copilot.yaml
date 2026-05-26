@@ -1,0 +1,24 @@
+# Expected failure: retry_from to hoisted parallel-child bind. v0.1.x rejects.
+pipeline: unhappy-5-retry-from-hoisted-parallel-child-copilot
+cli: copilot
+default_extra_args: ['--model', 'gpt-4.1']
+inputs: [topic]
+flow:
+  - parallel:
+      - step: ac-writer
+        input: $topic
+        produces: ACS.md
+        bind: acs
+      - step: spec-writer
+        input: $topic
+        produces: SPEC.md
+        bind: spec
+  - step: ac-reviewer
+    input: $acs
+    produces: gate.json
+    bind: gate
+    on_fail:
+      verdict_field: status
+      retry_from: acs
+      revise_with:
+        prompt: 'Revise per findings.'

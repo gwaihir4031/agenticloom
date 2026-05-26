@@ -1,0 +1,30 @@
+# Expected failure: a parallel block sits between retry_from target (acs)
+# and the gate. v0.1.x rejects compound primitives at intermediate positions
+# in a retry zone (full re-execution semantics deferred to v0.1.y).
+pipeline: unhappy-7-retry-from-intermediate-compound-claude
+cli: claude
+default_extra_args: ['--model', 'haiku']
+inputs: [topic]
+flow:
+  - step: ac-writer
+    input: $topic
+    produces: ACS.md
+    bind: acs
+  - parallel:
+      - step: spec-writer
+        input: $acs
+        produces: SPEC.md
+        bind: spec
+      - step: ac-reviewer
+        input: $acs
+        produces: REV.json
+        bind: rev
+  - step: ac-reviewer
+    input: $acs
+    produces: gate.json
+    bind: gate
+    on_fail:
+      verdict_field: status
+      retry_from: acs
+      revise_with:
+        prompt: 'Revise per findings.'

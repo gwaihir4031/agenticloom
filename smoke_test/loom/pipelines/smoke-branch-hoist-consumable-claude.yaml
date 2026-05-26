@@ -1,0 +1,40 @@
+pipeline: smoke-branch-hoist-consumable-claude
+cli: claude
+default_extra_args: ['--model', 'haiku']
+inputs: [mode]
+
+# Smoke pipeline for branch arm bind hoisting — IDEAS Common pattern 1
+# (consumable file-bound branch + downstream $ref consumer).
+#
+# Structure:
+#  1. branch declares bind 'outcome' as the rejoin variable.
+#  2. Both arms terminate in a file-bound step (produces:), so the bind
+#     classifies consumable: true / kind: file.
+#  3. Downstream step reads $outcome — at runtime it resolves to whichever
+#     arm's produces path was written (FIX.md or SPEC.md).
+#
+# Verifies end-to-end:
+#  - Branch.bind classification when both arms are file-bound
+#  - The emit shape lifts to `let outcome; if (...) { outcome = ... }`
+#  - Downstream $ref consumer reads the surviving arm's path
+#
+# The 'mode' input drives the branch; smoke runs can pass 'bug' or
+# anything-else to exercise each arm.
+
+flow:
+  - branch:
+      bind: outcome
+      when: mode === 'bug'
+      then:
+        - step: ac-writer
+          input: $mode
+          produces: FIX.md
+      else:
+        - step: spec-writer
+          input: $mode
+          produces: SPEC.md
+
+  - step: ac-reviewer
+    input: $outcome
+    produces: review.json
+    bind: rev

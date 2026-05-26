@@ -1,0 +1,35 @@
+pipeline: smoke-branch-hoist-consumable-retry-copilot
+cli: copilot
+default_extra_args: ['--model', 'gpt-4.1']
+inputs: [mode]
+
+# Copilot-CLI variant of smoke-branch-hoist-consumable-retry-claude.yaml.
+
+flow:
+  - branch:
+      bind: outcome
+      when: mode === 'bug'
+      then:
+        - step: ac-writer
+          input: $mode
+          produces: FIX.md
+      else:
+        - step: spec-writer
+          input: $mode
+          produces: SPEC.md
+
+  - step: ac-reviewer
+    input: $outcome
+    produces: review.json
+    bind: rev
+
+  - aggregate:
+      inputs:
+        r: $rev
+      verdict_field: status
+      approve_when: pass
+      bind: overall
+      retry_from: outcome
+      max_retries: 1
+      revise_with:
+        prompt: 'Reviewer rejected; revise the artifact in the selected arm.'

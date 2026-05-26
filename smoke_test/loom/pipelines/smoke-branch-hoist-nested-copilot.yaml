@@ -1,0 +1,32 @@
+pipeline: smoke-branch-hoist-nested-copilot
+cli: copilot
+default_extra_args: ['--model', 'gpt-4.1']
+inputs: [mode, severity]
+
+# Copilot-CLI variant of smoke-branch-hoist-nested-claude.yaml.
+
+flow:
+  - branch:
+      bind: outcome
+      when: mode === 'bug'
+      then:
+        - branch:
+            bind: bug_outcome
+            when: severity === 'critical'
+            then:
+              - step: ac-writer
+                input: $mode
+                produces: CRITICAL_FIX.md
+            else:
+              - step: ac-writer
+                input: $mode
+                produces: NORMAL_FIX.md
+      else:
+        - step: spec-writer
+          input: $mode
+          produces: FEATURE.md
+
+  - step: ac-reviewer
+    input: $outcome
+    produces: final-review.json
+    bind: rev

@@ -1,0 +1,75 @@
+{
+  "name": "agenticloom",
+  "version": "0.1.0",
+  "description": "Meta-harness compiler — composes Claude Code and Copilot CLI into reproducible multi-step workflows with verification, recovery, and human-in-the-loop as first-class primitives.",
+  "type": "module",
+  "license": "Apache-2.0",
+  "author": "John Hatem",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/gwaihir4031/agenticloom.git"
+  },
+  "homepage": "https://github.com/gwaihir4031/agenticloom#readme",
+  "bugs": {
+    "url": "https://github.com/gwaihir4031/agenticloom/issues"
+  },
+  "keywords": [
+    "agent",
+    "agents",
+    "agentic",
+    "multi-agent",
+    "harness-engineering",
+    "agent-harness",
+    "claude-code",
+    "copilot-cli",
+    "orchestration",
+    "pipeline",
+    "yaml",
+    "compiler",
+    "cli",
+    "review-loop",
+    "human-in-the-loop"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "bin": {
+    "loom": "dist/cli.js",
+    "agenticloom": "dist/cli.js"
+  },
+  "exports": {
+    "./runtime": "./dist/runtime/index.js"
+  },
+  "files": [
+    "dist/",
+    "skills/",
+    "PRIMITIVES.md"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "postbuild": "chmod +x dist/cli.js",
+    "prepare": "npm run build",
+    "loom": "tsx src/cli.ts",
+    "test": "vitest run",
+    "lint": "eslint src/",
+    "lint:fix": "eslint src/ --fix",
+    "format": "prettier --write .",
+    "format:check": "prettier --check ."
+  },
+  "dependencies": {
+    "jsonc-parser": "^3.3.1",
+    "yaml": "^2.6.0",
+    "zod": "^4.0.0"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@types/node": "^25.9.1",
+    "@vitest/coverage-v8": "^4.1.7",
+    "eslint": "^10.4.0",
+    "prettier": "^3.8.3",
+    "tsx": "^4.22.3",
+    "typescript": "^6.0.3",
+    "typescript-eslint": "^8.59.4",
+    "vitest": "^4.1.7"
+  }
+}

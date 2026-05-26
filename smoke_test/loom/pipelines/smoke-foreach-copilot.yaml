@@ -1,0 +1,28 @@
+pipeline: smoke-foreach-copilot
+cli: copilot
+inputs: [ticket]
+
+# Copilot-CLI variant of smoke-foreach-claude. Same pipeline shape; only
+# the cli backend differs. See smoke-foreach-claude.yaml for the
+# structural commentary.
+
+flow:
+  - step: foreach-planner
+    input: $ticket
+    produces: plan.jsonl
+    bind: plan
+
+  - foreach:
+      over: $plan
+      as: task
+      body:
+        - step: foreach-implementer
+          input: $task
+          produces: notes.md
+          bind: notes
+        - step: foreach-tester
+          inputs:
+            task: $task
+            notes: $notes
+          produces: tests.md
+      bind: results

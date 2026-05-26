@@ -1,0 +1,52 @@
+pipeline: smoke-branch-hoist-nested-claude
+cli: claude
+default_extra_args: ['--model', 'haiku']
+inputs: [mode, severity]
+
+# Smoke pipeline for branch arm bind hoisting — IDEAS Common pattern 2
+# (nested branches with multi-layer routing).
+#
+# Structure:
+#  - Outer branch bind: 'outcome'.
+#  - Outer then-arm terminates in an INNER branch whose own bind 'bug_outcome'
+#    is file-bound (both inner arms have produces:).
+#  - Outer else-arm terminates in a plain file-bound step.
+#  - Downstream step reads $outcome — at runtime this resolves through the
+#    recursive classification to whichever leaf produced.
+#
+# Verifies:
+#  - Recursive classifyArmTerminal correctly walks the nested branch
+#  - The outer branch's bind is consumable because the inner branch's bind is
+#  - Compiled emit threads the inner branch's value out through the outer
+#    branch's hoisted let-binding
+#
+# Three runtime paths:
+#  mode='bug', severity='critical'  → CRITICAL_FIX.md
+#  mode='bug', severity='normal'    → NORMAL_FIX.md
+#  mode='feature' (else arm)        → FEATURE.md
+
+flow:
+  - branch:
+      bind: outcome
+      when: mode === 'bug'
+      then:
+        - branch:
+            bind: bug_outcome
+            when: severity === 'critical'
+            then:
+              - step: ac-writer
+                input: $mode
+                produces: CRITICAL_FIX.md
+            else:
+              - step: ac-writer
+                input: $mode
+                produces: NORMAL_FIX.md
+      else:
+        - step: spec-writer
+          input: $mode
+          produces: FEATURE.md
+
+  - step: ac-reviewer
+    input: $outcome
+    produces: final-review.json
+    bind: rev

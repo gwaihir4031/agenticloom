@@ -1,0 +1,20 @@
+# Expected failure: retry_from targets a pipeline input ('topic'), not a step.
+# v0.1.x rejects this — pipeline inputs are data, not steps.
+pipeline: unhappy-4-retry-from-pipeline-input-claude
+cli: claude
+default_extra_args: ['--model', 'haiku']
+inputs: [topic]
+flow:
+  - step: ac-writer
+    input: $topic
+    produces: ACS.md
+    bind: acs
+  - step: ac-reviewer
+    input: $acs
+    produces: gate.json
+    bind: gate
+    on_fail:
+      verdict_field: status
+      retry_from: topic
+      revise_with:
+        prompt: 'Revise per findings.'

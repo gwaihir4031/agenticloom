@@ -1,0 +1,39 @@
+pipeline: smoke-branch-hoist-mixed-noref-copilot
+cli: copilot
+default_extra_args: ['--model', 'gpt-4.1']
+inputs: [mode]
+
+# Copilot-CLI variant of smoke-branch-hoist-mixed-noref-claude.yaml.
+
+flow:
+  - step: ac-writer
+    input: $mode
+    produces: DRAFT.md
+    bind: draft
+
+  - branch:
+      bind: mixed
+      when: mode === 'bug'
+      then:
+        - step: spec-writer
+          input: $draft
+          produces: A.md
+      else:
+        - step: spec-writer
+          input: $draft
+
+  - step: ac-reviewer
+    input: $draft
+    produces: review.json
+    bind: rev
+
+  - aggregate:
+      inputs:
+        r: $rev
+      verdict_field: status
+      approve_when: pass
+      bind: overall
+      retry_from: mixed
+      max_retries: 1
+      revise_with:
+        prompt: 'Reviewer rejected; rerun the branch with adjusted draft state.'

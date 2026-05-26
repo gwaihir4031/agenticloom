@@ -1,0 +1,6 @@
+dist/
+node_modules/
+package-lock.json
+skills/
+example_script.mts
+human_notes.md

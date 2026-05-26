@@ -1,0 +1,25 @@
+pipeline: smoke-branch-hoist-asymmetric-fail-copilot
+cli: copilot
+default_extra_args: ['--model', 'gpt-4.1']
+inputs: [mode]
+
+# Copilot-CLI variant — expected to fail compile per IDEAS Common pattern 4.
+# See smoke-branch-hoist-asymmetric-fail-claude.yaml for the full
+# explanation of the expected error.
+
+flow:
+  - branch:
+      bind: outcome
+      when: mode === 'bug'
+      then:
+        - step: ac-writer
+          input: $mode
+          produces: A.md
+      else:
+        - step: spec-writer
+          input: $mode
+
+  - step: ac-reviewer
+    input: $outcome
+    produces: review.json
+    bind: rev

@@ -1,0 +1,22 @@
+# Expected failure: $-ref to a parallel block's bind. Parallel produces
+# multiple files (one per child), so $par as an input is ambiguous.
+# Workaround: reference individual child binds ($acs, $spec) or aggregate first.
+pipeline: unhappy-8-dollar-ref-to-parallel-bind-claude
+cli: claude
+default_extra_args: ['--model', 'haiku']
+inputs: [topic]
+flow:
+  - parallel:
+      - step: ac-writer
+        input: $topic
+        produces: ACS.md
+        bind: acs
+      - step: spec-writer
+        input: $topic
+        produces: SPEC.md
+        bind: spec
+    bind: par
+  - step: ac-reviewer
+    input: $par
+    produces: gate.json
+    bind: gate

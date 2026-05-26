@@ -1,0 +1,29 @@
+pipeline: probe-cli-e2e
+cli: claude
+default_extra_args: ['--model', 'haiku']
+inputs: [topic]
+
+# Minimal end-to-end probe: a single step with `on_fail` retry gate against
+# itself's earlier sibling. Compiles cleanly and exercises the OnFail strict
+# schema (verdict_field + retry_from + revise_with all required) plus the
+# layered persona discovery. Used as a sanity probe when poking the CLI
+# surface — `loom compile smoke_test/probe-cli-e2e.yaml /tmp/out.ts` should
+# print the success banner.
+
+flow:
+  - step: ac-writer
+    input: $topic
+    produces: ACS.md
+    bind: acs
+
+  - step: ac-reviewer
+    input: $acs
+    produces: gate.json
+    bind: gate
+    on_fail:
+      verdict_field: status
+      approve_when: pass
+      retry_from: acs
+      max_retries: 1
+      revise_with:
+        prompt: 'Revise the ACs to address the reviewer findings.'

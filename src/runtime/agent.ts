@@ -1,0 +1,571 @@
+import { spawn } from 'child_process';
+import { existsSync, readFileSync } from 'fs';
+import { homedir } from 'os';
+import * as path from 'path';
+import * as readline from 'readline';
+import { RollingWindow } from '../RollingWindow.js';
+import { formatStreamEvent, extractPrimaryArg } from './stream.js';
+import type { StreamEvent } from './stream.js';
+
+/** Thrown by retry-shaped primitives when their author opted into hard-fail on
+ *  exhaustion (`step.on_fail.on_max_exceeded: 'fail'`,
+ *  `aggregate.on_max_exceeded: 'fail'`, or `review_loop.on_max_exceeded: 'fail'`).
+ *  Downstream catch handlers (notably `foreach.on_iteration_fail: continue`)
+ *  use `instanceof HaltPipelineError` to distinguish "the pipeline author
+ *  explicitly chose to fail" from "a generic runtime error" — explicit halts
+ *  propagate even through continue-mode handlers; generic errors can be
+ *  caught and skipped. The class carries no extra fields beyond `.name` — the
+ *  `instanceof` tag is the entire mechanism. */
+export class HaltPipelineError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'HaltPipelineError';
+  }
+}
+
+/** Expand a leading `~/` to the user's home directory. Used by layered
+ *  agent resolution and any other path that may be tilde-prefixed.
+ *  Pass-through for already-absolute paths and non-tilde-prefixed input. */
+function expandHome(p: string): string {
+  if (p === '~') return homedir();
+  if (p.startsWith('~/')) return path.join(homedir(), p.slice(2));
+  return p;
+}
+
+/** Probe a layered list of directories for `<dir>/<leaf>`. Returns the
+ *  first existing file path (with `~/` expanded). The `attempted` list
+ *  contains every path probed up to and including the match (so on a
+ *  successful hit the list has 1-to-N entries, not the full N); on
+ *  miss it contains every dir in the input. Callers use `attempted` to
+ *  build layer-aware error messages.
+ *
+ *  Not exported; `loadAgentSystemPrompt` is the only consumer in
+ *  agent.ts. The compile-side `validateAgentFilesExist` defines its
+ *  own local copy (see `src/compile/validation.ts`) — same pattern as `expandHome`,
+ *  which is also duplicated to avoid a cross-module import that would
+ *  pull runtime's heavy deps into the compile module. */
+function firstExisting(
+  dirs: string[],
+  leaf: string,
+): { found: string | null; attempted: string[] } {
+  const attempted: string[] = [];
+  for (const dir of dirs) {
+    const candidate = expandHome(path.posix.join(dir, leaf));
+    attempted.push(candidate);
+    if (existsSync(candidate)) return { found: candidate, attempted };
+  }
+  return { found: null, attempted };
+}
+
+/** Load and frontmatter-strip the agent's persona file from the first
+ *  layer that contains it. `agentDirs` is the layered list (project
+ *  first, global second); the runtime iterates in order and returns the
+ *  body of the first match (empty string when the matched file is
+ *  frontmatter-only — the bare-cli agent convention). Loud-fail listing
+ *  all attempted paths when none exists — compile-time validation
+ *  should have caught this, so a runtime miss is a contract violation
+ *  (usually a stale `dist/`; try `npm run build`). */
+export function loadAgentSystemPrompt(agentName: string, agentDirs: string[]): string {
+  const { found, attempted } = firstExisting(agentDirs, `${agentName}.md`);
+  if (found === null) {
+    throw new Error(
+      `agent '${agentName}' persona file is missing at any of:\n` +
+        attempted.map((p) => `  ${p}`).join('\n') +
+        '\n' +
+        `This should have been caught at compile time — the runtime contract is broken. ` +
+        `If running loom from source, try \`npm run build\` to refresh dist/.`,
+    );
+  }
+  let sys: string;
+  try {
+    sys = readFileSync(found, 'utf-8');
+  } catch (e: any) {
+    // Wrap with layer context so a permission/IO error names the matched
+    // layer's path explicitly (with two layers, the bare Node error
+    // string would leave the user guessing which layer matched).
+    throw new Error(`agent '${agentName}' matched at ${found} but read failed: ${e?.message ?? e}`);
+  }
+  // Strip Claude Code subagent YAML frontmatter — metadata, not prompt
+  // content, and its leading '---' would make `claude -p` treat the
+  // whole arg as a CLI flag.
+  const fm = sys.match(/^---\r?\n[\s\S]*?\r?\n---\r?\n/);
+  if (fm) sys = sys.slice(fm[0].length);
+  return sys.trim();
+}
+
+export type AgentCli = 'claude' | 'copilot';
+export type AgentRole = 'step' | 'reviewer' | 'writer';
+
+/** Per-call configuration for `runAgent`. The compiler bakes pipeline-level
+ *  values (cli/agentDirs/defaultExtraArgs) into module-level constants and
+ *  passes them via this options bag. Per-step overrides (yaml `extra_args:`)
+ *  flow through as `extraArgs` and REPLACE the pipeline default (no concat). */
+export interface RunAgentOpts {
+  cli: AgentCli;
+  /** Layered persona-file lookup directories — project layer first, global
+   *  layer second. Each entry is a directory; the agent's persona file
+   *  resolves to the first existing `<dir>/<agent>.md` (with `~/` expanded
+   *  per dir at lookup time). Layer convention is owned by the compiler
+   *  (see `src/compile/index.ts:AGENT_DIR_DEFAULTS` for per-cli paths);
+   *  the runtime is a dumb iterator. Must be non-empty; each entry must
+   *  be absolute or
+   *  tilde-prefixed by the time the spawned child runs (`loom run`
+   *  asserts this via the trip-wire in cli.ts). */
+  agentDirs: string[];
+  extraArgs: string[];
+  role?: AgentRole;
+  /** Per-call timeout in milliseconds. On expiry the child receives SIGTERM
+   *  and the promise rejects with `agent '<name>' timed out after <ms>ms`.
+   *
+   *  YAML-sourced pipelines have this validated as a positive integer by the
+   *  `StepItem` Zod schema at compile time. Programmatic callers (loom's own
+   *  internal `reviewLoop` writerOpts/reviewerOpts, hand-written tests, future
+   *  embedders) are responsible for passing a positive integer themselves —
+   *  the runtime does not re-validate. Default when unset is 30 minutes
+   *  (`30 * 60 * 1000` ms). */
+  timeout?: number;
+  /** Declared input file paths the agent reads BEFORE its spawn. The runtime
+   *  validates each entry's existence via `requireFile` before the child
+   *  spawns; a missing file loud-fails with the agent's name and the missing
+   *  path so no agent runs against absent inputs. Pipeline-input bind values
+   *  and literal-string args flow through here too — anything the compile
+   *  classifies as path-shaped is included.
+   *
+   *  Populated by `computeInputPaths` in compile — the resolved set is
+   *  emitted into every `runAgent(...)` call's options bag so the runtime
+   *  enforces existence on the same data the compile already knows.
+   *
+   *  Undefined (or empty) skips the check — used for steps that declare no
+   *  inputs. The pre-spawn check is the safety net that makes resumed runs
+   *  loud-fail at the first downstream consumer instead of hallucinating
+   *  mid-agent; on non-resumed runs the same check catches silent-empty /
+   *  wrong-path failures that the post-spawn output check alone misses. */
+  inputPaths?: string[];
+}
+
+/** Discriminator for the two file-consumption boundaries `requireFile` is
+ *  wired into. The tag determines the thrown message wording:
+ *  - `consuming-input`: pre-spawn input check (an agent is about to read a
+ *    declared input it didn't produce). Message: "agent '<X>' requires input
+ *    file '<path>' which does not exist".
+ *  - `reading-output`: orchestrator-side read of an agent's expected output
+ *    (e.g. `readAgentFile` consuming what an upstream producer was supposed
+ *    to write). Message: "agent '<X>' did not write expected file: <path>".
+ *  Both branches read identical existsSync semantics; only the diagnostic
+ *  wording differs so failures surface with the right framing for the boundary
+ *  that caught them. */
+export type RequireFileContext =
+  | { kind: 'consuming-input'; agent: string }
+  | { kind: 'reading-output'; agent: string };
+
+/** Validate that a path exists on disk, returning the absolute form. Used at
+ *  every file-consumption boundary — the pre-spawn input check in `runAgent`,
+ *  the agent-file read path in `readAgentFile` — to guarantee "no agent runs
+ *  against a missing file."
+ *
+ *  Paths are resolved against the runtime cwd (the workspace dir for compiled
+ *  pipelines) so relative path-literals from the emit (e.g. bind values like
+ *  `"SPEC.md"`) become unambiguous absolute paths before the existsSync probe.
+ *
+ *  Fail-fast: throws on the first miss. Batching multiple-missing errors into
+ *  a single throw is deferred. */
+export function requireFile(filePath: string, context: RequireFileContext): string {
+  const abs = path.resolve(filePath);
+  if (!existsSync(abs)) {
+    if (context.kind === 'consuming-input') {
+      throw new Error(`agent '${context.agent}' requires input file '${abs}' which does not exist`);
+    }
+    throw new Error(`agent '${context.agent}' did not write expected file: ${abs}`);
+  }
+  return abs;
+}
+
+/** Generic step postscript. Agent writes whatever its output shape is to a
+ *  path; downstream consumers read that path via their own tools. */
+function stepPostscript(producesPath: string): string {
+  return `\n\nWrite your output to: ${producesPath}\nOverwrite if the file already exists.`;
+}
+
+/** Writer-in-review-loop postscript. Pins the artifact format (prose
+ *  Markdown, not an envelope) so writer agents can drop format-spec text
+ *  from their prompt files. */
+function writerPostscript(producesPath: string): string {
+  return `\n\nWrite your artifact (Markdown prose) to: ${producesPath}\nOverwrite if the file already exists.\nDo not emit the artifact to stdout; the file at that path is the source of truth.`;
+}
+
+/** Reviewer-in-review-loop postscript. Owns the JSON shape spec so reviewer
+ *  agents can drop it from their prompt files. */
+function reviewerPostscript(producesPath: string): string {
+  return `\n\nWrite your review to: ${producesPath}
+Overwrite if the file already exists.
+
+Use this JSON shape:
+{
+  "status": "pass" | "fail",
+  "findings": [
+    {
+      "severity": "blocker" | "major" | "nit",
+      "summary": "single-line one-sentence summary",
+      "details_md": "Multi-paragraph Markdown with the full prose, code fences, etc."
+    }
+  ]
+}
+
+Emit "status": "pass" if there are no blocker or major findings (nit-only is a pass).
+You MAY include additional top-level fields (e.g. "reviewer_notes").
+Do not emit prose to stdout; the verdict lives in the JSON file's "status" field.`;
+}
+
+/** Spawn the configured CLI for this agent and stream its output through a
+ *  RollingWindow renderer. Returns the producesPath when set, otherwise the
+ *  trimmed text content the agent emitted.
+ *
+ *  Per-call options carry the pipeline's cli choice + agent persona-file
+ *  location + the effective extra_args (pipeline default OR per-step
+ *  override, REPLACED not merged so per-step overrides can drop every
+ *  default cleanly) + optional per-call timeout.
+ *
+ *  Claude path: spawns with `--output-format stream-json --verbose
+ *  --include-partial-messages`; the line handler routes each JSONL event
+ *  through `formatStreamEvent` for display and captures the final `result`
+ *  event's telemetry (turns, cost, stop_reason) for the RollingWindow's
+ *  collapse line. Text deltas accumulate into the trimmed return value when
+ *  `producesPath` is unset.
+ *
+ *  Copilot path: streams raw stdout line-by-line through the same
+ *  RollingWindow; the trimmed accumulator is the return value when
+ *  `producesPath` is unset.
+ *
+ *  TTY mode (default in real terminals): a 25-row scrolling window per agent
+ *  collapses to `✓ <name> (...)` on success / `✗ <name> (...)` on failure.
+ *  Non-TTY mode (CI / piped runs): plain line streaming to stdout.
+ *
+ *  Timeout: per-call `opts.timeout` (ms) defaults to 30 minutes. On expiry the
+ *  child receives SIGTERM and the promise rejects with
+ *  `agent '<name>' timed out after <ms>ms`.
+ *
+ *  SIGINT (parent Ctrl-C): forwarded as SIGTERM to the spawned child so it
+ *  can clean up its terminal state. Signal-killed children (`code === null`)
+ *  reject as "killed by signal" — interrupted runs do not silently consume.
+ *
+ *  Optional log tee: when `LOOM_SAVE_LOGS=1` is set in the environment (the
+ *  `loom run --save-logs` flag exports this), the RollingWindow tees committed
+ *  lines to `logs/<name>.log` in append mode.
+ *
+ *  When `producesPath` is set, the role-specific postscript (step / writer /
+ *  reviewer) is appended to the prompt and the post-exit `existsSync` check
+ *  loud-fails if the agent didn't write the expected file. The returned string
+ *  is the path, not stdout — downstream agents read the file via their own
+ *  tools; orchestrator primitives use `readAgentFile`. */
+export async function runAgent(
+  name: string,
+  prompt: string,
+  producesPath?: string,
+  opts?: RunAgentOpts,
+): Promise<string> {
+  if (!opts) {
+    throw new Error(
+      `runAgent: opts is required (cli, agentDirs, extraArgs). ` +
+        `This is a compile-time-guaranteed contract — the emit should always pass opts.`,
+    );
+  }
+  // Defense at the runtime contract boundary: catch emit bugs where a
+  // compile-time `??` collapsed an input expression away or a closure
+  // forwarded an undefined revise-prompt as the prompt arg. The TS signature
+  // already pins `prompt: string`, but the emitted JS is unchecked at
+  // runtime — a bad emit silently passes `undefined` into the spawned
+  // agent's args bag where it stringifies as the literal text "undefined".
+  if (typeof prompt !== 'string') {
+    throw new Error(
+      `runAgent: prompt must be a string (got ${prompt === undefined ? 'undefined' : typeof prompt}) ` +
+        `for agent '${name}'. This is a compile-time-guaranteed contract — the emit should always ` +
+        `pass a defined string. A failure here points to a broken compile-time substitution.`,
+    );
+  }
+  // Pre-spawn input check: validate every declared input path exists on disk
+  // BEFORE spawning; fail-fast on first miss. Catches resumed-run pre-cursor
+  // file gaps and silent-empty / wrong-path drift on every run.
+  if (opts.inputPaths !== undefined) {
+    for (const inputPath of opts.inputPaths) {
+      requireFile(inputPath, { kind: 'consuming-input', agent: name });
+    }
+  }
+  const role = opts.role ?? 'step';
+  const sys = loadAgentSystemPrompt(name, opts.agentDirs);
+  let fullPrompt = sys === '' ? prompt : `${sys}\n\n---\n\n${prompt}`;
+
+  // Absolutify the produces path against the runtime's cwd (the workspace dir
+  // set up by `cli.ts` via `cwd: workspaceCwd`). The bind value returned below
+  // is the canonical file location, NOT a relative-to-cwd path; downstream
+  // consumers (interactive humanGate, `Its output is at: ${refName}` prompts
+  // built by compile/scope.ts's wrapPathRef, retry closures) interpolate the bind
+  // value verbatim into prompts handed to spawned agents. Without
+  // absolutification, those agents resolve the relative path against their
+  // own spawn cwd — which under the LOOM_INVOCATION_CWD threading is the
+  // user's invocation dir, NOT the workspace — and produce paths that land
+  // outside the run's workspace. Modern claude CLI also refuses to read
+  // absolute paths outside its cwd in both `-p` and `--agent` modes, so
+  // any out-of-cwd reference needs to be both absolute and within the
+  // claude-permitted tree; the absolutification here covers the first half,
+  // and the cwd= argument on the spawn (set below) covers the second.
+  const producesPathAbs = producesPath ? path.resolve(producesPath) : undefined;
+
+  if (producesPathAbs) {
+    if (role === 'reviewer') fullPrompt += reviewerPostscript(producesPathAbs);
+    else if (role === 'writer') fullPrompt += writerPostscript(producesPathAbs);
+    else fullPrompt += stepPostscript(producesPathAbs);
+  }
+
+  // Per-CLI base argv. Claude gets stream-JSON args so we can render its
+  // progress in real time; copilot has no equivalent flag set, so it streams
+  // raw stdout. extraArgs from per-step override (or pipeline default) flow
+  // through verbatim.
+  const base: Record<AgentCli, [string, string[]]> = {
+    claude: [
+      'claude',
+      [
+        '-p',
+        fullPrompt,
+        '--permission-mode',
+        'acceptEdits',
+        '--output-format',
+        'stream-json',
+        '--verbose',
+        '--include-partial-messages',
+      ],
+    ],
+    copilot: ['copilot', ['-p', fullPrompt, '--allow-all-tools', '--no-color']],
+  };
+  const [bin, args] = base[opts.cli];
+  const finalArgs = [...args, ...opts.extraArgs];
+
+  // The header label carries the cli suffix so logs from pipelines mixing
+  // CLIs stay attributable; `RollingWindow.start()` renders it as `→ <label>`
+  // (TTY mode) or as a plain line (non-TTY). `logPath` is sourced from the
+  // `LOOM_SAVE_LOGS` env var that `loom run --save-logs` sets — a string path
+  // when the flag was passed, null otherwise. Env-var threading (rather than
+  // another option on RunAgentOpts) keeps the compile-time emit unchanged: the
+  // flag is an orthogonal runtime-only concern that pipelines don't know
+  // about. Path is per-agent-name (not per-(agent,cli)) so a re-run with a
+  // different cli appends to the same audit-trail file.
+  const logPath = process.env.LOOM_SAVE_LOGS === '1' ? `logs/${name}.log` : null;
+  const window = new RollingWindow(`${name} (${opts.cli})`, logPath);
+  window.start();
+
+  // Agent's cwd is the invocation dir (where the user ran `loom run`),
+  // NOT the workspace dir the surrounding runtime process runs from. This
+  // lets the agent read files passed by the user (ticket inputs, etc.)
+  // which live in/under the invocation dir — modern claude CLI refuses to
+  // read absolute paths outside its cwd, so handing it the workspace dir
+  // would break every pipeline whose first agent reads a user-supplied
+  // file. Output `produces:` paths are absolutified upstream (see
+  // `producesPathAbs` above) so writes still land in the workspace dir
+  // regardless of cwd. `LOOM_INVOCATION_CWD` is set by `cli.ts:runChild`;
+  // the `process.cwd()` fallback covers direct runtime imports (tests,
+  // external embedders) where no cli was in the loop.
+  const agentCwd = process.env.LOOM_INVOCATION_CWD ?? process.cwd();
+  return await new Promise<string>((resolve, reject) => {
+    const child = spawn(bin, finalArgs, { cwd: agentCwd, stdio: ['ignore', 'pipe', 'inherit'] });
+    let settled = false;
+    let textBuffer = '';
+    // Set when the parent receives SIGINT (Ctrl-C). Read in the exit handler:
+    // even if the child exits with code 0 (claude can clean up gracefully on
+    // SIGINT) AND the producesPath file exists, runAgent must REJECT — otherwise
+    // the surrounding review_loop / parallel / pipeline keeps marching to the
+    // next agent. Without this flag the previous code resolved on
+    // graceful-SIGINT-exit, surprising users who expect Ctrl-C to stop the run.
+    let interruptedBySigint = false;
+
+    const onSigint = (): void => {
+      interruptedBySigint = true;
+      child.kill('SIGTERM');
+    };
+    process.once('SIGINT', onSigint);
+
+    // Per-call timeout. The default (30 min) lives here, not in the emit, so
+    // changing the default doesn't require recompiling pipelines. The handler
+    // checks `settled` defensively — if a normal exit + the timer-firing
+    // race, the first settler wins; `cleanup()` (called by both exit and
+    // error handlers) clears the timer so a normal exit can't trigger a
+    // late rejection on an already-resolved promise.
+    const timeoutMs = opts.timeout ?? 30 * 60 * 1000;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      // Inline the SIGINT-off step rather than calling cleanup(): cleanup()
+      // also calls clearTimeout(timer), and we're inside the timer's own
+      // handler — clearTimeout on a firing timer is a no-op but reads as
+      // self-referential. Spelling out the SIGINT removal keeps intent clear.
+      process.off('SIGINT', onSigint);
+      child.kill('SIGTERM');
+      window.finish('error');
+      reject(new Error(`agent '${name}' timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
+
+    const cleanup = (): void => {
+      process.off('SIGINT', onSigint);
+      clearTimeout(timer);
+    };
+
+    // Mini-mode tool-call state machine. Each tool_use block enters at
+    // `content_block_start`, streams its argument JSON via input_json_delta
+    // fragments, and exits at `content_block_stop`. We accumulate fragments
+    // until stop, then parse the JSON and pull the primary argument to show
+    // alongside the tool name (e.g., the file_path for Read). Cleared per
+    // tool block so different tools don't leak state into each other.
+    let currentTool: { name: string; argsBuffer: string } | null = null;
+
+    if (child.stdout) {
+      const lines = readline.createInterface({ input: child.stdout, crlfDelay: Infinity });
+      lines.on('line', (line: string) => {
+        if (opts.cli === 'claude') {
+          // Parse the JSONL event; accumulate text deltas into textBuffer for
+          // the no-producesPath return path; feed anything visible to the
+          // rolling window via the formatter. `result` events carry telemetry
+          // (turns, cost, stop reason) that surfaces on the collapsed
+          // summary line; capture it via `setResult` rather than feeding it
+          // as visible content.
+          if (!line.trim()) return;
+          let evt: StreamEvent;
+          try {
+            evt = JSON.parse(line) as StreamEvent;
+          } catch {
+            // Not JSON — emit verbatim so unparseable lines (stderr leak,
+            // pre-flight notice, etc.) aren't silently dropped. Diverges from
+            // `formatStreamEvent`'s null-on-invalid-JSON behavior: the
+            // formatter suppresses non-JSON because content_block_delta
+            // surrounding it would repaint the slot; the window's `feed` has
+            // no such repaint, so passing the raw line through is the right
+            // default for the no-block case.
+            window.feed(line + '\n');
+            return;
+          }
+          // JSON.parse-valid-but-not-an-object (scalar or array): treat like
+          // the catch path — dereferencing `evt.type` on `null`/`42`/`[1,2]`
+          // would throw inside the readline 'line' callback and escape as
+          // `uncaughtException`. Same fall-through as the unparseable case.
+          if (typeof evt !== 'object' || evt === null || Array.isArray(evt)) {
+            window.feed(line + '\n');
+            return;
+          }
+          if (evt.type === 'result') {
+            window.setResult({
+              num_turns: evt.num_turns,
+              total_cost_usd: evt.total_cost_usd,
+              stop_reason: evt.stop_reason,
+            });
+            return;
+          }
+          if (
+            evt.event?.type === 'content_block_delta' &&
+            evt.event?.delta?.type === 'text_delta'
+          ) {
+            textBuffer += evt.event.delta.text ?? '';
+          }
+          // Display path differs by mode. In full mode (sequential agents)
+          // the 25-row box has room for text deltas + tool args + everything
+          // formatStreamEvent renders. In mini mode (parallel agents, 3
+          // content rows), feeding the full stream fills the box with one
+          // long input_json_delta blob — by the time the user identifies
+          // the tool, the window has scrolled past. Show one line per
+          // tool_use: `◇ <name>: <primary arg>` (e.g., `◇ Read: ACS.md`).
+          // The primary arg is extracted from the accumulated JSON at
+          // `content_block_stop`; tools not in the primary-arg table get
+          // the bare name (`◇ <name>`).
+          if (window.isMini) {
+            const e = evt.event;
+            if (e?.type === 'content_block_start' && e?.content_block?.type === 'tool_use') {
+              currentTool = { name: e.content_block.name ?? '?', argsBuffer: '' };
+            } else if (
+              e?.type === 'content_block_delta' &&
+              e?.delta?.type === 'input_json_delta' &&
+              currentTool !== null
+            ) {
+              currentTool.argsBuffer += e.delta.partial_json ?? '';
+            } else if (e?.type === 'content_block_stop' && currentTool !== null) {
+              const primary = extractPrimaryArg(currentTool.name, currentTool.argsBuffer);
+              const display =
+                primary !== null
+                  ? `  ◇ ${currentTool.name}: ${primary}\n`
+                  : `  ◇ ${currentTool.name}\n`;
+              window.feed(display);
+              currentTool = null;
+            }
+          } else {
+            const formatted = formatStreamEvent(line);
+            if (formatted !== null) window.feed(formatted);
+          }
+        } else {
+          // copilot: raw stdout. Accumulate for the no-producesPath text return; render live to the rolling window.
+          textBuffer += line + '\n';
+          window.feed(line + '\n');
+        }
+      });
+    }
+
+    child.on('error', (err) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      window.finish('error');
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+        reject(
+          new Error(`'${opts.cli}' not found on PATH. Install the cli before running an agent.`),
+        );
+        return;
+      }
+      reject(err);
+    });
+
+    child.on('exit', (code) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      // SIGINT short-circuit: a user Ctrl-C must halt the entire pipeline,
+      // regardless of how the child reported the exit. Claude (and other CLIs)
+      // may handle SIGINT gracefully — cleaning up their TUI and exiting with
+      // code 0 — which would otherwise look identical to a clean run and let
+      // review_loop / parallel march on to the next agent.
+      if (interruptedBySigint) {
+        window.finish('error');
+        reject(new Error(`${opts.cli} (${name}) interrupted by Ctrl-C`));
+        return;
+      }
+      if (code !== 0 && code !== null) {
+        window.finish('error');
+        reject(new Error(`${opts.cli} (${name}) exited with code ${code}`));
+        return;
+      }
+      // code === null typically means signal-killed (Ctrl-C). Treat as failure
+      // so callers don't silently consume an interrupted run.
+      if (code === null) {
+        window.finish('error');
+        reject(new Error(`${opts.cli} (${name}) was killed by signal`));
+        return;
+      }
+      if (producesPathAbs) {
+        if (!existsSync(producesPathAbs)) {
+          window.finish('error');
+          reject(new Error(`agent '${name}' did not write expected file: ${producesPathAbs}`));
+          return;
+        }
+        window.finish('ok');
+        resolve(producesPathAbs);
+        return;
+      }
+      window.finish('ok');
+      resolve(textBuffer.trim());
+    });
+  });
+}
+
+/** Pins the escaping rules an LLM most often gets wrong in prose-bearing
+ *  fields. The prefix `"failed to parse as JSON"` is a load-bearing string:
+ *  the test-broken-then-fixed-reviewer fixture matches it as the
+ *  retry-detection signal that distinguishes a first call from a retry.
+ *  Reword carefully. */
+export function buildCorrectivePrompt(filePath: string, errorDetail: string): string {
+  return `Your previous output at ${filePath} failed to parse as JSON. First error: ${errorDetail}.
+
+Read your previous file with your Read tool, find the issue, and rewrite the file with valid JSON. Escape any literal " as \\" and any literal \\ as \\\\ inside string values.`;
+}

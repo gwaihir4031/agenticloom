@@ -1,0 +1,9 @@
+node_modules/
+dist/
+loom/runs/
+coverage/
+
+# Smoke-test tree (smoke_test/) is tracked, EXCEPT per-run workspaces
+# created by `cd smoke_test && loom run ...`. Those are auto-regenerated
+# and never load-bearing for future runs.
+smoke_test/loom/runs/

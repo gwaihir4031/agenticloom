@@ -1,0 +1,27 @@
+# Expected failure: retry_from='par' targets a parallel block (compound).
+# v0.1.x rejects compound primitives as retry_from targets (review_loop,
+# parallel, branch). Workaround: keep the retry zone atomic.
+pipeline: unhappy-6-retry-from-compound-target-claude
+cli: claude
+default_extra_args: ['--model', 'haiku']
+inputs: [topic]
+flow:
+  - parallel:
+      - step: ac-writer
+        input: $topic
+        produces: ACS.md
+        bind: acs
+      - step: spec-writer
+        input: $topic
+        produces: SPEC.md
+        bind: spec
+    bind: par
+  - step: ac-reviewer
+    input: $topic
+    produces: gate.json
+    bind: gate
+    on_fail:
+      verdict_field: status
+      retry_from: par
+      revise_with:
+        prompt: 'Revise per findings.'

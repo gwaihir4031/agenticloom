@@ -1,0 +1,46 @@
+pipeline: smoke-foreach-claude
+cli: claude
+default_extra_args: ['--model', 'haiku']
+inputs: [ticket]
+
+# Smoke pipeline for the foreach primitive. Realistic scenario: a planner
+# decomposes a ticket into 3 implementable tasks, each modifying the
+# shared codebase at smoke_test/codebase/strutil.py. Foreach iterates;
+# each iteration's implementer modifies the codebase file in place +
+# writes per-iter implementation notes; the tester reads those notes,
+# inspects the now-modified codebase, and writes a per-iter test plan.
+#
+# Per-iter outputs (notes.md, tests.md) land in iter-N/ via loom's
+# `produces:` postscript (absolute paths). Codebase modifications use
+# agent-relative paths and land at smoke_test/codebase/ (shared across
+# iters — sequential modifications stack up there). After a smoke run,
+# revert the codebase fixture with `git checkout smoke_test/codebase/`.
+#
+# Verifies end-to-end:
+#  - JSONL upfront validation (planner output parsable)
+#  - Per-iteration scratch dir + body-internal $ref propagation
+#    ($task in iter, $notes in iter)
+#  - Multi-input step (`inputs:` map on the tester)
+#  - Sequential iteration ordering (iter-0/iter-1/iter-2 mods to the
+#    codebase apply in order)
+
+flow:
+  - step: foreach-planner
+    input: $ticket
+    produces: plan.jsonl
+    bind: plan
+
+  - foreach:
+      over: $plan
+      as: task
+      body:
+        - step: foreach-implementer
+          input: $task
+          produces: notes.md
+          bind: notes
+        - step: foreach-tester
+          inputs:
+            task: $task
+            notes: $notes
+          produces: tests.md
+      bind: results

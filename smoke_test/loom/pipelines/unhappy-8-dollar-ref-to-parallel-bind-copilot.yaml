@@ -1,0 +1,20 @@
+# Expected failure: $-ref to a parallel bind (multi-output, can't substitute).
+pipeline: unhappy-8-dollar-ref-to-parallel-bind-copilot
+cli: copilot
+default_extra_args: ['--model', 'gpt-4.1']
+inputs: [topic]
+flow:
+  - parallel:
+      - step: ac-writer
+        input: $topic
+        produces: ACS.md
+        bind: acs
+      - step: spec-writer
+        input: $topic
+        produces: SPEC.md
+        bind: spec
+    bind: par
+  - step: ac-reviewer
+    input: $par
+    produces: gate.json
+    bind: gate

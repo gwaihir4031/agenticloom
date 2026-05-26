@@ -1,0 +1,61 @@
+pipeline: smoke-branch-hoist-sideeffect-retry-claude
+cli: claude
+default_extra_args: ['--model', 'haiku']
+inputs: [topic]
+
+# Smoke pipeline for branch arm bind hoisting — IDEAS Common pattern 3
+# + design point 3 (THE #6 FOLLOW-UP CASE).
+#
+# Side-effect-only single-arm branch used as a retry_from target.
+#
+# Structure:
+#  1. writer produces DRAFT.md (also the retry_from target for re-running
+#     the draft authoring on a later iteration).
+#  2. branch declares bind 'branchPoint' but has only a then-arm.
+#     The arm's terminal is a step WITHOUT `produces:` — pure side effect.
+#     branchPoint is non-consumable (missing_else + non-file-bound terminal)
+#     but is still usable as a retry_from target per design point 8.
+#  3. reviewer runs against the draft.
+#  4. aggregate gate: retry_from: branchPoint + revise_with prompts the
+#     side-effect step on retry. Per design point 3, the rendered revise
+#     prompt is threaded into the terminal step via position-based dispatch
+#     in the branch's closure body — verified end-to-end by smoke.
+#
+# Verifies:
+#  - Non-consumable branch.bind admitted as retry_from target
+#  - Position-based terminal identification threads revise prompt to the
+#    side-effect step on retry
+#  - branchPoint never gets $ref'd downstream (no compile error)
+#
+# Smoke runs: pass a topic. The aggregate verdict comes from the reviewer's
+# produces JSON; if it fails, retry fires and the side-effect step receives
+# the revise prompt.
+
+flow:
+  - step: ac-writer
+    input: $topic
+    produces: DRAFT.md
+    bind: writerOut
+
+  - branch:
+      bind: branchPoint
+      when: writerOut.length > 0
+      then:
+        - step: spec-writer
+          input: $writerOut
+
+  - step: ac-reviewer
+    input: $writerOut
+    produces: review.json
+    bind: rev
+
+  - aggregate:
+      inputs:
+        r: $rev
+      verdict_field: status
+      approve_when: pass
+      bind: overall
+      retry_from: branchPoint
+      max_retries: 1
+      revise_with:
+        prompt: 'Reconsider and revise the draft based on reviewer feedback.'

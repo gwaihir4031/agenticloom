@@ -1,0 +1,54 @@
+pipeline: smoke-branch-hoist-consumable-retry-claude
+cli: claude
+default_extra_args: ['--model', 'haiku']
+inputs: [mode]
+
+# Smoke pipeline for branch arm bind hoisting — IDEAS design point 8.
+# Consumable branch.bind ALSO targeted by retry_from.
+#
+# Structure:
+#  - branch declares bind 'outcome' — both arms terminate in file-bound steps.
+#  - Downstream consumer reads $outcome → classifies as consumable: true.
+#  - aggregate gate retry_from: outcome — admitted regardless of consumability.
+#  - On retry: branch.when re-evaluates (may flip if upstream binds shifted),
+#    and the matching arm's terminal receives the rendered revise prompt
+#    via position-based dispatch (the same mechanism that wires the
+#    side-effect-step pattern in pipeline #3).
+#
+# Verifies:
+#  - retry_from targeting a consumable branch.bind compiles cleanly
+#  - On retry, the rendered revise prompt reaches the terminal step of the
+#    re-fired arm (whichever arm 'when:' selects on the retry pass)
+#  - The branch.bind still produces a usable $ref value downstream after retry
+#
+# Smoke runs: pass any mode. The reviewer's verdict drives whether retry
+# fires; on retry, the branch re-evaluates with the current writer state.
+
+flow:
+  - branch:
+      bind: outcome
+      when: mode === 'bug'
+      then:
+        - step: ac-writer
+          input: $mode
+          produces: FIX.md
+      else:
+        - step: spec-writer
+          input: $mode
+          produces: SPEC.md
+
+  - step: ac-reviewer
+    input: $outcome
+    produces: review.json
+    bind: rev
+
+  - aggregate:
+      inputs:
+        r: $rev
+      verdict_field: status
+      approve_when: pass
+      bind: overall
+      retry_from: outcome
+      max_retries: 1
+      revise_with:
+        prompt: 'Reviewer rejected; revise the artifact in the selected arm.'

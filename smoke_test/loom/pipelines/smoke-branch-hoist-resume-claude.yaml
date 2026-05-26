@@ -1,0 +1,63 @@
+pipeline: smoke-branch-hoist-resume-claude
+cli: claude
+default_extra_args: ['--model', 'haiku']
+inputs: [mode]
+
+# Smoke pipeline for branch arm bind hoisting — IDEAS design point 9
+# (disk-probe rehydration on --resume-from past a consumable file-bound
+# branch).
+#
+# Structure:
+#  - branch declares bind 'outcome' with both arms file-bound. Statically
+#    known terminal paths: FIX.md (then) and SPEC.md (else).
+#  - Post-branch consumer 'rev' reads $outcome via $ref → classifies branch
+#    as consumable: true, kind: file.
+#  - 'summary' depends on rev and outcome.
+#
+# Smoke procedure (two passes — gated by user):
+#
+#  Pass 1 (cold start):
+#    loom run smoke-branch-hoist-resume-claude.yaml <mode> --id resume1
+#    → branch runs, writes (e.g.) FIX.md. Then run completes through rev
+#    and summary.
+#
+#  Pass 2 (resume):
+#    loom run smoke-branch-hoist-resume-claude.yaml <mode> \
+#      --id resume1 --resume-from summary
+#    → cursor sits PAST the branch. emitPreCursorItem's branch case
+#    probes disk for FIX.md and SPEC.md; exactly one exists (the arm that
+#    ran on pass 1). 'outcome' is rehydrated to that path; summary re-runs
+#    against the surviving artifact.
+#
+# Verifies the IIFE rehydration in emitPreCursorItem for the
+# `kind: 'file'` consumable-branch case.
+#
+# Edge cases to surface (smoke can be expanded for these):
+#  - Both files exist (manually copied): expect ambiguity error.
+#  - Neither file exists (prior run aborted before branch): expect clear
+#    resume-time error naming both probed paths.
+
+flow:
+  - branch:
+      bind: outcome
+      when: mode === 'bug'
+      then:
+        - step: ac-writer
+          input: $mode
+          produces: FIX.md
+      else:
+        - step: spec-writer
+          input: $mode
+          produces: SPEC.md
+
+  - step: ac-reviewer
+    input: $outcome
+    produces: review.json
+    bind: rev
+
+  - step: ac-writer
+    inputs:
+      artifact: $outcome
+      reviewer: $rev
+    produces: SUMMARY.md
+    bind: summary

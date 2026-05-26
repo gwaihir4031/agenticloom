@@ -1,0 +1,31 @@
+pipeline: smoke-branch-hoist-resume-copilot
+cli: copilot
+default_extra_args: ['--model', 'gpt-4.1']
+inputs: [mode]
+
+# Copilot-CLI variant of smoke-branch-hoist-resume-claude.yaml.
+
+flow:
+  - branch:
+      bind: outcome
+      when: mode === 'bug'
+      then:
+        - step: ac-writer
+          input: $mode
+          produces: FIX.md
+      else:
+        - step: spec-writer
+          input: $mode
+          produces: SPEC.md
+
+  - step: ac-reviewer
+    input: $outcome
+    produces: review.json
+    bind: rev
+
+  - step: ac-writer
+    inputs:
+      artifact: $outcome
+      reviewer: $rev
+    produces: SUMMARY.md
+    bind: summary
