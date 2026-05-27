@@ -123,22 +123,25 @@ accessible to downstream steps (parallel children hoist).
 
 ## Authoring with the `loom-author` skill
 
-The repo ships a skill at `skills/loom-author.md` that knows the YAML
-grammar, primitive shapes, and common patterns. Same file works for
-both supported CLIs. Two ways to use it:
+The repo ships a skill at `skills/loom-author/SKILL.md` that knows the
+YAML grammar, primitive shapes, and common patterns. Same file works
+for both supported CLIs. Two ways to use it:
 
-- **As a Claude Code or Copilot CLI skill** — copy the skill file from
-  your agenticloom install to the CLI's skills directory:
+- **As a Claude Code or Copilot CLI skill** — copy the skill directory
+  from your agenticloom install to the CLI's skills directory. The
+  skill must live at `<skills-dir>/loom-author/SKILL.md` for the CLI
+  to discover it:
 
   ```bash
-  # Create the destination directory if it doesn't exist
-  mkdir -p ~/.claude/skills    # (or ~/.copilot/skills for Copilot CLI)
+  # Pick the destination for your CLI (change once, applies below)
+  SKILLS_DIR=~/.claude/skills    # or ~/.copilot/skills for Copilot CLI
+  mkdir -p "$SKILLS_DIR"
 
   # Globally-installed agenticloom (npm install -g agenticloom):
-  cp "$(npm root -g)/agenticloom/skills/loom-author.md" ~/.claude/skills/
+  cp -r "$(npm root -g)/agenticloom/skills/loom-author" "$SKILLS_DIR/"
 
   # Project-local agenticloom (npm install -D agenticloom):
-  cp ./node_modules/agenticloom/skills/loom-author.md ~/.claude/skills/
+  cp -r ./node_modules/agenticloom/skills/loom-author "$SKILLS_DIR/"
   ```
 
   Once installed, your CLI will invoke the skill automatically on
