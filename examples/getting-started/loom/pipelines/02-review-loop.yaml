@@ -1,0 +1,15 @@
+pipeline: 02-review-loop
+cli: claude                              # or 'copilot' — see Before you start
+default_extra_args: ['--model', 'haiku'] # Copilot: ['--model', 'gpt-4.1']
+inputs: [ticket]
+flow:
+  - review_loop:
+      writer: ac-writer
+      reviewer: ac-reviewer
+      input: $ticket
+      max_iters: 2
+      writer_produces: ACS.md
+      reviewer_produces: ac-review.json
+      verdict_field: status
+      approve_when: pass
+      bind: ac_final
