@@ -68,5 +68,6 @@ flow:
       verdict_field: status
       approve_when: pass
       max_retries: 2
+      on_max_exceeded: continue
       revise_with:
         inputs: [$code_verdict]

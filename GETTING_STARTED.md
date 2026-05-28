@@ -295,12 +295,12 @@ When `reviewer:` is a list rather than a single agent name, it is a compound sub
 
 - `inputs:` — a named map of bindings to aggregate. The keys (`security`, `api`, `edge`) are labels; the values (`$sec`, `$api`, `$edge`) reference the bound reviewer outputs.
 - `verdict_field` / `approve_when` — same semantics as in `review_loop`: which JSON key holds the verdict and what value means approved.
-- `require: all_approved` — all three reviewers must pass for the aggregate to emit `pass`. If any one fails, the aggregate emits `fail` and the `review_loop` sends `spec-writer` back to revise `SPEC.md`.
+- `require: all_approved` — all three reviewers must pass for the aggregate to approve. If any one fails, the aggregate does not approve, and the `review_loop` sends `spec-writer` back to revise `SPEC.md`.
 - `bind: spec_verdict` — the aggregate's result is bound for the loop to read. A compound reviewer's terminal `aggregate` must declare `bind:`; loom enforces this at compile time.
 
 **How the loop re-runs on fail**
 
-If the aggregate result is `fail`, loom invokes `spec-writer` again. The reviewer's findings (the three JSON files) are appended to `spec-writer`'s prompt so it knows what to address.
+If the aggregate does not approve, loom invokes `spec-writer` again. The reviewer's findings (the three JSON files) are appended to `spec-writer`'s prompt so it knows what to address.
 
 ### Diagram
 
@@ -420,6 +420,7 @@ flow:
       verdict_field: status
       approve_when: pass
       max_retries: 2
+      on_max_exceeded: continue
       revise_with:
         inputs: [$code_verdict]
 ```
@@ -438,7 +439,8 @@ Three steps are added after the spec review: `implementer`, `tester`, and `code-
 
 - `retry_from: impl` — if the code-reviewer emits a failing verdict, loom replays the zone starting from the step whose `bind` is `impl` (the `implementer` step). The `tester` is included in the zone between `impl` and `code-reviewer`, so it re-runs too.
 - `verdict_field` / `approve_when` — same contract as in `review_loop`: the JSON key and the pass value.
-- `max_retries: 2` — the maximum number of retry attempts. After two retries the pipeline continues with the last produced artifact.
+- `max_retries: 2` — the maximum number of retry attempts before the gate gives up.
+- `on_max_exceeded: continue` — what loom does once those retries are exhausted without a passing verdict. `continue` keeps the last produced artifact and lets the pipeline proceed. The default is `fail`, which throws and halts the whole pipeline — so this field is load-bearing here: omit it and an unfixable verdict would stop the run.
 - `revise_with.inputs: [$code_verdict]` — the bound path of `code-review.json` is appended to the implementer's prompt on retry, so the implementer knows what to fix.
 
 ### What changed
@@ -534,6 +536,7 @@ flow:
             verdict_field: status
             approve_when: pass
             max_retries: 2
+            on_max_exceeded: continue
             revise_with:
               inputs: [$code_verdict]
       bind: results
@@ -555,11 +558,11 @@ The JSONL format is what tells `foreach` how to iterate: each line becomes one i
 
 **`foreach` fields (new in this chapter)**
 
-- `over: $plan` — the JSONL file to iterate over. Each line is parsed as a JSON object and passed as the iteration's task input.
-- `as: task` — the name to bind each iteration's input to within the body. Inside the body, `$task` is the current subtask object.
+- `over: $plan` — the JSONL file to iterate over. loom reads it line by line; each non-empty line becomes one iteration.
+- `as: task` — the per-iteration bind name. Inside the body, `$task` resolves to the absolute path of that line's extracted `task.json` (the agent reads the subtask from that path).
 - `body:` — the list of steps to run for each task. This is a self-contained scope: bindings declared inside (`impl`, `tests`, `code_verdict`) are local to each iteration and do not leak out.
-- `bind: results` — after all iterations complete, `$results` is bound to the list of outputs produced by each iteration.
-- `on_iteration_fail: continue` — if one iteration's `on_fail` retries are exhausted without approval, loom continues to the next task rather than aborting the entire `foreach`.
+- `bind: results` — a list-bound rejoin variable for the whole run. It can't be `$ref`-consumed by a later step; per-iteration outputs are read from disk at `loom/runs/<id>/results/iter-N/`.
+- `on_iteration_fail: continue` — if an iteration throws an unexpected error (say, an agent crash), loom warns and moves on to the next task instead of aborting the whole `foreach`. Retry-exhaustion is already handled gracefully by the gate's `on_max_exceeded: continue` above; a deliberate halt still propagates regardless.
 
 **`on_fail` inside `foreach`**
 
