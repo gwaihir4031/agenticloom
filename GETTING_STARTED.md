@@ -716,10 +716,3 @@ Every field for every primitive is documented in [`PRIMITIVES.md`](PRIMITIVES.md
 
 If you use Claude Code, the `loom-author` skill is available in this repo. It knows loom's YAML schema and can draft or modify pipeline YAMLs from a description. Invoke it with `/loom-author` followed by what you want to build.
 
-**Battle-tested pipelines — `smoke_test/`**
-
-The [`smoke_test/`](smoke_test/) directory contains integration-test pipelines that run against real tickets on every CI pass. They are more complete and more carefully tuned than the tutorial stubs. Reading them is a good way to see how production-quality personas and pipelines differ from the minimal examples in this guide.
-
-**The next primitive — `branch`**
-
-`branch` lets you route flow conditionally based on the contents of a bound artifact. It is not covered in this guide (out of scope by design), but it is documented in `PRIMITIVES.md` and is the natural next primitive to explore once you are comfortable with the six covered here.
