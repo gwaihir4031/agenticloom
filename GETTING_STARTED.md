@@ -163,3 +163,55 @@ flowchart TD
 ### What changed
 
 Chapter 1's single `step` became a `review_loop` — `ac-writer` and `ac-reviewer` now iterate until the reviewer approves or the iteration cap is reached.
+
+---
+
+## Chapter 3 — Pause for a human (`human_gate`)
+
+### Why
+
+Automated reviewers can catch structural problems, but some judgment calls need a human. The `human_gate` primitive pauses the pipeline, hands control to a specified agent in interactive mode, and resumes when the human is done. It is the one non-deterministic primitive: loom cannot predict when it exits.
+
+### YAML
+
+```yaml
+pipeline: 03-human-gate
+cli: claude                              # or 'copilot' — see Before you start
+default_extra_args: ['--model', 'haiku'] # Copilot: ['--model', 'gpt-4.1']
+inputs: [ticket]
+flow:
+  - review_loop:
+      writer: ac-writer
+      reviewer: ac-reviewer
+      input: $ticket
+      max_iters: 2
+      writer_produces: ACS.md
+      reviewer_produces: ac-review.json
+      verdict_field: status
+      approve_when: pass
+      bind: ac_final
+  - human_gate:
+      interactive: true
+      agent: ac-writer
+      input: $ac_final
+      prompt: |
+        ACS.md passed automated review. Iterate with the user —
+        answer open questions, refine wording, surface gaps.
+```
+
+### Walkthrough
+
+**`human_gate` fields (new in this chapter)**
+
+- `interactive: true` — launches the agent in interactive mode (the CLI's interactive flag) so the user can converse with it directly in the terminal.
+- `agent` — the persona to invoke at the gate. Using `ac-writer` here means the same agent that produced the ACS is the one refining it interactively.
+- `input: $ac_final` — the approved ACS file from the `review_loop`. The agent receives this as context so it can discuss and revise the existing document rather than starting over.
+- `prompt` — additional instructions for the agent at this gate. The `|` literal-block scalar preserves line breaks.
+
+**Threading `$ac_final`**
+
+`$ac_final` was bound by the `review_loop` in the previous step. The `human_gate` picks it up by name. This is how loom threads outputs through a pipeline: each primitive declares what it produces (`bind`), and downstream primitives consume it by `$name`.
+
+### What changed
+
+A `human_gate` was added after the `review_loop`. After automated review approves `ACS.md`, the pipeline pauses and you can refine it interactively with `ac-writer` before the pipeline continues.
