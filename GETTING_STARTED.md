@@ -338,3 +338,109 @@ flowchart TD
 ### What changed
 
 A second `review_loop` was added after the human gate. `spec-writer` produces `SPEC.md` from the approved ACS; three reviewers run in parallel and their verdicts are aggregated before the loop decides whether to loop.
+
+---
+
+## Chapter 5 — Implement with fail-retry (`on_fail`)
+
+### Why
+
+Writing an implementation, testing it, and reviewing the result is a tight loop that should self-correct without human input. The `on_fail` field turns the gate step of a sequential zone into a retry trigger: if the reviewer fails, loom replays the zone from a named starting point, feeding the reviewer's findings back to the implementer.
+
+### YAML
+
+```yaml
+pipeline: 05-impl-retry
+cli: claude                              # or 'copilot' — see Before you start
+default_extra_args: ['--model', 'haiku'] # Copilot: ['--model', 'gpt-4.1']
+inputs: [ticket]
+flow:
+  - review_loop:
+      writer: ac-writer
+      reviewer: ac-reviewer
+      input: $ticket
+      max_iters: 2
+      writer_produces: ACS.md
+      reviewer_produces: ac-review.json
+      verdict_field: status
+      approve_when: pass
+      bind: ac_final
+  - human_gate:
+      interactive: true
+      agent: ac-writer
+      input: $ac_final
+      prompt: |
+        ACS.md passed automated review. Iterate with the user.
+  - review_loop:
+      writer: spec-writer
+      input: $ac_final
+      max_iters: 1
+      writer_produces: SPEC.md
+      approve_when: pass
+      bind: spec
+      reviewer:
+        - parallel:
+            - step: security-reviewer
+              input: $spec
+              produces: security-review.json
+              bind: sec
+            - step: api-design-reviewer
+              input: $spec
+              produces: api-review.json
+              bind: api
+            - step: edge-case-reviewer
+              input: $spec
+              produces: edge-review.json
+              bind: edge
+        - aggregate:
+            inputs:
+              security: $sec
+              api: $api
+              edge: $edge
+            verdict_field: status
+            approve_when: pass
+            require: all_approved
+            bind: spec_verdict
+  - step: implementer
+    input: $spec
+    produces: impl.md
+    bind: impl
+  - step: tester
+    input: $impl
+    produces: tests.md
+    bind: tests
+  - step: code-reviewer
+    inputs:
+      impl: $impl
+      tests: $tests
+    produces: code-review.json
+    bind: code_verdict
+    on_fail:
+      retry_from: impl
+      verdict_field: status
+      approve_when: pass
+      max_retries: 2
+      revise_with:
+        inputs: [$code_verdict]
+```
+
+### Walkthrough
+
+**The implementation zone (new in this chapter)**
+
+Three steps are added after the spec review: `implementer`, `tester`, and `code-reviewer`. They run sequentially — the implementer writes `impl.md`, the tester writes `tests.md` based on the implementation, and the code-reviewer reads both.
+
+**`step` with multiple inputs**
+
+`code-reviewer` uses `inputs:` (plural) — a named map — instead of the single `input:` used in previous steps. Each key is a label the agent can use to distinguish the files.
+
+**`on_fail` fields (new in this chapter)**
+
+- `retry_from: impl` — if the code-reviewer emits a failing verdict, loom replays the zone starting from the step whose `bind` is `impl` (the `implementer` step). The `tester` is included in the zone between `impl` and `code-reviewer`, so it re-runs too.
+- `verdict_field` / `approve_when` — same contract as in `review_loop`: the JSON key and the pass value.
+- `max_retries: 2` — the maximum number of retry attempts. After two retries the pipeline continues with the last produced artifact.
+- `revise_with.inputs: [$code_verdict]` — the bound path of `code-review.json` is appended to the implementer's prompt on retry, so the implementer knows what to fix.
+
+### What changed
+
+Three steps were appended after the spec `review_loop`: `implementer` → `tester` → `code-reviewer`. The `code-reviewer` carries `on_fail`, turning it into a self-correcting retry zone.
