@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Getting-started guide (`GETTING_STARTED.md`) — a six-chapter walkthrough that builds one multi-agent pipeline from `step` through `foreach`, with a runnable starter pack at `examples/getting-started/` for both Claude Code and Copilot CLI.
+
 ## [0.1.1] - 2026-05-27
 
 ### Fixed
