@@ -37,7 +37,16 @@ cli: copilot                              # was: cli: claude
 default_extra_args: ['--model', 'gpt-4.1'] # was: ['--model', 'haiku']
 ```
 
-Persona files for Copilot use a different frontmatter format (lowercase array `tools:` in `.github/agents/` rather than PascalCase comma-separated `tools:` in `.claude/agents/`). The starter pack ships both directories so both CLIs work out of the box — see `examples/getting-started/README.md` for a one-liner `sed` that swaps all six pipeline YAMLs at once.
+Persona files for Copilot use a different frontmatter format (lowercase array `tools:` in `.github/agents/` rather than PascalCase comma-separated `tools:` in `.claude/agents/`). The starter pack ships both directories, so both CLIs work out of the box.
+
+If you're following along in `examples/getting-started/`, this `sed` makes both header changes across all six pipelines at once:
+
+```bash
+sed -i.bak \
+  -e 's/^cli: claude/cli: copilot/' \
+  -e "s/\['--model', 'haiku'\]/['--model', 'gpt-4.1']/" \
+  loom/pipelines/*.yaml
+```
 
 ### Following along
 
@@ -45,14 +54,20 @@ The `examples/getting-started/` directory is a runnable companion to this guide.
 
 ```bash
 cd examples/getting-started
-loom run 01-first-step ticket.md
+loom run 01-first-step ticket.md --id ch1
 ```
 
-`loom run` takes the pipeline name and the ticket file as positional arguments. Chapters 3 through 6 include a `human_gate` that will pause and hand control to you interactively.
+`loom run` takes the pipeline name and the ticket file as positional arguments. The `--id ch1` names the run's output directory (`loom/runs/ch1/`) — give each chapter its own id, because otherwise loom derives the id from the ticket filename and every chapter would reuse the same directory. Each chapter below opens with its own `loom run` command. Chapters 3 through 6 include a `human_gate` that will pause and hand control to you interactively.
 
 ---
 
 ## Chapter 1 — Your first pipeline (`step`)
+
+**Run it:**
+
+```bash
+loom run 01-first-step ticket.md --id ch1
+```
 
 ### Why
 
@@ -99,6 +114,12 @@ This is the baseline — a single agent invocation. Subsequent chapters build on
 ---
 
 ## Chapter 2 — Add a reviewer (`review_loop`)
+
+**Run it:**
+
+```bash
+loom run 02-review-loop ticket.md --id ch2
+```
 
 ### Why
 
@@ -168,6 +189,12 @@ Chapter 1's single `step` became a `review_loop` — `ac-writer` and `ac-reviewe
 
 ## Chapter 3 — Pause for a human (`human_gate`)
 
+**Run it:**
+
+```bash
+loom run 03-human-gate ticket.md --id ch3
+```
+
 ### Why
 
 Automated reviewers can catch structural problems, but some judgment calls need a human. The `human_gate` primitive pauses the pipeline, hands control to a specified agent in interactive mode, and resumes when the human is done. It is the one non-deterministic primitive: loom cannot predict when it exits.
@@ -219,6 +246,12 @@ A `human_gate` was added after the `review_loop`. After automated review approve
 ---
 
 ## Chapter 4 — Parallel reviewers (`parallel` + `aggregate`)
+
+**Run it:**
+
+```bash
+loom run 04-parallel-review ticket.md --id ch4
+```
 
 ### Why
 
@@ -343,6 +376,12 @@ A second `review_loop` was added after the human gate. `spec-writer` produces `S
 
 ## Chapter 5 — Implement with fail-retry (`on_fail`)
 
+**Run it:**
+
+```bash
+loom run 05-impl-retry ticket.md --id ch5
+```
+
 ### Why
 
 Writing an implementation, testing it, and reviewing the result is a tight loop that should self-correct without human input. The `on_fail` field turns the gate step of a sequential zone into a retry trigger: if the reviewer fails, loom replays the zone from a named starting point, feeding the reviewer's findings back to the implementer.
@@ -450,6 +489,12 @@ Three steps were appended after the spec `review_loop`: `implementer` → `teste
 ---
 
 ## Chapter 6 — Scale via planner + foreach (`foreach`)
+
+**Run it:**
+
+```bash
+loom run 06-foreach ticket.md --id ch6
+```
 
 ### Why
 
