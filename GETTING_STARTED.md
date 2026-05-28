@@ -171,6 +171,8 @@ flow:
 - `approve_when` — the value of `verdict_field` that means "approved". Loom exits the loop early as soon as the reviewer emits this value.
 - `bind: ac_final` — binds the path of the final approved artifact, so later steps can reference it as `$ac_final`.
 
+This is your first real piece of context engineering (chapter 0): you decided what the writer sees — the ticket, and on later passes the reviewer's feedback that loom folds in for you — and what the reviewer must hand back. Every chapter from here is the same move with more pieces in play.
+
 **The reviewer JSON contract — loom provides it**
 
 Notice that `ac-reviewer`'s persona never specifies an output format; it only says *what* to evaluate. That is deliberate: when a `review_loop` names a single reviewer agent — as this one names `ac-reviewer` — loom appends the verdict JSON shape to that reviewer's prompt automatically. The shape it injects is:
@@ -470,13 +472,16 @@ flow:
     produces: impl-summary.md
     bind: impl
   - step: tester
-    input: $impl
+    inputs:
+      acs: $ac_final
+      spec: $spec
+      impl: $impl
     produces: test-summary.md
     bind: tests
   - step: code-reviewer
     inputs:
-      impl: $impl
-      tests: $tests
+      acs: $ac_final
+      spec: $spec
     produces: code-review.json
     bind: code_verdict
     on_fail:
@@ -490,22 +495,22 @@ flow:
 
 ### Walkthrough
 
-**The implementation zone (new in this chapter)**
+**The implementation zone — context engineering, with more to weigh**
 
-Three steps run after the spec is approved: `implementer`, `tester`, and `code-reviewer`. This is where chapter 0's context-engineering distinction gets concrete. The `implementer` writes **real TypeScript into `src/`** in your working directory; its `produces:` file (`impl-summary.md`) is a short **hand-off note** — what it built and where — not the code itself. The `tester` reads that note and the code in `src/`, then writes **real tests into `src/`**, leaving its own note. The `code-reviewer` reads both notes plus the actual `src/` files and emits a verdict.
+Three steps run after the spec is approved: `implementer`, `tester`, and `code-reviewer`. You have been doing context engineering since chapter 2 — every `input:` and verdict contract was a choice about what an agent sees. This chapter is where it gets the most interesting: the three steps each need a *different* slice of context, and one of them is shaped as much by what you leave out as by what you put in. For each, ask: *what does this agent need in front of it to do its job well — and what would only distract it or pull it off course?* The goal isn't the *least* context; it's the **right** context — everything the job needs, and none of the noise that invites drift.
 
-So the artifacts loom threads between steps (`$impl`, `$tests`) are *context*; the implementation accumulates in `src/`, exactly as it would if you were working in the repo by hand.
+- **What does the `implementer` need?** The contract to build against — `$spec`. (Not the raw ticket or the review threads behind it: the spec already distills those, so piling them on would just be noise.) It writes **real TypeScript into `src/`**; its `produces:` (`impl-summary.md`) is a short **hand-off note** (what it built and where), not the code itself.
+- **What does the `tester` need?** The **requirements** it must verify — `$ac_final` and `$spec` — plus the implementer's note as a pointer to what changed. This is deliberate: a tester handed only the implementer's note would test what was *built*, not what was *required*, and would rubber-stamp whatever the implementer skipped. Give it the contract, and it tests against the contract.
+- **What does the `code-reviewer` need?** Only the **requirements** — `$ac_final` and `$spec` — plus the real code in `src/`. Here the move is what you *leave out*: no implementer or tester notes. A reviewer should judge the artifacts against the spec, not be steered by the producers' account of their own work. Less noise in, a more honest verdict out.
 
-**`step` with multiple inputs**
-
-`code-reviewer` uses `inputs:` (plural) — a named map — instead of the single `input:` used in earlier steps. Each key is a label the agent sees, so it can tell the implementation note from the test note.
+Each `inputs:` map is one of those decisions made concrete. (`tester` and `code-reviewer` take `inputs:` — a named map — rather than a single `input:`.) The files loom threads between steps are the context you chose to pass; the implementation itself accumulates in `src/`, as if you were working in the repo by hand.
 
 **`on_fail` fields (new in this chapter)**
 
 - `retry_from: impl` — if the code-reviewer emits a failing verdict, loom replays the zone from the step bound `impl` (the `implementer`). `tester` sits between them, so it re-runs too; the implementer fixes `src/` based on the review.
 - `verdict_field` / `approve_when` — same contract as in `review_loop`: the JSON key to read and the value that means approved.
 - `max_retries: 2` — how many times the zone may replay before the gate gives up.
-- `revise_with.inputs: [$code_verdict]` — on retry, the path of `code-review.json` is added to the implementer's prompt, so it knows what to fix.
+- `revise_with.inputs: [$code_verdict]` — context engineering for the *retry*, not just the forward path. It defines the feedback loom carries back to the implementer when the zone replays: the review verdict (`$code_verdict`) and its findings, so it fixes the specific problems the reviewer raised rather than guessing. Choosing what flows back into a retry is as deliberate a context decision as choosing the initial inputs — and the retry loop itself is the harness doing the recovery you'd otherwise do by hand.
 
 Notice there is **no `on_max_exceeded`** here, so it takes its default, `fail`: if the work still hasn't passed after the retries, the zone gives up and the run **halts**. Since `code-reviewer` is the last step, that is the sensible default — better to stop than to finish quietly with code that never passed review. (Chapter 6 overrides this, for a reason that only applies inside `foreach`.)
 
@@ -594,13 +599,16 @@ flow:
           produces: impl-summary.md
           bind: impl
         - step: tester
-          input: $impl
+          inputs:
+            task: $task
+            spec: $spec
+            impl: $impl
           produces: test-summary.md
           bind: tests
         - step: code-reviewer
           inputs:
-            impl: $impl
-            tests: $tests
+            task: $task
+            spec: $spec
           produces: code-review.json
           bind: code_verdict
           on_fail:
@@ -635,6 +643,10 @@ The JSONL format is what tells `foreach` how to iterate: each line becomes one i
 - `body:` — the steps to run for each task. Each iteration's binds (`impl`, `tests`, `code_verdict`) are local to that iteration and do not leak out.
 - `bind: results` — a list-bound rejoin variable for the whole run; it can't be `$ref`-consumed by a later step.
 - `on_iteration_fail: continue` — if an iteration throws an unexpected error (an agent crash, say), loom warns and moves to the next task instead of aborting the whole `foreach`. (Retry-exhaustion is handled by the gate's `on_max_exceeded: continue` above; a deliberate halt still propagates.)
+
+**Wiring context into the body**
+
+The body follows the same context discipline as chapter 5, applied per subtask. The `tester` gets the subtask (`$task`) and `$spec` plus the implementer's note, so it tests against this task's requirement; the `code-reviewer` gets only `$task` and `$spec` — no producer notes — and judges the real code in `src/`. (`$spec` is an outer bind: a `foreach` body can read binds from the enclosing flow, not just its own `$task`. You are engineering each agent's context exactly as in chapter 5, one rung deeper.)
 
 **What's isolated, and what isn't**
 

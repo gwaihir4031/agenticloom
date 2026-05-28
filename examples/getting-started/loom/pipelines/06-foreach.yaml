@@ -62,13 +62,16 @@ flow:
           produces: impl-summary.md
           bind: impl
         - step: tester
-          input: $impl
+          inputs:
+            task: $task
+            spec: $spec
+            impl: $impl
           produces: test-summary.md
           bind: tests
         - step: code-reviewer
           inputs:
-            impl: $impl
-            tests: $tests
+            task: $task
+            spec: $spec
           produces: code-review.json
           bind: code_verdict
           on_fail:
