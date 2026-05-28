@@ -444,3 +444,191 @@ Three steps are added after the spec review: `implementer`, `tester`, and `code-
 ### What changed
 
 Three steps were appended after the spec `review_loop`: `implementer` → `tester` → `code-reviewer`. The `code-reviewer` carries `on_fail`, turning it into a self-correcting retry zone.
+
+---
+
+## Chapter 6 — Scale via planner + foreach (`foreach`)
+
+### Why
+
+A real spec decomposes into multiple independent subtasks. Implementing them in one shot puts too much in a single context window and makes retry zones blunt. The `planner` agent reads the spec and emits a JSONL task list; `foreach` iterates over it, running the same implementation zone per task. The number of tasks is determined at runtime — you do not need to know it when writing the pipeline.
+
+### YAML
+
+```yaml
+pipeline: 06-foreach
+cli: claude                              # or 'copilot' — see Before you start
+default_extra_args: ['--model', 'haiku'] # Copilot: ['--model', 'gpt-4.1']
+inputs: [ticket]
+flow:
+  - review_loop:
+      writer: ac-writer
+      reviewer: ac-reviewer
+      input: $ticket
+      max_iters: 2
+      writer_produces: ACS.md
+      reviewer_produces: ac-review.json
+      verdict_field: status
+      approve_when: pass
+      bind: ac_final
+  - human_gate:
+      interactive: true
+      agent: ac-writer
+      input: $ac_final
+      prompt: |
+        ACS.md passed automated review. Iterate with the user.
+  - review_loop:
+      writer: spec-writer
+      input: $ac_final
+      max_iters: 1
+      writer_produces: SPEC.md
+      approve_when: pass
+      bind: spec
+      reviewer:
+        - parallel:
+            - step: security-reviewer
+              input: $spec
+              produces: security-review.json
+              bind: sec
+            - step: api-design-reviewer
+              input: $spec
+              produces: api-review.json
+              bind: api
+            - step: edge-case-reviewer
+              input: $spec
+              produces: edge-review.json
+              bind: edge
+        - aggregate:
+            inputs:
+              security: $sec
+              api: $api
+              edge: $edge
+            verdict_field: status
+            approve_when: pass
+            require: all_approved
+            bind: spec_verdict
+  - step: planner
+    input: $spec
+    produces: plan.jsonl
+    bind: plan
+  - foreach:
+      over: $plan
+      as: task
+      body:
+        - step: implementer
+          input: $task
+          produces: impl.md
+          bind: impl
+        - step: tester
+          input: $impl
+          produces: tests.md
+          bind: tests
+        - step: code-reviewer
+          inputs:
+            impl: $impl
+            tests: $tests
+          produces: code-review.json
+          bind: code_verdict
+          on_fail:
+            retry_from: impl
+            verdict_field: status
+            approve_when: pass
+            max_retries: 2
+            revise_with:
+              inputs: [$code_verdict]
+      bind: results
+      on_iteration_fail: continue
+```
+
+### Walkthrough
+
+**`planner` step**
+
+`planner` is a standard `step` that reads `$spec` and writes `plan.jsonl` — one JSON object per line, each a subtask:
+
+```jsonl
+{"id": "task-1", "title": "Token-bucket core", "details": "..."}
+{"id": "task-2", "title": "Express middleware", "details": "..."}
+```
+
+The JSONL format is what tells `foreach` how to iterate: each line becomes one iteration's input, bound to `$task`.
+
+**`foreach` fields (new in this chapter)**
+
+- `over: $plan` — the JSONL file to iterate over. Each line is parsed as a JSON object and passed as the iteration's task input.
+- `as: task` — the name to bind each iteration's input to within the body. Inside the body, `$task` is the current subtask object.
+- `body:` — the list of steps to run for each task. This is a self-contained scope: bindings declared inside (`impl`, `tests`, `code_verdict`) are local to each iteration and do not leak out.
+- `bind: results` — after all iterations complete, `$results` is bound to the list of outputs produced by each iteration.
+- `on_iteration_fail: continue` — if one iteration's `on_fail` retries are exhausted without approval, loom continues to the next task rather than aborting the entire `foreach`.
+
+**`on_fail` inside `foreach`**
+
+The `on_fail` on `code-reviewer` works the same way as in chapter 5. Loom resolves `retry_from: impl` against the body's local scope, so it replays only the current iteration's `implementer` → `tester` → `code-reviewer` zone — not any other iteration's work.
+
+### Diagram
+
+```mermaid
+flowchart TD
+    n1[/"ticket"/]
+    subgraph n2["review_loop (max_iters: 2, approve_when: pass)"]
+        n3(["ac-writer"])
+        n4(["ac-reviewer"])
+        n3 -->|"writer_produces"| n4
+        n4 -.->|"on fail"| n3
+    end
+    n5{{"human_gate (interactive): ac-writer"}}
+    n3 --> n5
+    subgraph n6["review_loop (max_iters: 1, approve_when: pass)"]
+        n7(["spec-writer"])
+        subgraph n8["parallel"]
+            n9(["security-reviewer"])
+            n10(["api-design-reviewer"])
+            n11(["edge-case-reviewer"])
+        end
+        n12[/"aggregate: security, api, edge"\]
+        n9 --> n12
+        n10 --> n12
+        n11 --> n12
+        n7 -->|"writer_produces"| n9
+        n7 -->|"writer_produces"| n10
+        n7 -->|"writer_produces"| n11
+        n12 -.->|"on fail"| n7
+    end
+    n5 --> n7
+    n13(["planner"])
+    n7 --> n13
+    subgraph results["foreach: results over $plan (as task)"]
+        n14(["implementer"])
+        n15(["tester"])
+        n14 --> n15
+        n16(["code-reviewer"])
+        n16 -.->|retry × 2| n14
+        n15 --> n16
+    end
+    n13 --> n14
+    n1 --> n3
+```
+
+### What changed
+
+Chapter 5's single-shot `implementer` → `tester` → `code-reviewer` zone was replaced by a `planner` step followed by a `foreach` that runs the same zone independently for each subtask in the plan.
+
+---
+
+## Chapter 7 — Where to go next
+
+**Full field reference — `PRIMITIVES.md`**
+
+Every field for every primitive is documented in [`PRIMITIVES.md`](PRIMITIVES.md) at the repo root. When you need exact semantics, required vs. optional fields, or type constraints, that is the definitive reference.
+
+**AI-assisted pipeline authoring — the `loom-author` skill**
+
+If you use Claude Code, the `loom-author` skill is available in this repo. It knows loom's YAML schema and can draft or modify pipeline YAMLs from a description. Invoke it with `/loom-author` followed by what you want to build.
+
+**Battle-tested pipelines — `smoke_test/`**
+
+The [`smoke_test/`](smoke_test/) directory contains integration-test pipelines that run against real tickets on every CI pass. They are more complete and more carefully tuned than the tutorial stubs. Reading them is a good way to see how production-quality personas and pipelines differ from the minimal examples in this guide.
+
+**The next primitive — `branch`**
+
+`branch` lets you route flow conditionally based on the contents of a bound artifact. It is not covered in this guide (out of scope by design), but it is documented in `PRIMITIVES.md` and is the natural next primitive to explore once you are comfortable with the six covered here.
