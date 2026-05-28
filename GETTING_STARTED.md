@@ -36,10 +36,7 @@ Every pipeline in this guide ships with `cli: claude` and a Claude model in `def
 cli: copilot                              # was: cli: claude
 default_extra_args: ['--model', 'gpt-4.1'] # was: ['--model', 'haiku']
 ```
-
-Persona files for Copilot use a different frontmatter format (lowercase array `tools:` in `.github/agents/` rather than PascalCase comma-separated `tools:` in `.claude/agents/`). The starter pack ships both directories, so both CLIs work out of the box.
-
-If you're following along in `examples/getting-started/`, this `sed` makes both header changes across all six pipelines at once:
+Or use this `sed` to make both header changes across all six pipelines at once:
 
 ```bash
 sed -i.bak \
@@ -47,6 +44,10 @@ sed -i.bak \
   -e "s/\['--model', 'haiku'\]/['--model', 'gpt-4.1']/" \
   loom/pipelines/*.yaml
 ```
+
+Persona files for Copilot use a different frontmatter format (lowercase array `tools:` in `.github/agents/` rather than PascalCase comma-separated `tools:` in `.claude/agents/`). The starter pack ships both directories, so both CLIs work out of the box.
+
+
 
 ### Following along
 
@@ -157,15 +158,24 @@ flow:
 - `approve_when` — the value of `verdict_field` that means "approved". Loom exits the loop early as soon as the reviewer emits this value.
 - `bind: ac_final` — binds the path of the final approved artifact, so later steps can reference it as `$ac_final`.
 
-**The reviewer JSON contract**
+**The reviewer JSON contract — loom provides it**
 
-Reviewer personas in this guide all emit the same shape:
+Notice that `ac-reviewer`'s persona never specifies an output format; it only says *what* to evaluate. That is deliberate: when a `review_loop` names a single reviewer agent — as this one names `ac-reviewer` — loom appends the verdict JSON shape to that reviewer's prompt automatically. The shape it injects is:
 
 ```json
-{ "status": "pass", "summary": "one-line rationale", "findings": [] }
+{
+  "status": "pass" | "fail",
+  "findings": [
+    {
+      "severity": "blocker" | "major" | "nit",
+      "summary": "single-line summary",
+      "details_md": "full Markdown explanation"
+    }
+  ]
+}
 ```
 
-`status` is exactly `"pass"` or `"fail"`. Keeping this contract consistent across all reviewer personas means you can swap them in and out of any `review_loop` without changing the pipeline.
+loom reads only `verdict_field` (here, `status`) to decide pass/fail; the `findings` are there for the writer to act on when it revises. Because loom owns this contract, every single-agent reviewer emits the same shape without repeating it — the persona stays focused on the evaluation. (A `review_loop` can instead take a *compound* reviewer — several agents plus an `aggregate` — whose agents run as plain steps loom does not inject into; see chapter 4.)
 
 ### Diagram
 
@@ -323,6 +333,8 @@ When `reviewer:` is a list rather than a single agent name, it is a compound sub
 
 - `parallel:` — a list of steps to run concurrently. Each entry is a standard `step` (or a nested subflow). All three reviewers receive `$spec` and run at the same time.
 - Each step has its own `bind:` (`sec`, `api`, `edge`) so the aggregate can reference their outputs individually.
+
+This spec `review_loop` uses a *compound* reviewer — a subflow of `step`s feeding an `aggregate`, rather than the single reviewer agent chapter 2 used. loom injects the verdict shape only for that single-agent form, so here it injects **nothing**: each reviewer step declares its own output — a JSON object with at least the `status` field the aggregate reads.
 
 **`aggregate` fields**
 
