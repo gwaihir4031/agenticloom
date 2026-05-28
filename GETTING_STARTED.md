@@ -215,3 +215,126 @@ flow:
 ### What changed
 
 A `human_gate` was added after the `review_loop`. After automated review approves `ACS.md`, the pipeline pauses and you can refine it interactively with `ac-writer` before the pipeline continues.
+
+---
+
+## Chapter 4 — Parallel reviewers (`parallel` + `aggregate`)
+
+### Why
+
+Three independent review perspectives — security, API design, and edge cases — do not depend on each other's results. Running them sequentially wastes time. The `parallel` primitive fans them out; `aggregate` collects their verdicts and gates the loop on a combined result. Both primitives are used inside a `review_loop`'s `reviewer:` subflow, not as top-level flow steps.
+
+### YAML
+
+```yaml
+pipeline: 04-parallel-review
+cli: claude                              # or 'copilot' — see Before you start
+default_extra_args: ['--model', 'haiku'] # Copilot: ['--model', 'gpt-4.1']
+inputs: [ticket]
+flow:
+  - review_loop:
+      writer: ac-writer
+      reviewer: ac-reviewer
+      input: $ticket
+      max_iters: 2
+      writer_produces: ACS.md
+      reviewer_produces: ac-review.json
+      verdict_field: status
+      approve_when: pass
+      bind: ac_final
+  - human_gate:
+      interactive: true
+      agent: ac-writer
+      input: $ac_final
+      prompt: |
+        ACS.md passed automated review. Iterate with the user.
+  - review_loop:
+      writer: spec-writer
+      input: $ac_final
+      max_iters: 1
+      writer_produces: SPEC.md
+      approve_when: pass
+      bind: spec
+      reviewer:
+        - parallel:
+            - step: security-reviewer
+              input: $spec
+              produces: security-review.json
+              bind: sec
+            - step: api-design-reviewer
+              input: $spec
+              produces: api-review.json
+              bind: api
+            - step: edge-case-reviewer
+              input: $spec
+              produces: edge-review.json
+              bind: edge
+        - aggregate:
+            inputs:
+              security: $sec
+              api: $api
+              edge: $edge
+            verdict_field: status
+            approve_when: pass
+            require: all_approved
+            bind: spec_verdict
+```
+
+### Walkthrough
+
+**The compound `reviewer:` subflow (new in this chapter)**
+
+When `reviewer:` is a list rather than a single agent name, it is a compound subflow. Loom runs it top-to-bottom: here, first the `parallel` fork, then the `aggregate`.
+
+**`parallel` fields**
+
+- `parallel:` — a list of steps to run concurrently. Each entry is a standard `step` (or a nested subflow). All three reviewers receive `$spec` and run at the same time.
+- Each step has its own `bind:` (`sec`, `api`, `edge`) so the aggregate can reference their outputs individually.
+
+**`aggregate` fields**
+
+- `inputs:` — a named map of bindings to aggregate. The keys (`security`, `api`, `edge`) are labels; the values (`$sec`, `$api`, `$edge`) reference the bound reviewer outputs.
+- `verdict_field` / `approve_when` — same semantics as in `review_loop`: which JSON key holds the verdict and what value means approved.
+- `require: all_approved` — all three reviewers must pass for the aggregate to emit `pass`. If any one fails, the aggregate emits `fail` and the `review_loop` sends `spec-writer` back to revise `SPEC.md`.
+- `bind: spec_verdict` — the aggregate's result is bound for the loop to read. A compound reviewer's terminal `aggregate` must declare `bind:`; loom enforces this at compile time.
+
+**How the loop re-runs on fail**
+
+If the aggregate result is `fail`, loom invokes `spec-writer` again. The reviewer's findings (the three JSON files) are appended to `spec-writer`'s prompt so it knows what to address.
+
+### Diagram
+
+```mermaid
+flowchart TD
+    n1[/"ticket"/]
+    subgraph n2["review_loop (max_iters: 2, approve_when: pass)"]
+        n3(["ac-writer"])
+        n4(["ac-reviewer"])
+        n3 -->|"writer_produces"| n4
+        n4 -.->|"on fail"| n3
+    end
+    n5{{"human_gate (interactive): ac-writer"}}
+    n3 --> n5
+    subgraph n6["review_loop (max_iters: 1, approve_when: pass)"]
+        n7(["spec-writer"])
+        subgraph n8["parallel"]
+            n9(["security-reviewer"])
+            n10(["api-design-reviewer"])
+            n11(["edge-case-reviewer"])
+        end
+        n12[/"aggregate: security, api, edge"\]
+        n9 --> n12
+        n10 --> n12
+        n11 --> n12
+        n7 -->|"writer_produces"| n9
+        n7 -->|"writer_produces"| n10
+        n7 -->|"writer_produces"| n11
+        n12 -.->|"on fail"| n7
+    end
+    n5 --> n7
+    n1 --> n3
+```
+
+### What changed
+
+A second `review_loop` was added after the human gate. `spec-writer` produces `SPEC.md` from the approved ACS; three reviewers run in parallel and their verdicts are aggregated before the loop decides whether to loop.
