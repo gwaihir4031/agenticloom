@@ -59,11 +59,11 @@ flow:
       body:
         - step: implementer
           input: $task
-          produces: impl.md
+          produces: impl-summary.md
           bind: impl
         - step: tester
           input: $impl
-          produces: tests.md
+          produces: test-summary.md
           bind: tests
         - step: code-reviewer
           inputs:

@@ -51,11 +51,11 @@ flow:
             bind: spec_verdict
   - step: implementer
     input: $spec
-    produces: impl.md
+    produces: impl-summary.md
     bind: impl
   - step: tester
     input: $impl
-    produces: tests.md
+    produces: test-summary.md
     bind: tests
   - step: code-reviewer
     inputs:
@@ -68,6 +68,5 @@ flow:
       verdict_field: status
       approve_when: pass
       max_retries: 2
-      on_max_exceeded: continue
       revise_with:
         inputs: [$code_verdict]

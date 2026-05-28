@@ -467,11 +467,11 @@ flow:
             bind: spec_verdict
   - step: implementer
     input: $spec
-    produces: impl.md
+    produces: impl-summary.md
     bind: impl
   - step: tester
     input: $impl
-    produces: tests.md
+    produces: test-summary.md
     bind: tests
   - step: code-reviewer
     inputs:
@@ -484,7 +484,6 @@ flow:
       verdict_field: status
       approve_when: pass
       max_retries: 2
-      on_max_exceeded: continue
       revise_with:
         inputs: [$code_verdict]
 ```
@@ -493,23 +492,26 @@ flow:
 
 **The implementation zone (new in this chapter)**
 
-Three steps are added after the spec review: `implementer`, `tester`, and `code-reviewer`. They run sequentially — the implementer writes `impl.md`, the tester writes `tests.md` based on the implementation, and the code-reviewer reads both.
+Three steps run after the spec is approved: `implementer`, `tester`, and `code-reviewer`. This is where chapter 0's context-engineering distinction gets concrete. The `implementer` writes **real TypeScript into `src/`** in your working directory; its `produces:` file (`impl-summary.md`) is a short **hand-off note** — what it built and where — not the code itself. The `tester` reads that note and the code in `src/`, then writes **real tests into `src/`**, leaving its own note. The `code-reviewer` reads both notes plus the actual `src/` files and emits a verdict.
+
+So the artifacts loom threads between steps (`$impl`, `$tests`) are *context*; the implementation accumulates in `src/`, exactly as it would if you were working in the repo by hand.
 
 **`step` with multiple inputs**
 
-`code-reviewer` uses `inputs:` (plural) — a named map — instead of the single `input:` used in previous steps. Each key is a label the agent can use to distinguish the files.
+`code-reviewer` uses `inputs:` (plural) — a named map — instead of the single `input:` used in earlier steps. Each key is a label the agent sees, so it can tell the implementation note from the test note.
 
 **`on_fail` fields (new in this chapter)**
 
-- `retry_from: impl` — if the code-reviewer emits a failing verdict, loom replays the zone starting from the step whose `bind` is `impl` (the `implementer` step). The `tester` is included in the zone between `impl` and `code-reviewer`, so it re-runs too.
-- `verdict_field` / `approve_when` — same contract as in `review_loop`: the JSON key and the pass value.
-- `max_retries: 2` — the maximum number of retry attempts before the gate gives up.
-- `on_max_exceeded: continue` — what loom does once those retries are exhausted without a passing verdict. `continue` keeps the last produced artifact and lets the pipeline proceed. The default is `fail`, which throws and halts the whole pipeline — so this field is load-bearing here: omit it and an unfixable verdict would stop the run.
-- `revise_with.inputs: [$code_verdict]` — the bound path of `code-review.json` is appended to the implementer's prompt on retry, so the implementer knows what to fix.
+- `retry_from: impl` — if the code-reviewer emits a failing verdict, loom replays the zone from the step bound `impl` (the `implementer`). `tester` sits between them, so it re-runs too; the implementer fixes `src/` based on the review.
+- `verdict_field` / `approve_when` — same contract as in `review_loop`: the JSON key to read and the value that means approved.
+- `max_retries: 2` — how many times the zone may replay before the gate gives up.
+- `revise_with.inputs: [$code_verdict]` — on retry, the path of `code-review.json` is added to the implementer's prompt, so it knows what to fix.
+
+Notice there is **no `on_max_exceeded`** here, so it takes its default, `fail`: if the work still hasn't passed after the retries, the zone gives up and the run **halts**. Since `code-reviewer` is the last step, that is the sensible default — better to stop than to finish quietly with code that never passed review. (Chapter 6 overrides this, for a reason that only applies inside `foreach`.)
 
 ### What changed
 
-Three steps were appended after the spec `review_loop`: `implementer` → `tester` → `code-reviewer`. The `code-reviewer` carries `on_fail`, turning it into a self-correcting retry zone.
+After the spec `review_loop`, three steps now do the build — `implementer` → `tester` → `code-reviewer` — writing real code and tests into `src/`. The `code-reviewer` carries `on_fail`, turning the trio into a self-correcting retry zone that halts if the work never passes.
 
 ---
 
@@ -523,7 +525,7 @@ loom run 06-foreach ticket.md --id ch6
 
 ### Why
 
-A real spec decomposes into multiple independent subtasks. Implementing them in one shot puts too much in a single context window and makes retry zones blunt. The `planner` agent reads the spec and emits a JSONL task list; `foreach` iterates over it, running the same implementation zone per task. The number of tasks is determined at runtime — you do not need to know it when writing the pipeline.
+A real feature decomposes into several modules, and implementing them all in one pass crams everything into a single context. Instead, the `planner` agent reads the spec and emits a JSONL list of ordered tasks; `foreach` runs the same implementation zone once per task. The number of tasks is decided at runtime — you do not hard-code it. Each task implements its module into the **same `src/`**, so the pieces build on one another.
 
 ### YAML
 
@@ -589,11 +591,11 @@ flow:
       body:
         - step: implementer
           input: $task
-          produces: impl.md
+          produces: impl-summary.md
           bind: impl
         - step: tester
           input: $impl
-          produces: tests.md
+          produces: test-summary.md
           bind: tests
         - step: code-reviewer
           inputs:
@@ -617,26 +619,30 @@ flow:
 
 **`planner` step**
 
-`planner` is a standard `step` that reads `$spec` and writes `plan.jsonl` — one JSON object per line, each a subtask:
+`planner` is a standard `step` that reads `$spec` and writes `plan.jsonl` — one JSON object per line, each an ordered module task:
 
 ```jsonl
-{"id": "task-1", "title": "Token-bucket core", "details": "..."}
-{"id": "task-2", "title": "Express middleware", "details": "..."}
+{"id": "task-1", "title": "Token-bucket core", "details": "Implement a TokenBucket class in src/tokenBucket.ts ..."}
+{"id": "task-2", "title": "Express middleware", "details": "Implement rateLimiter(opts) in src/rateLimiter.ts using TokenBucket ..."}
 ```
 
-The JSONL format is what tells `foreach` how to iterate: each line becomes one iteration's input, bound to `$task`.
+The JSONL format is what tells `foreach` how to iterate: each line becomes one iteration, its `task.json` bound to `$task`. Ordering matters — the bucket is implemented before the middleware that imports it.
 
 **`foreach` fields (new in this chapter)**
 
-- `over: $plan` — the JSONL file to iterate over. loom reads it line by line; each non-empty line becomes one iteration.
-- `as: task` — the per-iteration bind name. Inside the body, `$task` resolves to the absolute path of that line's extracted `task.json` (the agent reads the subtask from that path).
-- `body:` — the list of steps to run for each task. This is a self-contained scope: bindings declared inside (`impl`, `tests`, `code_verdict`) are local to each iteration and do not leak out.
-- `bind: results` — a list-bound rejoin variable for the whole run. It can't be `$ref`-consumed by a later step; per-iteration outputs are read from disk at `loom/runs/<id>/results/iter-N/`.
-- `on_iteration_fail: continue` — if an iteration throws an unexpected error (say, an agent crash), loom warns and moves on to the next task instead of aborting the whole `foreach`. Retry-exhaustion is already handled gracefully by the gate's `on_max_exceeded: continue` above; a deliberate halt still propagates regardless.
+- `over: $plan` — the JSONL file to iterate. loom reads it line by line; each non-empty line becomes one iteration.
+- `as: task` — the per-iteration bind name. Inside the body, `$task` is the path to that line's extracted `task.json`.
+- `body:` — the steps to run for each task. Each iteration's binds (`impl`, `tests`, `code_verdict`) are local to that iteration and do not leak out.
+- `bind: results` — a list-bound rejoin variable for the whole run; it can't be `$ref`-consumed by a later step.
+- `on_iteration_fail: continue` — if an iteration throws an unexpected error (an agent crash, say), loom warns and moves to the next task instead of aborting the whole `foreach`. (Retry-exhaustion is handled by the gate's `on_max_exceeded: continue` above; a deliberate halt still propagates.)
+
+**What's isolated, and what isn't**
+
+`foreach` isolates each iteration's *context*, not its code. Every agent — including those in a `foreach` body — runs in your working directory, so all the iterations write into the **same `src/`** and their modules compose. What lands in the per-iteration folder (`loom/runs/<id>/results/iter-N/`) is only the `produces:` hand-off notes for that task. This is chapter 0's distinction in action: code is shared and accumulates; context is curated per step.
 
 **`on_fail` inside `foreach`**
 
-The `on_fail` on `code-reviewer` works the same way as in chapter 5. Loom resolves `retry_from: impl` against the body's local scope, so it replays only the current iteration's `implementer` → `tester` → `code-reviewer` zone — not any other iteration's work.
+The `on_fail` on `code-reviewer` works like chapter 5's — `retry_from: impl` replays only the current iteration's zone, not any other iteration's work. One difference: here it sets `on_max_exceeded: continue`, where chapter 5 used the default (`fail`). Inside a batch you usually don't want one stuck task to halt all the rest, so on exhaustion the iteration keeps its last attempt and `foreach` moves on.
 
 ### Diagram
 
@@ -684,7 +690,7 @@ flowchart TD
 
 ### What changed
 
-Chapter 5's single-shot `implementer` → `tester` → `code-reviewer` zone was replaced by a `planner` step followed by a `foreach` that runs the same zone independently for each subtask in the plan.
+Chapter 5's single-shot zone became a `planner` step plus a `foreach` that runs the same `implementer` → `tester` → `code-reviewer` zone once per planned task — each writing into the shared `src/`. The gate now sets `on_max_exceeded: continue`, so one unfixable task doesn't abort the batch.
 
 ---
 
