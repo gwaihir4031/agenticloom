@@ -95,3 +95,71 @@ flow:
 ### What changed
 
 This is the baseline — a single agent invocation. Subsequent chapters build on top of it.
+
+---
+
+## Chapter 2 — Add a reviewer (`review_loop`)
+
+### Why
+
+A single agent cannot check its own work reliably. The `review_loop` primitive pairs a writer with a reviewer: the writer produces an artifact, the reviewer emits a structured verdict, and if the verdict is not `pass` the writer revises — up to `max_iters` times. Loom manages the loop; you just name the agents and the verdict contract.
+
+### YAML
+
+```yaml
+pipeline: 02-review-loop
+cli: claude                              # or 'copilot' — see Before you start
+default_extra_args: ['--model', 'haiku'] # Copilot: ['--model', 'gpt-4.1']
+inputs: [ticket]
+flow:
+  - review_loop:
+      writer: ac-writer
+      reviewer: ac-reviewer
+      input: $ticket
+      max_iters: 2
+      writer_produces: ACS.md
+      reviewer_produces: ac-review.json
+      verdict_field: status
+      approve_when: pass
+      bind: ac_final
+```
+
+### Walkthrough
+
+**`review_loop` fields (new in this chapter)**
+
+- `writer` / `reviewer` — agent persona names. The writer runs first; the reviewer runs on the writer's output.
+- `input` — the initial input passed to the writer on the first iteration. On subsequent iterations, loom automatically appends the reviewer's feedback file to the writer's prompt.
+- `max_iters` — the maximum number of writer passes. If the reviewer does not approve within this many iterations, the loop exits with the last artifact.
+- `writer_produces` / `reviewer_produces` — the file each side writes. The reviewer's file must be valid JSON.
+- `verdict_field` — the JSON key in the reviewer's output that carries the verdict. Here the reviewer writes `{ "status": "pass" | "fail", ... }` and `verdict_field: status` tells loom where to read the decision.
+- `approve_when` — the value of `verdict_field` that means "approved". Loom exits the loop early as soon as the reviewer emits this value.
+- `bind: ac_final` — binds the path of the final approved artifact, so later steps can reference it as `$ac_final`.
+
+**The reviewer JSON contract**
+
+Reviewer personas in this guide all emit the same shape:
+
+```json
+{ "status": "pass", "summary": "one-line rationale", "findings": [] }
+```
+
+`status` is exactly `"pass"` or `"fail"`. Keeping this contract consistent across all reviewer personas means you can swap them in and out of any `review_loop` without changing the pipeline.
+
+### Diagram
+
+```mermaid
+flowchart TD
+    n1[/"ticket"/]
+    subgraph n2["review_loop (max_iters: 2, approve_when: pass)"]
+        n3(["ac-writer"])
+        n4(["ac-reviewer"])
+        n3 -->|"writer_produces"| n4
+        n4 -.->|"on fail"| n3
+    end
+    n1 --> n3
+```
+
+### What changed
+
+Chapter 1's single `step` became a `review_loop` — `ac-writer` and `ac-reviewer` now iterate until the reviewer approves or the iteration cap is reached.
