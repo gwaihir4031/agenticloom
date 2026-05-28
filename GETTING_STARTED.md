@@ -1,6 +1,6 @@
 # Getting started with loom
 
-This guide builds a real multi-agent pipeline from scratch, one primitive per chapter. By the end you will have a pipeline that takes a ticket, writes and refines acceptance criteria with a human-in-the-loop checkpoint, produces a technically reviewed spec, and then implements the spec in parallel subtasks — each with its own build-test-review retry loop. The scenario is a concrete engineering ticket: an in-memory rate-limiter middleware. Estimated time: ~30 minutes.
+This guide builds a real multi-agent pipeline from scratch, one primitive per chapter. By the end you will have a pipeline that takes a ticket, writes and refines acceptance criteria with a human-in-the-loop checkpoint, produces a technically reviewed spec, and then implements the spec in parallel subtasks — each with its own build-test-review retry loop. The scenario is a concrete engineering ticket: an in-memory rate-limiter middleware. More than wiring agents together, you will be doing **context engineering** — deliberately designing the harness each agent runs inside. Estimated time: ~30 minutes.
 
 ---
 
@@ -27,6 +27,19 @@ your prompt and write ACS.md containing Given/When/Then scenarios.
 ```
 
 The frontmatter `name` must match the agent name used in the pipeline. The prompt body is the full system instruction passed to the agent when loom invokes it.
+
+### You're engineering context, not just chaining agents
+
+Keep one idea in mind for the rest of this guide: authoring a loom pipeline is **context engineering**. For each step you decide what the agent sees going in, what it hands off, and how that hand-off reaches the next agent. The pipeline is the deterministic **harness** you build around the agents — and most of its quality comes from the context you route through it, not from the agents themselves.
+
+That is what `produces:` and `$ref` are really for. When one step declares `produces: ACS.md` and a later step takes `input: $acs`, you are choosing the exact context the next agent receives: loom puts that artifact in front of it and leaves everything else out. Small, focused hand-offs — one clear thing per step — are what make the harness work.
+
+It helps to hold two things apart:
+
+- **The real work** happens in your working directory. An agent reads and edits the actual files in the project where you ran `loom`, just as it would in an interactive session.
+- **The context hand-off** is the `produces:` artifact. It lands in the run's own folder (`loom/runs/<id>/`), separate from your code, and is what loom carries to the next step — for example the verdict JSON a reviewer emits, or the spec a writer produces.
+
+As you read the chapters, keep asking the context-engineering question: *what does this agent need in front of it, and what should it pass on?*
 
 ### Using Copilot CLI instead of Claude Code
 
