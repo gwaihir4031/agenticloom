@@ -43,18 +43,18 @@ As you read the chapters, keep asking the context-engineering question: *what do
 
 ### Using Copilot CLI instead of Claude Code
 
-Every pipeline in this guide ships with `cli: claude` and a Claude model in `default_extra_args`. To run with Copilot CLI instead, make two changes to any pipeline YAML:
+Every pipeline in this guide ships with `cli: claude` and `--model haiku` (Claude Haiku). To run under Copilot CLI on the *same* model, change two header fields — Copilot just spells Haiku differently (`claude-haiku-4.5`):
 
 ```yaml
 cli: copilot                              # was: cli: claude
-default_extra_args: ['--model', 'gpt-4.1'] # was: ['--model', 'haiku']
+default_extra_args: ['--model', 'claude-haiku-4.5'] # was: ['--model', 'haiku']
 ```
 Or use this `sed` to make both header changes across all six pipelines at once:
 
 ```bash
 sed -i.bak \
   -e 's/^cli: claude/cli: copilot/' \
-  -e "s/\['--model', 'haiku'\]/['--model', 'gpt-4.1']/" \
+  -e "s/\['--model', 'haiku'\]/['--model', 'claude-haiku-4.5']/" \
   loom/pipelines/*.yaml
 ```
 
@@ -92,7 +92,7 @@ The simplest thing loom can do is invoke one agent, once, and capture its output
 ```yaml
 pipeline: 01-first-step
 cli: claude                              # or 'copilot' — see Before you start
-default_extra_args: ['--model', 'haiku'] # Copilot: ['--model', 'gpt-4.1']
+default_extra_args: ['--model', 'haiku'] # Copilot: ['--model', 'claude-haiku-4.5']
 inputs: [ticket]
 flow:
   - step: ac-writer
@@ -144,7 +144,7 @@ A single agent cannot check its own work reliably. The `review_loop` primitive p
 ```yaml
 pipeline: 02-review-loop
 cli: claude                              # or 'copilot' — see Before you start
-default_extra_args: ['--model', 'haiku'] # Copilot: ['--model', 'gpt-4.1']
+default_extra_args: ['--model', 'haiku'] # Copilot: ['--model', 'claude-haiku-4.5']
 inputs: [ticket]
 flow:
   - review_loop:
@@ -229,7 +229,7 @@ Automated reviewers can catch structural problems, but some judgment calls need 
 ```yaml
 pipeline: 03-human-gate
 cli: claude                              # or 'copilot' — see Before you start
-default_extra_args: ['--model', 'haiku'] # Copilot: ['--model', 'gpt-4.1']
+default_extra_args: ['--model', 'haiku'] # Copilot: ['--model', 'claude-haiku-4.5']
 inputs: [ticket]
 flow:
   - review_loop:
@@ -287,7 +287,7 @@ Three independent review perspectives — security, API design, and edge cases �
 ```yaml
 pipeline: 04-parallel-review
 cli: claude                              # or 'copilot' — see Before you start
-default_extra_args: ['--model', 'haiku'] # Copilot: ['--model', 'gpt-4.1']
+default_extra_args: ['--model', 'haiku'] # Copilot: ['--model', 'claude-haiku-4.5']
 inputs: [ticket]
 flow:
   - review_loop:
@@ -418,7 +418,7 @@ Writing an implementation, testing it, and reviewing the result is a tight loop 
 ```yaml
 pipeline: 05-impl-retry
 cli: claude                              # or 'copilot' — see Before you start
-default_extra_args: ['--model', 'haiku'] # Copilot: ['--model', 'gpt-4.1']
+default_extra_args: ['--model', 'haiku'] # Copilot: ['--model', 'claude-haiku-4.5']
 inputs: [ticket]
 flow:
   - review_loop:
@@ -537,7 +537,7 @@ A real feature decomposes into several modules, and implementing them all in one
 ```yaml
 pipeline: 06-foreach
 cli: claude                              # or 'copilot' — see Before you start
-default_extra_args: ['--model', 'haiku'] # Copilot: ['--model', 'gpt-4.1']
+default_extra_args: ['--model', 'haiku'] # Copilot: ['--model', 'claude-haiku-4.5']
 inputs: [ticket]
 flow:
   - review_loop:

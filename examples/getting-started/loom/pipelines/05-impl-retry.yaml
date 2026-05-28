@@ -1,6 +1,6 @@
 pipeline: 05-impl-retry
 cli: claude                              # or 'copilot' — see Before you start
-default_extra_args: ['--model', 'haiku'] # Copilot: ['--model', 'gpt-4.1']
+default_extra_args: ['--model', 'haiku'] # Copilot: ['--model', 'claude-haiku-4.5']
 inputs: [ticket]
 flow:
   - review_loop:
