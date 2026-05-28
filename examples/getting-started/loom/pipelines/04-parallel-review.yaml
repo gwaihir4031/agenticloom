@@ -1,0 +1,51 @@
+pipeline: 04-parallel-review
+cli: claude                              # or 'copilot' — see Before you start
+default_extra_args: ['--model', 'haiku'] # Copilot: ['--model', 'gpt-4.1']
+inputs: [ticket]
+flow:
+  - review_loop:
+      writer: ac-writer
+      reviewer: ac-reviewer
+      input: $ticket
+      max_iters: 2
+      writer_produces: ACS.md
+      reviewer_produces: ac-review.json
+      verdict_field: status
+      approve_when: pass
+      bind: ac_final
+  - human_gate:
+      interactive: true
+      agent: ac-writer
+      input: $ac_final
+      prompt: |
+        ACS.md passed automated review. Iterate with the user.
+  - review_loop:
+      writer: spec-writer
+      input: $ac_final
+      max_iters: 1
+      writer_produces: SPEC.md
+      approve_when: pass
+      bind: spec
+      reviewer:
+        - parallel:
+            - step: security-reviewer
+              input: $spec
+              produces: security-review.json
+              bind: sec
+            - step: api-design-reviewer
+              input: $spec
+              produces: api-review.json
+              bind: api
+            - step: edge-case-reviewer
+              input: $spec
+              produces: edge-review.json
+              bind: edge
+        - aggregate:
+            inputs:
+              security: $sec
+              api: $api
+              edge: $edge
+            verdict_field: status
+            approve_when: pass
+            require: all_approved
+            bind: spec_verdict
