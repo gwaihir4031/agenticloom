@@ -7,3 +7,11 @@ coverage/
 # created by `cd smoke_test && loom run ...`. Those are auto-regenerated
 # and never load-bearing for future runs.
 smoke_test/loom/runs/
+
+# Same for the getting-started starter pack: the pipelines are tracked,
+# but per-run workspaces (created when a reader runs a chapter) are not.
+# The src/ working dir ships only its README; the code agents write into
+# it when a chapter runs is transient run output, not part of the pack.
+examples/getting-started/loom/runs/
+examples/getting-started/src/*
+!examples/getting-started/src/README.md

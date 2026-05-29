@@ -14,6 +14,11 @@ recovery, and human-in-the-loop as first-class primitives.**
 For engineers who want multi-step AI workflows to run identically every
 time — no LLM supervisor, no token tax for plumbing.
 
+> **New to loom?** Read the [getting-started guide](GETTING_STARTED.md) —
+> a ~30-minute walkthrough that builds up a real multi-agent pipeline
+> one primitive at a time. Want to run as you read? Use the
+> [starter pack](examples/getting-started/).
+
 ## Why this exists
 
 - **You own the orchestration logic.** It's a deterministic script,

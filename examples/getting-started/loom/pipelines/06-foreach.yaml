@@ -1,0 +1,86 @@
+pipeline: 06-foreach
+cli: claude # or 'copilot' — see Before you start
+default_extra_args: ['--model', 'haiku'] # Copilot: ['--model', 'claude-haiku-4.5']
+inputs: [ticket]
+flow:
+  - review_loop:
+      writer: ac-writer
+      reviewer: ac-reviewer
+      input: $ticket
+      max_iters: 2
+      writer_produces: ACS.md
+      reviewer_produces: ac-review.json
+      verdict_field: status
+      approve_when: pass
+      bind: ac_final
+  - human_gate:
+      interactive: true
+      agent: ac-writer
+      input: $ac_final
+      prompt: |
+        ACS.md passed automated review. Iterate with the user.
+  - review_loop:
+      writer: spec-writer
+      input: $ac_final
+      max_iters: 1
+      writer_produces: SPEC.md
+      approve_when: pass
+      bind: spec
+      reviewer:
+        - parallel:
+            - step: security-reviewer
+              input: $spec
+              produces: security-review.json
+              bind: sec
+            - step: api-design-reviewer
+              input: $spec
+              produces: api-review.json
+              bind: api
+            - step: edge-case-reviewer
+              input: $spec
+              produces: edge-review.json
+              bind: edge
+        - aggregate:
+            inputs:
+              security: $sec
+              api: $api
+              edge: $edge
+            verdict_field: status
+            approve_when: pass
+            require: all_approved
+            bind: spec_verdict
+  - step: planner
+    input: $spec
+    produces: plan.jsonl
+    bind: plan
+  - foreach:
+      over: $plan
+      as: task
+      body:
+        - step: implementer
+          input: $task
+          produces: impl-summary.md
+          bind: impl
+        - step: tester
+          inputs:
+            task: $task
+            spec: $spec
+            impl: $impl
+          produces: test-summary.md
+          bind: tests
+        - step: code-reviewer
+          inputs:
+            task: $task
+            spec: $spec
+          produces: code-review.json
+          bind: code_verdict
+          on_fail:
+            retry_from: impl
+            verdict_field: status
+            approve_when: pass
+            max_retries: 2
+            on_max_exceeded: continue
+            revise_with:
+              inputs: [$code_verdict]
+      bind: results
+      on_iteration_fail: continue

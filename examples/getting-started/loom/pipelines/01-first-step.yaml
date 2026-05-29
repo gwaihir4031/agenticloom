@@ -1,0 +1,9 @@
+pipeline: 01-first-step
+cli: claude # or 'copilot' — see Before you start
+default_extra_args: ['--model', 'haiku'] # Copilot: ['--model', 'claude-haiku-4.5']
+inputs: [ticket]
+flow:
+  - step: ac-writer
+    input: $ticket
+    produces: ACS.md
+    bind: acs
