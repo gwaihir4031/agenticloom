@@ -713,4 +713,4 @@ Every field for every primitive is documented in [`PRIMITIVES.md`](PRIMITIVES.md
 
 **AI-assisted pipeline authoring — the `loom-author` skill**
 
-If you use Claude Code, the `loom-author` skill is available in this repo. It knows loom's YAML schema and can draft or modify pipeline YAMLs from a description. Invoke it with `/loom-author` followed by what you want to build.
+The repo ships a `loom-author` skill that knows loom's YAML schema and can draft or modify pipelines from a description. The same skill file works in **both Claude Code and Copilot CLI** — see [Authoring with the `loom-author` skill](README.md#authoring-with-the-loom-author-skill) in the README to install it. Once installed, your CLI invokes it automatically on requests like "write me a loom pipeline that…".
