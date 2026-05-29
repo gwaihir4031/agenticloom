@@ -5,6 +5,7 @@
 **so that** a single client cannot exhaust the service.
 
 ## Requirements
+
 - Token-bucket algorithm, in-memory (no Redis).
 - Configurable: requests-per-window and window length (ms).
 - Keyed per client IP (`req.ip`).
@@ -13,5 +14,6 @@
 - Exported as Express middleware: `rateLimiter(opts) => (req,res,next)`.
 
 ## Out of scope
+
 - Distributed/multi-process coordination.
 - Per-route or per-user (vs per-IP) limits.

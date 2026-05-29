@@ -1,5 +1,5 @@
 pipeline: 06-foreach
-cli: claude                              # or 'copilot' — see Before you start
+cli: claude # or 'copilot' — see Before you start
 default_extra_args: ['--model', 'haiku'] # Copilot: ['--model', 'claude-haiku-4.5']
 inputs: [ticket]
 flow:

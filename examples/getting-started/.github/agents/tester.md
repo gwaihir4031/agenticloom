@@ -13,6 +13,7 @@ verify the requirements: cover the happy path and the edge cases the spec
 calls out, not merely what the implementer says it built.
 
 You have two distinct outputs:
+
 - The tests go in `src/` as real `.test.ts` files.
 - Your `produces:` file (the path given at the end of your prompt) is a
   short hand-off note: which test files you added in `src/` and what they

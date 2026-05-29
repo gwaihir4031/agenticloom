@@ -39,16 +39,17 @@ It helps to hold two things apart:
 - **The real work** happens in your working directory. An agent reads and edits the actual files in the project where you ran `loom`, just as it would in an interactive session.
 - **The context hand-off** is the `produces:` artifact. It lands in the run's own folder (`loom/runs/<id>/`), separate from your code, and is what loom carries to the next step — for example the verdict JSON a reviewer emits, or the spec a writer produces.
 
-As you read the chapters, keep asking the context-engineering question: *what does this agent need in front of it, and what should it pass on?*
+As you read the chapters, keep asking the context-engineering question: _what does this agent need in front of it, and what should it pass on?_
 
 ### Using Copilot CLI instead of Claude Code
 
-Every pipeline in this guide ships with `cli: claude` and `--model haiku` (Claude Haiku). To run under Copilot CLI on the *same* model, change two header fields — Copilot just spells Haiku differently (`claude-haiku-4.5`):
+Every pipeline in this guide ships with `cli: claude` and `--model haiku` (Claude Haiku). To run under Copilot CLI on the _same_ model, change two header fields — Copilot just spells Haiku differently (`claude-haiku-4.5`):
 
 ```yaml
-cli: copilot                              # was: cli: claude
+cli: copilot # was: cli: claude
 default_extra_args: ['--model', 'claude-haiku-4.5'] # was: ['--model', 'haiku']
 ```
+
 Or use this `sed` to make both header changes across all six pipelines at once:
 
 ```bash
@@ -59,8 +60,6 @@ sed -i.bak \
 ```
 
 Persona files for Copilot use a different frontmatter format (lowercase array `tools:` in `.github/agents/` rather than PascalCase comma-separated `tools:` in `.claude/agents/`). The starter pack ships both directories, so both CLIs work out of the box.
-
-
 
 ### Following along
 
@@ -91,7 +90,7 @@ The simplest thing loom can do is invoke one agent, once, and capture its output
 
 ```yaml
 pipeline: 01-first-step
-cli: claude                              # or 'copilot' — see Before you start
+cli: claude # or 'copilot' — see Before you start
 default_extra_args: ['--model', 'haiku'] # Copilot: ['--model', 'claude-haiku-4.5']
 inputs: [ticket]
 flow:
@@ -143,7 +142,7 @@ A single agent cannot check its own work reliably. The `review_loop` primitive p
 
 ```yaml
 pipeline: 02-review-loop
-cli: claude                              # or 'copilot' — see Before you start
+cli: claude # or 'copilot' — see Before you start
 default_extra_args: ['--model', 'haiku'] # Copilot: ['--model', 'claude-haiku-4.5']
 inputs: [ticket]
 flow:
@@ -175,7 +174,7 @@ This is your first real piece of context engineering (chapter 0): you decided wh
 
 **The reviewer JSON contract — loom provides it**
 
-Notice that `ac-reviewer`'s persona never specifies an output format; it only says *what* to evaluate. That is deliberate: when a `review_loop` names a single reviewer agent — as this one names `ac-reviewer` — loom appends the verdict JSON shape to that reviewer's prompt automatically. The shape it injects is:
+Notice that `ac-reviewer`'s persona never specifies an output format; it only says _what_ to evaluate. That is deliberate: when a `review_loop` names a single reviewer agent — as this one names `ac-reviewer` — loom appends the verdict JSON shape to that reviewer's prompt automatically. The shape it injects is:
 
 ```json
 {
@@ -190,7 +189,7 @@ Notice that `ac-reviewer`'s persona never specifies an output format; it only sa
 }
 ```
 
-loom reads only `verdict_field` (here, `status`) to decide pass/fail; the `findings` are there for the writer to act on when it revises. Because loom owns this contract, every single-agent reviewer emits the same shape without repeating it — the persona stays focused on the evaluation. (A `review_loop` can instead take a *compound* reviewer — several agents plus an `aggregate` — whose agents run as plain steps loom does not inject into; see chapter 4.)
+loom reads only `verdict_field` (here, `status`) to decide pass/fail; the `findings` are there for the writer to act on when it revises. Because loom owns this contract, every single-agent reviewer emits the same shape without repeating it — the persona stays focused on the evaluation. (A `review_loop` can instead take a _compound_ reviewer — several agents plus an `aggregate` — whose agents run as plain steps loom does not inject into; see chapter 4.)
 
 ### Diagram
 
@@ -228,7 +227,7 @@ Automated reviewers can catch structural problems, but some judgment calls need 
 
 ```yaml
 pipeline: 03-human-gate
-cli: claude                              # or 'copilot' — see Before you start
+cli: claude # or 'copilot' — see Before you start
 default_extra_args: ['--model', 'haiku'] # Copilot: ['--model', 'claude-haiku-4.5']
 inputs: [ticket]
 flow:
@@ -286,7 +285,7 @@ Three independent review perspectives — security, API design, and edge cases �
 
 ```yaml
 pipeline: 04-parallel-review
-cli: claude                              # or 'copilot' — see Before you start
+cli: claude # or 'copilot' — see Before you start
 default_extra_args: ['--model', 'haiku'] # Copilot: ['--model', 'claude-haiku-4.5']
 inputs: [ticket]
 flow:
@@ -349,7 +348,7 @@ When `reviewer:` is a list rather than a single agent name, it is a compound sub
 - `parallel:` — a list of steps to run concurrently. Each entry is a standard `step` (or a nested subflow). All three reviewers receive `$spec` and run at the same time.
 - Each step has its own `bind:` (`sec`, `api`, `edge`) so the aggregate can reference their outputs individually.
 
-This spec `review_loop` uses a *compound* reviewer — a subflow of `step`s feeding an `aggregate`, rather than the single reviewer agent chapter 2 used. loom injects the verdict shape only for that single-agent form, so here it injects **nothing**: each reviewer step declares its own output — a JSON object with at least the `status` field the aggregate reads.
+This spec `review_loop` uses a _compound_ reviewer — a subflow of `step`s feeding an `aggregate`, rather than the single reviewer agent chapter 2 used. loom injects the verdict shape only for that single-agent form, so here it injects **nothing**: each reviewer step declares its own output — a JSON object with at least the `status` field the aggregate reads.
 
 **`aggregate` fields**
 
@@ -417,7 +416,7 @@ Writing an implementation, testing it, and reviewing the result is a tight loop 
 
 ```yaml
 pipeline: 05-impl-retry
-cli: claude                              # or 'copilot' — see Before you start
+cli: claude # or 'copilot' — see Before you start
 default_extra_args: ['--model', 'haiku'] # Copilot: ['--model', 'claude-haiku-4.5']
 inputs: [ticket]
 flow:
@@ -497,11 +496,11 @@ flow:
 
 **The implementation zone — context engineering, with more to weigh**
 
-Three steps run after the spec is approved: `implementer`, `tester`, and `code-reviewer`. You have been doing context engineering since chapter 2 — every `input:` and verdict contract was a choice about what an agent sees. This chapter is where it gets the most interesting: the three steps each need a *different* slice of context, and one of them is shaped as much by what you leave out as by what you put in. For each, ask: *what does this agent need in front of it to do its job well — and what would only distract it or pull it off course?* The goal isn't the *least* context; it's the **right** context — everything the job needs, and none of the noise that invites drift.
+Three steps run after the spec is approved: `implementer`, `tester`, and `code-reviewer`. You have been doing context engineering since chapter 2 — every `input:` and verdict contract was a choice about what an agent sees. This chapter is where it gets the most interesting: the three steps each need a _different_ slice of context, and one of them is shaped as much by what you leave out as by what you put in. For each, ask: _what does this agent need in front of it to do its job well — and what would only distract it or pull it off course?_ The goal isn't the _least_ context; it's the **right** context — everything the job needs, and none of the noise that invites drift.
 
 - **What does the `implementer` need?** The contract to build against — `$spec`. (Not the raw ticket or the review threads behind it: the spec already distills those, so piling them on would just be noise.) It writes **real TypeScript into `src/`**; its `produces:` (`impl-summary.md`) is a short **hand-off note** (what it built and where), not the code itself.
-- **What does the `tester` need?** The **requirements** it must verify — `$ac_final` and `$spec` — plus the implementer's note as a pointer to what changed. This is deliberate: a tester handed only the implementer's note would test what was *built*, not what was *required*, and would rubber-stamp whatever the implementer skipped. Give it the contract, and it tests against the contract.
-- **What does the `code-reviewer` need?** Only the **requirements** — `$ac_final` and `$spec` — plus the real code in `src/`. Here the move is what you *leave out*: no implementer or tester notes. A reviewer should judge the artifacts against the spec, not be steered by the producers' account of their own work. Less noise in, a more honest verdict out.
+- **What does the `tester` need?** The **requirements** it must verify — `$ac_final` and `$spec` — plus the implementer's note as a pointer to what changed. This is deliberate: a tester handed only the implementer's note would test what was _built_, not what was _required_, and would rubber-stamp whatever the implementer skipped. Give it the contract, and it tests against the contract.
+- **What does the `code-reviewer` need?** Only the **requirements** — `$ac_final` and `$spec` — plus the real code in `src/`. Here the move is what you _leave out_: no implementer or tester notes. A reviewer should judge the artifacts against the spec, not be steered by the producers' account of their own work. Less noise in, a more honest verdict out.
 
 Each `inputs:` map is one of those decisions made concrete. (`tester` and `code-reviewer` take `inputs:` — a named map — rather than a single `input:`.) The files loom threads between steps are the context you chose to pass; the implementation itself accumulates in `src/`, as if you were working in the repo by hand.
 
@@ -510,7 +509,7 @@ Each `inputs:` map is one of those decisions made concrete. (`tester` and `code-
 - `retry_from: impl` — if the code-reviewer emits a failing verdict, loom replays the zone from the step bound `impl` (the `implementer`). `tester` sits between them, so it re-runs too; the implementer fixes `src/` based on the review.
 - `verdict_field` / `approve_when` — same contract as in `review_loop`: the JSON key to read and the value that means approved.
 - `max_retries: 2` — how many times the zone may replay before the gate gives up.
-- `revise_with.inputs: [$code_verdict]` — context engineering for the *retry*, not just the forward path. It defines the feedback loom carries back to the implementer when the zone replays: the review verdict (`$code_verdict`) and its findings, so it fixes the specific problems the reviewer raised rather than guessing. Choosing what flows back into a retry is as deliberate a context decision as choosing the initial inputs — and the retry loop itself is the harness doing the recovery you'd otherwise do by hand.
+- `revise_with.inputs: [$code_verdict]` — context engineering for the _retry_, not just the forward path. It defines the feedback loom carries back to the implementer when the zone replays: the review verdict (`$code_verdict`) and its findings, so it fixes the specific problems the reviewer raised rather than guessing. Choosing what flows back into a retry is as deliberate a context decision as choosing the initial inputs — and the retry loop itself is the harness doing the recovery you'd otherwise do by hand.
 
 Notice there is **no `on_max_exceeded`** here, so it takes its default, `fail`: if the work still hasn't passed after the retries, the zone gives up and the run **halts**. Since `code-reviewer` is the last step, that is the sensible default — better to stop than to finish quietly with code that never passed review. (Chapter 6 overrides this, for a reason that only applies inside `foreach`.)
 
@@ -536,7 +535,7 @@ A real feature decomposes into several modules, and implementing them all in one
 
 ```yaml
 pipeline: 06-foreach
-cli: claude                              # or 'copilot' — see Before you start
+cli: claude # or 'copilot' — see Before you start
 default_extra_args: ['--model', 'haiku'] # Copilot: ['--model', 'claude-haiku-4.5']
 inputs: [ticket]
 flow:
@@ -650,7 +649,7 @@ The body follows the same context discipline as chapter 5, applied per subtask. 
 
 **What's isolated, and what isn't**
 
-`foreach` isolates each iteration's *context*, not its code. Every agent — including those in a `foreach` body — runs in your working directory, so all the iterations write into the **same `src/`** and their modules compose. What lands in the per-iteration folder (`loom/runs/<id>/results/iter-N/`) is only the `produces:` hand-off notes for that task. This is chapter 0's distinction in action: code is shared and accumulates; context is curated per step.
+`foreach` isolates each iteration's _context_, not its code. Every agent — including those in a `foreach` body — runs in your working directory, so all the iterations write into the **same `src/`** and their modules compose. What lands in the per-iteration folder (`loom/runs/<id>/results/iter-N/`) is only the `produces:` hand-off notes for that task. This is chapter 0's distinction in action: code is shared and accumulates; context is curated per step.
 
 **`on_fail` inside `foreach`**
 
@@ -715,4 +714,3 @@ Every field for every primitive is documented in [`PRIMITIVES.md`](PRIMITIVES.md
 **AI-assisted pipeline authoring — the `loom-author` skill**
 
 If you use Claude Code, the `loom-author` skill is available in this repo. It knows loom's YAML schema and can draft or modify pipeline YAMLs from a description. Invoke it with `/loom-author` followed by what you want to build.
-

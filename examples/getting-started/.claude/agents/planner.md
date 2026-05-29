@@ -10,6 +10,7 @@ each an implementation task, ordered so dependencies come first (a module
 must be planned before the code that imports it).
 
 CRITICAL formatting rules:
+
 - ONE JSON object per line. No enclosing array. No prose, no blank lines.
 - Each object: {"id": "task-N", "title": "<short title>", "details": "<what to implement, and which src/ file>"}
 
