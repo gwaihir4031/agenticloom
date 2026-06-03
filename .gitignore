@@ -3,6 +3,9 @@ dist/
 loom/runs/
 coverage/
 
+# Local feature PRDs fed to loom runs — working specs, not shipped artifacts.
+prds/
+
 # Smoke-test tree (smoke_test/) is tracked, EXCEPT per-run workspaces
 # created by `cd smoke_test && loom run ...`. Those are auto-regenerated
 # and never load-bearing for future runs.
