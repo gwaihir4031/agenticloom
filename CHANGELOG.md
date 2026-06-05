@@ -11,6 +11,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Getting-started guide (`GETTING_STARTED.md`) — a hands-on walkthrough that builds one multi-agent pipeline from `step` through `foreach` and teaches **context engineering** (what each agent sees, hands off, and gets back on retry), with a runnable starter pack at `examples/getting-started/` for Claude Code and Copilot CLI.
 
+### Fixed
+
+- Retry pre-flight check now follows `revise_with`. On a retry, a gate's retry-target had its prompt rebuilt from `revise_with` but its silent pre-flight input-existence check left pinned to the step's original `inputs:` — so the guard validated files the agent no longer reads and could miss a genuinely-absent feedback file. The check now derives from `revise_with` by mode, for step (`on_fail`) and aggregate (`retry_from`) gates, including branch retry-targets. ([#5](https://github.com/gwaihir4031/agenticloom/pull/5))
+
 ## [0.1.1] - 2026-05-27
 
 ### Fixed
