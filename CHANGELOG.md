@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-06-05
+
 ### Added
 
 - Getting-started guide (`GETTING_STARTED.md`) — a hands-on walkthrough that builds one multi-agent pipeline from `step` through `foreach` and teaches **context engineering** (what each agent sees, hands off, and gets back on retry), with a runnable starter pack at `examples/getting-started/` for Claude Code and Copilot CLI.
@@ -25,6 +27,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Initial release. YAML → TypeScript pipeline compiler for orchestrating CLI coding agents (`claude`, `copilot`) with seven primitives: `step`, `review_loop`, `human_gate`, `parallel`, `branch`, `aggregate`, `foreach`. Ships the `loom` / `agenticloom` CLI plus the `loom-author` Claude/Copilot skill.
 
-[Unreleased]: https://github.com/gwaihir4031/agenticloom/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/gwaihir4031/agenticloom/compare/v0.1.2...HEAD
+[0.1.2]: https://github.com/gwaihir4031/agenticloom/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/gwaihir4031/agenticloom/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/gwaihir4031/agenticloom/releases/tag/v0.1.0
