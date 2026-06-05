@@ -1935,8 +1935,8 @@ flow:
     const retryIdx = emitted.indexOf('retry: async (currentVerdict) => {');
     expect(retryIdx).toBeGreaterThan(-1);
     const retrySlice = emitted.slice(retryIdx);
-    expect(retrySlice).toMatch(/outcome = await runThen_outcome\("Retry the branch\."\)/);
-    expect(retrySlice).toMatch(/outcome = await runElse_outcome\("Retry the branch\."\)/);
+    expect(retrySlice).toMatch(/outcome = await runThen_outcome\("Retry the branch\.", \[\]\)/);
+    expect(retrySlice).toMatch(/outcome = await runElse_outcome\("Retry the branch\.", \[\]\)/);
   });
 
   it('F-2: aggregate-host gate targeting branch — same closure-call shape', () => {
@@ -1977,8 +1977,8 @@ flow:
     const retryIdx = emitted.indexOf('retry: async (currentVerdict) => {');
     expect(retryIdx).toBeGreaterThan(-1);
     const retrySlice = emitted.slice(retryIdx);
-    expect(retrySlice).toMatch(/outcome = await runThen_outcome\("Retry from outcome\."\)/);
-    expect(retrySlice).toMatch(/outcome = await runElse_outcome\("Retry from outcome\."\)/);
+    expect(retrySlice).toMatch(/outcome = await runThen_outcome\("Retry from outcome\.", \[\]\)/);
+    expect(retrySlice).toMatch(/outcome = await runElse_outcome\("Retry from outcome\.", \[\]\)/);
   });
 
   it('F-5: revise_with.prompt literal text appears in retry-callback closure-call', () => {
@@ -2136,8 +2136,8 @@ flow:
     // The retry callback re-fires the branch (intermediate) WITHOUT the
     // revise prompt — only the retry_from target's terminal step gets
     // the prompt override.
-    expect(retrySlice).toMatch(/outcome = await runThen_outcome\(undefined\)/);
-    expect(retrySlice).toMatch(/outcome = await runElse_outcome\(undefined\)/);
+    expect(retrySlice).toMatch(/outcome = await runThen_outcome\(undefined, undefined\)/);
+    expect(retrySlice).toMatch(/outcome = await runElse_outcome\(undefined, undefined\)/);
   });
 
   it('F-6: multi-step arm refire on retry — every step in the arm lives in the closure body', () => {
@@ -2197,7 +2197,7 @@ flow:
     // Retry callback calls the closure (no re-emit of the steps).
     const retryIdx = emitted.indexOf('retry: async (currentVerdict) => {');
     const retrySlice = emitted.slice(retryIdx);
-    expect(retrySlice).toMatch(/outcome = await runThen_outcome\("Retry\."\);/);
+    expect(retrySlice).toMatch(/outcome = await runThen_outcome\("Retry\.", \[\]\);/);
     // Steps a1/a2 in the retry callback would indicate inline re-emit (the
     // pattern this design rejects); they must NOT appear there.
     expect(retrySlice).not.toContain('runAgent("a1"');
@@ -2264,7 +2264,7 @@ flow:
     // re-execution re-runs the inner branch by construction.
     const retryIdx = emitted.indexOf('retry: async (currentVerdict) => {');
     const retrySlice = emitted.slice(retryIdx);
-    expect(retrySlice).toMatch(/outcome = await runThen_outcome\("Retry\."\);/);
+    expect(retrySlice).toMatch(/outcome = await runThen_outcome\("Retry\.", \[\]\);/);
     // Inner closure-call must NOT appear in the retry callback — it's
     // reached transitively by calling the outer closure.
     expect(retrySlice).not.toMatch(/innerOutcome = await runThen_innerOutcome/);
@@ -2378,8 +2378,8 @@ flow:
     const retryIdx = emitted.indexOf('retry: async (currentVerdict) => {', aggKindIdx);
     expect(retryIdx).toBeGreaterThan(aggKindIdx);
     const retrySlice = emitted.slice(retryIdx);
-    expect(retrySlice).toMatch(/outcome = await runThen_outcome\("Retry from outcome\."\);/);
-    expect(retrySlice).toMatch(/outcome = await runElse_outcome\("Retry from outcome\."\);/);
+    expect(retrySlice).toMatch(/outcome = await runThen_outcome\("Retry from outcome\.", \[\]\);/);
+    expect(retrySlice).toMatch(/outcome = await runElse_outcome\("Retry from outcome\.", \[\]\);/);
   });
 });
 
@@ -2856,7 +2856,7 @@ flow:
     // closure on retry (the on_fail emit's catch block).
     expect(emit).toContain('const runThen_outcome');
     expect(emit).toContain('const runElse_outcome');
-    expect(emit).toMatch(/outcome = await runThen_outcome\("Retry-Prompt-Text\."\)/);
+    expect(emit).toMatch(/outcome = await runThen_outcome\("Retry-Prompt-Text\.", \[\]\)/);
   });
 
   it('I-2: review_loop terminal — closure body calls reviewLoop (re-runs on retry)', () => {
@@ -3137,12 +3137,21 @@ flow:
     // rendered template literal for `$a1Bind` (a1's produces path bound
     // to its runtime stdout/path, which the mock resolves to "A1.md").
     // Retry pass: parameter is the revise-prompt string → `??` resolves
-    // to that string. `inputPaths` still carries the original $ref for
-    // pre-spawn file validation.
+    // to that string.
     expect(a2Calls[0].args.input).toBe(
       'a1 finished its work. Its output is at: A1.md\n\nRead the input file with your Read tool, then perform your task.',
     );
     expect(a2Calls[1].args.input).toBe('ONLY-TERMINAL-PROMPT.');
+    // inputPaths follows the prompt in lockstep via the parallel runtime
+    // `reviseInputPathsForTerminal ?? [<original>]`. This revise is
+    // prompt-only, so on retry the inputPaths param is `[]` → the pre-flight
+    // check validates NOTHING (the rewritten prompt names no feedback files).
+    // The old single-emit-site behavior left the original `$a1Bind` check in
+    // place on retry — a file the prompt-only retry agent no longer reads.
+    const a2MainOpts = a2Calls[0].args.opts as { inputPaths?: unknown };
+    const a2RetryOpts = a2Calls[1].args.opts as { inputPaths?: unknown };
+    expect(a2MainOpts.inputPaths).toEqual(['A1.md']);
+    expect(a2RetryOpts.inputPaths).toEqual([]);
   });
 
   it('I-7: nested-branch terminal threads revise prompt to its inner terminals', () => {
@@ -3213,6 +3222,16 @@ flow:
     // its parameter into the nested closure invocation; nested closure's
     // step terminal sees the revise prompt via the runtime `??`.
     expect(innerCalls[1].args.input).toBe('NESTED-REVISE.');
+    // Highest-risk path: the inner terminal's runtime inputPaths must follow
+    // revise_with recursively, exactly as the prompt does. The
+    // `reviseInputPathsForTerminal` param threads outer-closure → nested
+    // closure → inner step. This revise is prompt-only, so the retry pass
+    // propagates `[]` all the way down → the inner pre-flight check validates
+    // NOTHING; the main pass validates the inner step's original `$x` input.
+    const innerMainOpts = innerCalls[0].args.opts as { inputPaths?: unknown };
+    const innerRetryOpts = innerCalls[1].args.opts as { inputPaths?: unknown };
+    expect(innerMainOpts.inputPaths).toEqual(['truthy']);
+    expect(innerRetryOpts.inputPaths).toEqual([]);
   });
 
   it('I-8: single-arm bound branch with side-effect step (no produces) — retry threads revise prompt', () => {
@@ -3442,6 +3461,310 @@ flow:
     const sideArmCalls = calls.filter((c) => c.name === 'runAgent' && c.args.name === 'sideArm');
     expect(sideArmCalls).toHaveLength(0);
   });
+
+  describe('retry-target inputPaths follow revise_with (Group L)', () => {
+    // A branch-as-retry-target's terminal step is emitted ONCE and reused on
+    // both passes via the runtime `reviseInputPathsForTerminal ?? [<original>]`.
+    // These exec-based tests verify, per pass, the actual runtime `opts.inputPaths`
+    // the pre-flight check would validate — that on retry it follows `revise_with`
+    // (the files the rewritten prompt names), not the terminal's stale `inputs:`.
+    // The aggregate gate hosts the retry; `gateBehavior: '() => [true]'` fires
+    // exactly one retry pass.
+
+    // then-arm fixture: `when: $x` truthy → the then-arm terminal `a` is the
+    // step that runs on both passes. `fb` (before the zone) produces the
+    // feedback file the revise modes point at.
+    function thenArmFixture(reviseWithYaml: string): string {
+      const yamlPath = setupFixture({
+        agents: ['fb', 'a', 'b'],
+        yaml: `
+pipeline: p
+cli: claude
+inputs: [x]
+flow:
+  - step: fb
+    input: $x
+    produces: FB.md
+    bind: fbBind
+  - branch:
+      when: $x
+      bind: outcome
+      then:
+        - step: a
+          input: $x
+          produces: A.md
+          bind: aBind
+      else:
+        - step: b
+          input: $x
+          produces: B.md
+          bind: bBind
+  - aggregate:
+      inputs: { o: $outcome }
+      verdict_field: status
+      bind: aggOut
+      retry_from: outcome
+${reviseWithYaml}
+`,
+      });
+      return compile(yamlPath);
+    }
+
+    // else-arm fixture: `when: $x === 'pick-then'` is false for the input below,
+    // so the else-arm terminal `b` is the step that runs on both passes.
+    function elseArmFixture(reviseWithYaml: string): string {
+      const yamlPath = setupFixture({
+        agents: ['fb', 'a', 'b'],
+        yaml: `
+pipeline: p
+cli: claude
+inputs: [x]
+flow:
+  - step: fb
+    input: $x
+    produces: FB.md
+    bind: fbBind
+  - branch:
+      when: $x === 'pick-then'
+      bind: outcome
+      then:
+        - step: a
+          input: $x
+          produces: A.md
+          bind: aBind
+      else:
+        - step: b
+          input: $x
+          produces: B.md
+          bind: bBind
+  - aggregate:
+      inputs: { o: $outcome }
+      verdict_field: status
+      bind: aggOut
+      retry_from: outcome
+${reviseWithYaml}
+`,
+      });
+      return compile(yamlPath);
+    }
+
+    // multi-input fixture: two pre-zone feedback steps (`fb` → FB.md, `fb2` →
+    // FB2.md) so `revise_with.inputs` can name MORE than one bind — pins the
+    // ordered rendering of multiple tokens through `reviseInputPaths.join`.
+    function multiInputThenFixture(reviseWithYaml: string): string {
+      const yamlPath = setupFixture({
+        agents: ['fb', 'fb2', 'a', 'b'],
+        yaml: `
+pipeline: p
+cli: claude
+inputs: [x]
+flow:
+  - step: fb
+    input: $x
+    produces: FB.md
+    bind: fbBind
+  - step: fb2
+    input: $x
+    produces: FB2.md
+    bind: fb2Bind
+  - branch:
+      when: $x
+      bind: outcome
+      then:
+        - step: a
+          input: $x
+          produces: A.md
+          bind: aBind
+      else:
+        - step: b
+          input: $x
+          produces: B.md
+          bind: bBind
+  - aggregate:
+      inputs: { o: $outcome }
+      verdict_field: status
+      bind: aggOut
+      retry_from: outcome
+${reviseWithYaml}
+`,
+      });
+      return compile(yamlPath);
+    }
+
+    // nested fixture: outer branch retry-target whose then-arm terminates in a
+    // nested branch terminating in `inner`. A pre-zone `fb` step supplies the
+    // feedback file, so an inputs-bearing revise threads a NON-empty array
+    // through outer-closure -> nested closure -> inner step (I-7 only covers
+    // the prompt-only `[]` case).
+    function nestedInputsFixture(reviseWithYaml: string): string {
+      const yamlPath = setupFixture({
+        agents: ['fb', 'inner', 'innerElse', 'outerElse'],
+        yaml: `
+pipeline: p
+cli: claude
+inputs: [x]
+flow:
+  - step: fb
+    input: $x
+    produces: FB.md
+    bind: fbBind
+  - branch:
+      when: $x
+      bind: outerBind
+      then:
+        - branch:
+            when: $x
+            bind: innerBind
+            then:
+              - step: inner
+                input: $x
+                produces: I.md
+                bind: innerStepBind
+            else:
+              - step: innerElse
+                input: $x
+                produces: IE.md
+                bind: innerElseStepBind
+      else:
+        - step: outerElse
+          input: $x
+          produces: OE.md
+          bind: outerElseStepBind
+  - aggregate:
+      inputs: { a: $outerBind }
+      verdict_field: status
+      bind: aggOut
+      retry_from: outerBind
+${reviseWithYaml}
+`,
+      });
+      return compile(yamlPath);
+    }
+
+    function runExec(emit: string, input: string, logPath: string) {
+      const script = buildExecScript(emit, {
+        input,
+        gateBehavior: '() => [true]',
+        logPath,
+      });
+      return execAndReadLog(script, logPath);
+    }
+
+    it('retry-target inputPaths: then-arm terminal — inputs-only retry validates the revise_with bind, not the original', () => {
+      const emit = thenArmFixture(`      revise_with:\n        inputs:\n          - $fbBind`);
+      const calls = runExec(emit, 'truthy', '/tmp/loom-l1.log.json');
+      const aCalls = calls.filter((c) => c.name === 'runAgent' && c.args.name === 'a');
+      expect(aCalls).toHaveLength(2);
+      // Main pass: the terminal's original `$x` input (runtime value 'truthy').
+      expect((aCalls[0].args.opts as { inputPaths?: unknown }).inputPaths).toEqual(['truthy']);
+      // Retry pass: the revise_with.inputs bind `$fbBind` (fb produces FB.md),
+      // and NOT the terminal's original `$x` — the pre-flight check now validates
+      // exactly the files the rewritten prompt points the agent at.
+      expect((aCalls[1].args.opts as { inputPaths?: unknown }).inputPaths).toEqual(['FB.md']);
+    });
+
+    it('retry-target inputPaths: then-arm terminal — prompt+inputs retry validates the revise_with bind, not the original', () => {
+      const emit = thenArmFixture(
+        `      revise_with:\n        prompt: Address the feedback.\n        inputs:\n          - $fbBind`,
+      );
+      const calls = runExec(emit, 'truthy', '/tmp/loom-l2.log.json');
+      const aCalls = calls.filter((c) => c.name === 'runAgent' && c.args.name === 'a');
+      expect(aCalls).toHaveLength(2);
+      expect((aCalls[0].args.opts as { inputPaths?: unknown }).inputPaths).toEqual(['truthy']);
+      // prompt+inputs derives inputPaths from `inputs:` (the prompt rewrite is
+      // orthogonal), so retry still validates the revise bind, not the original.
+      expect((aCalls[1].args.opts as { inputPaths?: unknown }).inputPaths).toEqual(['FB.md']);
+    });
+
+    it('retry-target inputPaths: else-arm terminal — inputs-only retry validates the revise_with bind, not the original', () => {
+      const emit = elseArmFixture(`      revise_with:\n        inputs:\n          - $fbBind`);
+      // when: $x === 'pick-then' is false → else-arm terminal `b` runs.
+      const calls = runExec(emit, 'pick-else', '/tmp/loom-l3.log.json');
+      const bCalls = calls.filter((c) => c.name === 'runAgent' && c.args.name === 'b');
+      expect(bCalls).toHaveLength(2);
+      expect((bCalls[0].args.opts as { inputPaths?: unknown }).inputPaths).toEqual(['pick-else']);
+      expect((bCalls[1].args.opts as { inputPaths?: unknown }).inputPaths).toEqual(['FB.md']);
+    });
+
+    it('retry-target inputPaths: else-arm terminal — prompt+inputs retry validates the revise_with bind, not the original', () => {
+      const emit = elseArmFixture(
+        `      revise_with:\n        prompt: Address the feedback.\n        inputs:\n          - $fbBind`,
+      );
+      // when: $x === 'pick-then' is false → else-arm terminal `b` runs.
+      const calls = runExec(emit, 'pick-else', '/tmp/loom-l6.log.json');
+      const bCalls = calls.filter((c) => c.name === 'runAgent' && c.args.name === 'b');
+      expect(bCalls).toHaveLength(2);
+      expect((bCalls[0].args.opts as { inputPaths?: unknown }).inputPaths).toEqual(['pick-else']);
+      // prompt+inputs derives inputPaths from `inputs:` — the prompt rewrite is
+      // orthogonal — so the else-arm retry validates the revise bind, not `$x`.
+      expect((bCalls[1].args.opts as { inputPaths?: unknown }).inputPaths).toEqual(['FB.md']);
+    });
+
+    it('retry-target inputPaths: then-arm terminal — prompt-only retry validates nothing while main pass validates the original', () => {
+      const emit = thenArmFixture(`      revise_with:\n        prompt: Retry the branch.`);
+      const calls = runExec(emit, 'truthy', '/tmp/loom-l4.log.json');
+      const aCalls = calls.filter((c) => c.name === 'runAgent' && c.args.name === 'a');
+      expect(aCalls).toHaveLength(2);
+      // Main pass validates the original `$x`.
+      expect((aCalls[0].args.opts as { inputPaths?: unknown }).inputPaths).toEqual(['truthy']);
+      // Prompt-only revise names no feedback files → the retry inputPaths param
+      // is `[]` → `[] ?? [orig]` = `[]` → the runtime requireFile loop iterates
+      // zero times → validates NOTHING.
+      expect((aCalls[1].args.opts as { inputPaths?: unknown }).inputPaths).toEqual([]);
+    });
+
+    it('retry-target inputPaths: else-arm terminal — prompt-only retry validates nothing while main pass validates the original', () => {
+      const emit = elseArmFixture(`      revise_with:\n        prompt: Retry the branch.`);
+      const calls = runExec(emit, 'pick-else', '/tmp/loom-l5.log.json');
+      const bCalls = calls.filter((c) => c.name === 'runAgent' && c.args.name === 'b');
+      expect(bCalls).toHaveLength(2);
+      expect((bCalls[0].args.opts as { inputPaths?: unknown }).inputPaths).toEqual(['pick-else']);
+      expect((bCalls[1].args.opts as { inputPaths?: unknown }).inputPaths).toEqual([]);
+    });
+
+    it('retry-target inputPaths: branch terminal emits the runtime-conditional inputPaths clause', () => {
+      // Compile-string assertion for the mechanism itself: the terminal's
+      // inputPaths is a runtime `??` expression, not a compile-time array — the
+      // single emit serves both passes. Note (known ripple): EVERY bound-branch
+      // terminal carries this clause now, not only retry-targets; runtime
+      // behavior is preserved (non-retry terminals are only ever called with
+      // `undefined` → fall through to `[<original>]`).
+      const emit = thenArmFixture(`      revise_with:\n        prompt: Retry the branch.`);
+      expect(emit).toMatch(/inputPaths: reviseInputPathsForTerminal \?\? \[x\]/);
+    });
+
+    it('retry-target inputPaths: then-arm terminal — multi-input retry validates all revise_with binds in order, not the original', () => {
+      // revise_with.inputs naming two binds must render BOTH tokens, in order,
+      // into the retry pass's inputPaths — guards the `reviseInputPaths.join`
+      // rendering against single-bind-only coverage.
+      const emit = multiInputThenFixture(
+        `      revise_with:\n        inputs:\n          - $fbBind\n          - $fb2Bind`,
+      );
+      const calls = runExec(emit, 'truthy', '/tmp/loom-l7.log.json');
+      const aCalls = calls.filter((c) => c.name === 'runAgent' && c.args.name === 'a');
+      expect(aCalls).toHaveLength(2);
+      expect((aCalls[0].args.opts as { inputPaths?: unknown }).inputPaths).toEqual(['truthy']);
+      expect((aCalls[1].args.opts as { inputPaths?: unknown }).inputPaths).toEqual([
+        'FB.md',
+        'FB2.md',
+      ]);
+    });
+
+    it('retry-target inputPaths: nested-branch inner terminal — inputs-bearing retry threads the revise_with bind recursively, not the original', () => {
+      // Highest-risk path with a NON-empty array: the inner terminal's runtime
+      // inputPaths must follow revise_with down outer-closure -> nested closure
+      // -> inner step. I-7 only proves `[]` propagates; this proves a real bind
+      // does too.
+      const emit = nestedInputsFixture(`      revise_with:\n        inputs:\n          - $fbBind`);
+      const calls = runExec(emit, 'truthy', '/tmp/loom-l8.log.json');
+      const innerCalls = calls.filter((c) => c.name === 'runAgent' && c.args.name === 'inner');
+      expect(innerCalls).toHaveLength(2);
+      // Main pass validates the inner step's original `$x`.
+      expect((innerCalls[0].args.opts as { inputPaths?: unknown }).inputPaths).toEqual(['truthy']);
+      // Retry pass validates the revise_with bind threaded through both closures.
+      expect((innerCalls[1].args.opts as { inputPaths?: unknown }).inputPaths).toEqual(['FB.md']);
+    });
+  });
 });
 
 describe('branch arm bind hoisting — closure-shape regression (Group J)', () => {
@@ -3515,8 +3838,8 @@ flow:
 `,
     });
     const emitted = compile(yamlPath);
-    expect(emitted).toContain('outcome = await runThen_outcome(undefined);');
-    expect(emitted).toContain('outcome = await runElse_outcome(undefined);');
+    expect(emitted).toContain('outcome = await runThen_outcome(undefined, undefined);');
+    expect(emitted).toContain('outcome = await runElse_outcome(undefined, undefined);');
   });
 
   it('J-3: retry-callback call site uses revisePromptForTerminal as closure arg', () => {
@@ -3556,9 +3879,11 @@ flow:
     expect(retryIdx).toBeGreaterThan(-1);
     const retrySlice = emitted.slice(retryIdx);
     // The retry call site threads the rendered revise prompt (the
-    // JSON-quoted user string) into the closure as its only argument.
-    expect(retrySlice).toMatch(/outcome = await runThen_outcome\("Retry\."\);/);
-    expect(retrySlice).toMatch(/outcome = await runElse_outcome\("Retry\."\);/);
+    // JSON-quoted user string) as the closure's first argument; the second
+    // is the runtime inputPaths (here `[]` — prompt-only revise validates
+    // nothing on retry).
+    expect(retrySlice).toMatch(/outcome = await runThen_outcome\("Retry\.", \[\]\);/);
+    expect(retrySlice).toMatch(/outcome = await runElse_outcome\("Retry\.", \[\]\);/);
   });
 
   it('J-4: arm-internal binds do NOT appear at outer scope', () => {
@@ -3789,8 +4114,12 @@ flow:
     // parameter into the inner branch's closure invocation. The inner
     // closures recursively propagate it to their own terminals
     // (nested-branch recursive threading).
-    expect(emitted).toMatch(/inner = await runThen_inner\(revisePromptForTerminal\);/);
-    expect(emitted).toMatch(/inner = await runElse_inner\(revisePromptForTerminal\);/);
+    expect(emitted).toMatch(
+      /inner = await runThen_inner\(revisePromptForTerminal, reviseInputPathsForTerminal\);/,
+    );
+    expect(emitted).toMatch(
+      /inner = await runElse_inner\(revisePromptForTerminal, reviseInputPathsForTerminal\);/,
+    );
     expect(emitted).toMatch(/return inner;/);
     // The else-arm's step (no explicit bind) returns a fresh synthesized
     // identifier.

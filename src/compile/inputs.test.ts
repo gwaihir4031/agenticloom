@@ -250,6 +250,13 @@ describe('emit shape — runAgent inputPaths threading', () => {
   // missing input — the core safety guarantee of the resume capability.
   // Pipelines that don't use --resume-from still benefit: the same check
   // catches silent-empty / wrong-path failures on every run.
+  //
+  // On the main pass the clause derives from the step's declared `inputs:`.
+  // The one exception is a STEP retry-target's retry-pass emit: its prompt is
+  // rebuilt from `revise_with`, so its inputPaths derive from `revise_with`
+  // too (by mode) to keep the pre-flight check aligned with the files the
+  // rewritten prompt names — see the prompt-only case below and the per-mode
+  // matrix in retry-gate.test.ts.
 
   it('emits inputPaths with the bind identifier for a single $ref input', () => {
     const yamlPath = setupFixture({
@@ -369,11 +376,14 @@ flow:
     expect(emitted).toMatch(/runAgent\("writer",[\s\S]*?inputPaths: \[ticket\]/);
   });
 
-  it('threads inputPaths through to retry-callback emits (both initial and retry passes)', () => {
-    // The retry-target's iteration-2+ runAgent emit flows through the
-    // same emitRunAgentExpr as the initial pass, so inputPaths is
-    // computed for both passes. Without this single-emit-site invariant
-    // a retry would silently bypass the pre-spawn check.
+  it('prompt-only retry drops the retry-target inputPaths while the main pass keeps it', () => {
+    // The retry-target's prompt is rebuilt from `revise_with`, so its
+    // pre-flight inputPaths derive from `revise_with` too — by mode. In the
+    // prompt-only mode the rewritten prompt names no feedback files, so the
+    // retry-pass runAgent for the target carries NO inputPaths clause; the
+    // main-pass emit still validates the step's declared `$x` input. (The
+    // old single-emit-site behavior re-validated the original `$x` on retry —
+    // a file the retry agent no longer reads.)
     const yamlPath = setupFixture({
       agents: ['writer', 'rev'],
       yaml: `
@@ -397,9 +407,12 @@ flow:
 `,
     });
     const emitted = compile(yamlPath);
-    const writerCount = (emitted.match(/runAgent\("writer",[\s\S]*?inputPaths: \[x\]/g) ?? [])
-      .length;
-    expect(writerCount).toBeGreaterThanOrEqual(2);
+    // Exactly one writer emit carries `inputPaths: [x]` — the main pass. The
+    // prompt-only retry-pass writer emit omits the clause entirely.
+    const writerWithInputPaths = (
+      emitted.match(/runAgent\("writer",[\s\S]*?inputPaths: \[x\]/g) ?? []
+    ).length;
+    expect(writerWithInputPaths).toBe(1);
   });
 
   it('aggregate rewriter closures do NOT carry inputPaths (re-validation would be tautological)', () => {

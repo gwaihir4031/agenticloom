@@ -393,6 +393,41 @@ export function checkConsume(
   }
 }
 
+/** Resolve a single `$ref` consume name to the `inputPaths` emit token the
+ *  runtime pre-flight check should validate, or `undefined` when the ref
+ *  contributes no file to check. The four cases mirror the `$ref` resolution
+ *  that `computeInputPaths` (main pass, derived from `inputs:`) and
+ *  `computeReviseInputPaths` (retry-target pass, derived from `revise_with`)
+ *  both need:
+ *
+ *  - **pipeline input** (`kind === 'input'`): file-bound by convention (the
+ *    CLI absolutifies path-shaped positionals before spawn) → emit the bare
+ *    identifier; the bind value resolves to the path string at runtime.
+ *  - **file-bound producer** (`step.produces`, `review_loop.writer_produces`,
+ *    or a hoisted parallel child) → emit the bind name as a JS identifier.
+ *  - **non-file-bound producer** (parallel/branch container binds, aggregate
+ *    verdict strings) → no file to validate → `undefined` (caller skips it).
+ *  - **unknown ref** → internal compile error. `checkConsume` runs first on
+ *    every `$ref` consumption site and rejects unknown names with a
+ *    user-friendly error; reaching here means a refactor bypassed it. Silently
+ *    skipping would omit a path the runtime must validate (a silent missing-
+ *    file bypass), so throw loud and surface the regression during tsc/test. */
+export function inputPathTokenForRef(
+  refName: string,
+  scope: Map<string, ProducerInfo>,
+): string | undefined {
+  const info = scope.get(refName);
+  if (info === undefined) {
+    throw new Error(
+      `Internal compile error: inputPathTokenForRef reached an unknown ref '${refName}'; ` +
+        `checkConsume should have rejected this before now.`,
+    );
+  }
+  if (info.kind === 'input') return refName;
+  if (!info.fileBound) return undefined;
+  return refName;
+}
+
 /** Compute the array of `inputPaths` expressions for a step's runAgent emit.
  *  Each entry is either a JS identifier (a bind in scope) or a JSON-stringified
  *  literal (a literal-string input). Threaded as `RunAgentOpts.inputPaths`;
@@ -410,33 +445,8 @@ export function computeInputPaths(it: StepItemT, scope: Map<string, ProducerInfo
       out.push(JSON.stringify(expr));
       return;
     }
-    const refName = expr.slice(1);
-    const info = scope.get(refName);
-    // Unknown ref reaching here is an internal regression: checkConsume runs
-    // first on every $ref consumption site and rejects unknown names with a
-    // user-friendly error. If we silently skipped, the emitted runAgent call
-    // would omit a path the runtime must validate — a silent missing-file
-    // bypass. Throw loud so the regression surfaces during tsc/test rather
-    // than at runtime as wrong-shape output.
-    if (info === undefined) {
-      throw new Error(
-        `Internal compile error: computeInputPaths reached an unknown ref '${refName}'; ` +
-          `checkConsume should have rejected this before now.`,
-      );
-    }
-    // Pipeline inputs are file-bound by convention (the CLI absolutifies
-    // path-shaped positionals before spawn). Emit as a JS identifier — the
-    // bind value resolves to the path string at runtime.
-    if (info.kind === 'input') {
-      out.push(refName);
-      return;
-    }
-    // Non-file-bound producers (parallel/branch container binds, aggregate
-    // verdict strings): no file to validate, skip.
-    if (!info.fileBound) return;
-    // File-bound producers (step.produces, review_loop.writer_produces, or
-    // a hoisted parallel child): emit the bind name as a JS identifier.
-    out.push(refName);
+    const token = inputPathTokenForRef(expr.slice(1), scope);
+    if (token !== undefined) out.push(token);
   };
   if (it.inputs) {
     for (const expr of Object.values(it.inputs)) {

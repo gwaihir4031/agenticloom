@@ -69,6 +69,11 @@ import { classifyArmTerminals } from './branch-arms.js';
  *  consumes the parameter. */
 interface EmitTerminalContext {
   revisePromptIdent: string;
+  /** Name of the arm closure's `reviseInputPathsForTerminal` parameter,
+   *  threaded in lockstep with `revisePromptIdent`. The terminal step's
+   *  inputPaths clause becomes `<ident> ?? [<original>]` so the pre-flight
+   *  check follows `revise_with` on retry, exactly as the prompt does. */
+  reviseInputPathsIdent: string;
 }
 
 /** Emit zero or more lines for a pre-cursor top-level item under
@@ -547,7 +552,7 @@ export function emit(
       // `revisePromptForTerminal` (signalled by the caller threading
       // `terminalContext` into this `emit()` call), the runAgent call's
       // input expression becomes `(revisePromptForTerminal ?? <normal input>)`
-      // (a RUNTIME `??`, so `overrideMode: 'fallback'`). The main pass
+      // (a RUNTIME `??`, so `mode: 'fallback'`). The main pass
       // passes the literal `undefined` to the closure → the parameter is
       // `undefined` inside → the `??` falls through to the normal input.
       // The retry callback invokes the closure with the rendered revise
@@ -556,10 +561,17 @@ export function emit(
       // the override to apply — covering the side-effect-step pattern
       // (admitted as arm terminal when nothing downstream $refs the
       // branch's bind).
+      // The inputPaths param is threaded in lockstep with the prompt param:
+      // both are runtime-conditional (`?? <normal>`) so the single terminal
+      // emit serves both passes. Supplied only when this step is the arm's
+      // terminal (itemTerminalContext present) — non-terminal steps keep the
+      // compile-time-omittable inputPaths clause, byte-identical to before.
       const termPromptOverride =
         itemTerminalContext !== undefined ? itemTerminalContext.revisePromptIdent : undefined;
+      const termInputPathsOverride =
+        itemTerminalContext !== undefined ? itemTerminalContext.reviseInputPathsIdent : undefined;
       out.push(
-        `${pad}${decl} ${v} = ${emitRunAgentExpr(item, scope, termPromptOverride, 'fallback')};`,
+        `${pad}${decl} ${v} = ${emitRunAgentExpr(item, scope, { promptOverride: termPromptOverride, mode: 'fallback', fallbackInputPathsIdent: termInputPathsOverride })};`,
       );
 
       // Emit the retryGateZone() wrapper for this step-host gate. The
@@ -1222,7 +1234,10 @@ export function emit(
         // with side-effect-only steps used only as `retry_from` targets:
         // they still receive the revise prompt on retry, even when the
         // branch's bind has no downstream `$ref` consumer.
-        const armContext: EmitTerminalContext = { revisePromptIdent: 'revisePromptForTerminal' };
+        const armContext: EmitTerminalContext = {
+          revisePromptIdent: 'revisePromptForTerminal',
+          reviseInputPathsIdent: 'reviseInputPathsForTerminal',
+        };
         // The revise-prompt parameter has no TS type annotation: the
         // production runner is plain Node on a `.mjs` temp (see cli.ts's
         // dev-vs-prod runner branching), which would reject `?: string`
@@ -1237,7 +1252,9 @@ export function emit(
         // `??` fallthrough in step terminals (`(revisePromptForTerminal
         // ?? <normal input>)`) treats `undefined` as "use normal input"
         // and any string as "use revise prompt."
-        out.push(`${pad}const ${runThenName} = async (revisePromptForTerminal) => {`);
+        out.push(
+          `${pad}const ${runThenName} = async (revisePromptForTerminal, reviseInputPathsForTerminal) => {`,
+        );
         out.push(
           ...emit(
             b.then,
@@ -1265,7 +1282,9 @@ export function emit(
         let elseScope: Map<string, string> | undefined;
         if (b.else !== undefined) {
           elseScope = pathScope !== undefined ? new Map(pathScope) : undefined;
-          out.push(`${pad}const ${runElseName} = async (revisePromptForTerminal) => {`);
+          out.push(
+            `${pad}const ${runElseName} = async (revisePromptForTerminal, reviseInputPathsForTerminal) => {`,
+          );
           out.push(
             ...emit(
               b.else,
@@ -1304,13 +1323,26 @@ export function emit(
         //   inner terminals. Main pass propagates `undefined`; retry
         //   propagates the rendered prompt — same runtime-`??` fallthrough
         //   the step terminal uses.
+        // The inputPaths arg is threaded in lockstep with the prompt arg —
+        // both are `undefined` on the main pass with no outer context, or the
+        // outer closure's parameters propagated for a nested-branch terminal.
         const armArg =
           itemTerminalContext !== undefined ? itemTerminalContext.revisePromptIdent : 'undefined';
+        const armInputPathsArg =
+          itemTerminalContext !== undefined
+            ? itemTerminalContext.reviseInputPathsIdent
+            : 'undefined';
         if (b.else !== undefined) {
-          out.push(`${pad}if (${whenExpr}) ${branchBind} = await ${runThenName}(${armArg});`);
-          out.push(`${pad}else ${branchBind} = await ${runElseName}(${armArg});`);
+          out.push(
+            `${pad}if (${whenExpr}) ${branchBind} = await ${runThenName}(${armArg}, ${armInputPathsArg});`,
+          );
+          out.push(
+            `${pad}else ${branchBind} = await ${runElseName}(${armArg}, ${armInputPathsArg});`,
+          );
         } else {
-          out.push(`${pad}if (${whenExpr}) ${branchBind} = await ${runThenName}(${armArg});`);
+          out.push(
+            `${pad}if (${whenExpr}) ${branchBind} = await ${runThenName}(${armArg}, ${armInputPathsArg});`,
+          );
           out.push(`${pad}else ${branchBind} = undefined;`);
         }
 

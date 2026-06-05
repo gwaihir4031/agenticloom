@@ -1,4 +1,5 @@
 import { escapeTplLit } from './flow-helpers.js';
+import { inputPathTokenForRef } from './inputs.js';
 import { ProducerInfo } from './scope.js';
 
 /** `revise_with` after schema parse + normalization for the compile layer.
@@ -162,4 +163,32 @@ export function buildRevisePromptExpr(
     );
   }
   return '`' + lines.join('\\n') + '`';
+}
+
+/** Compute the `inputPaths` emit tokens for the retry-target step's retry-pass
+ *  re-emission, derived from `revise_with` rather than the step's original
+ *  `inputs:`. This restores the main-pass invariant on retry: the pre-flight
+ *  existence check validates exactly the files the rewritten prompt points the
+ *  agent at.
+ *
+ *  - `reviseWith.inputs` set (covers BOTH the inputs-only and the
+ *    prompt+inputs modes): map each entry through `inputPathTokenForRef`. The
+ *    schema guarantees the `$`-prefix and `processRetryGate` has already
+ *    checkConsume-validated each entry at the gate site, so resolution here
+ *    cannot hit the unknown-ref error in practice.
+ *  - `inputs` undefined (prompt-only mode): return an empty array. The
+ *    rewritten prompt names no feedback files, so the pre-flight check is
+ *    dropped — the empty override makes `emitRunAgentExpr` omit the clause
+ *    rather than leave the original step's now-stale input check in place. */
+export function computeReviseInputPaths(
+  reviseWith: ReviseWithCompile,
+  scope: Map<string, ProducerInfo>,
+): string[] {
+  if (reviseWith.inputs === undefined) return [];
+  const out: string[] = [];
+  for (const entry of reviseWith.inputs) {
+    const token = inputPathTokenForRef(entry.slice(1), scope);
+    if (token !== undefined) out.push(token);
+  }
+  return out;
 }
