@@ -1227,6 +1227,228 @@ flow:
   });
 });
 
+describe('retry-target inputPaths derive from revise_with (by mode, both gate hosts)', () => {
+  // The retry-target step's prompt is rebuilt from `revise_with`, so its
+  // pre-flight inputPaths must derive from `revise_with` too — restoring the
+  // main-pass invariant that the existence check validates exactly the files
+  // the prompt points the agent at. Each fixture's target reads the original
+  // input bind `x` and its gate's `revise_with` names a DIFFERENT feedback
+  // bind `fb`. The oracle: main pass keeps `inputPaths: [x]`; retry pass swaps
+  // to `[fb]` (inputs modes) or drops the clause entirely (prompt-only). The
+  // matrix runs every cell against BOTH gate hosts — step `on_fail` and
+  // aggregate `retry_from` — proving the single shared `buildRetryBody` change
+  // covers both with no per-host logic.
+
+  // Step-host fixture: `target` (retry_from) → `gate` (on_fail). `reviseBlock`
+  // is the YAML under `revise_with:` (8-space indented).
+  function stepHostYaml(reviseBlock: string): string {
+    return `
+pipeline: p
+cli: claude
+inputs: [seed]
+flow:
+  - step: prod
+    input: $seed
+    produces: x.md
+    bind: x
+  - step: fbmaker
+    input: $seed
+    produces: fb.md
+    bind: fb
+  - step: target
+    input: $x
+    produces: t.md
+    bind: tOut
+  - step: gate
+    input: $tOut
+    produces: g.json
+    bind: gateOut
+    on_fail:
+      verdict_field: status
+      retry_from: tOut
+      revise_with:
+${reviseBlock}
+`;
+  }
+
+  // Aggregate-host fixture: `target` (retry_from) → `aggregate` gate.
+  function aggregateHostYaml(reviseBlock: string): string {
+    return `
+pipeline: p
+cli: claude
+inputs: [seed]
+flow:
+  - step: prod
+    input: $seed
+    produces: x.md
+    bind: x
+  - step: fbmaker
+    input: $seed
+    produces: fb.md
+    bind: fb
+  - step: target
+    input: $x
+    produces: t.md
+    bind: tOut
+  - aggregate:
+      inputs: { t: $tOut }
+      verdict_field: status
+      approve_when: pass
+      bind: overall
+      retry_from: tOut
+      revise_with:
+${reviseBlock}
+`;
+  }
+
+  const hosts: Array<{ host: string; build: (revise: string) => string }> = [
+    { host: 'step on_fail', build: stepHostYaml },
+    { host: 'aggregate retry_from', build: aggregateHostYaml },
+  ];
+
+  // Split the emitted module at the gate's retry callback so each pass's
+  // `runAgent("target", ...)` emit can be asserted in isolation. Everything
+  // before the callback is the main pass; everything from it onward is the
+  // retry pass. Both hosts emit the callback as `retry: async (currentVerdict)`.
+  function splitPasses(emitted: string): { mainPass: string; retryPass: string } {
+    const idx = emitted.indexOf('retry: async (currentVerdict)');
+    expect(idx).toBeGreaterThan(-1);
+    return { mainPass: emitted.slice(0, idx), retryPass: emitted.slice(idx) };
+  }
+
+  for (const { host, build } of hosts) {
+    it(`${host}: inputs-only revise — retry-pass target inputPaths swap to the revise_with bind`, () => {
+      const yamlPath = setupFixture({
+        agents: ['prod', 'fbmaker', 'target', 'gate'],
+        yaml: build('        inputs: [$fb]'),
+      });
+      const { mainPass, retryPass } = splitPasses(compile(yamlPath));
+      // Main pass validates the step's original declared input `$x`.
+      expect(mainPass).toMatch(/runAgent\("target",[\s\S]*?inputPaths: \[x\]/);
+      // Retry pass validates the revise_with feedback bind `fb`, NOT `x`.
+      expect(retryPass).toMatch(/runAgent\("target",[\s\S]*?inputPaths: \[fb\]/);
+      expect(retryPass).not.toMatch(/runAgent\("target",[\s\S]*?inputPaths: \[x\]/);
+    });
+
+    it(`${host}: prompt+inputs revise — retry-pass target inputPaths swap and the feedback block threads`, () => {
+      const yamlPath = setupFixture({
+        agents: ['prod', 'fbmaker', 'target', 'gate'],
+        yaml: build('        prompt: Address the feedback.\n        inputs: [$fb]'),
+      });
+      const { mainPass, retryPass } = splitPasses(compile(yamlPath));
+      expect(mainPass).toMatch(/runAgent\("target",[\s\S]*?inputPaths: \[x\]/);
+      expect(retryPass).toMatch(/runAgent\("target",[\s\S]*?inputPaths: \[fb\]/);
+      expect(retryPass).not.toMatch(/runAgent\("target",[\s\S]*?inputPaths: \[x\]/);
+      // The revise prompt still scaffolds the feedback-file block.
+      expect(retryPass).toMatch(/Feedback files to address:/);
+    });
+
+    it(`${host}: prompt-only revise — retry-pass target drops the inputPaths clause`, () => {
+      const yamlPath = setupFixture({
+        agents: ['prod', 'fbmaker', 'target', 'gate'],
+        yaml: build('        prompt: Address the feedback.'),
+      });
+      const { mainPass, retryPass } = splitPasses(compile(yamlPath));
+      // Main pass keeps the original declared-input check.
+      expect(mainPass).toMatch(/runAgent\("target",[\s\S]*?inputPaths: \[x\]/);
+      // Prompt-only names no feedback files, so the retry-pass target emit
+      // carries NO inputPaths clause at all — its opts close right after
+      // extraArgs.
+      // The exact opts string (closing right after extraArgs) proves no
+      // inputPaths clause on the target emit. A lazy `runAgent("target", ...
+      // inputPaths:` regex would false-positive here by spanning into the
+      // gate re-exec's own inputPaths, so assert the precise call instead.
+      expect(retryPass).toContain(
+        'runAgent("target", "Address the feedback.", "t.md", ' +
+          '{ cli: CLI, agentDirs: AGENT_DIRS, extraArgs: DEFAULT_EXTRA_ARGS })',
+      );
+    });
+  }
+
+  it('retry-pass target inputPaths list every revise_with.inputs bind in YAML order', () => {
+    // computeReviseInputPaths maps each revise_with.inputs entry through
+    // inputPathTokenForRef in declared order; the runtime walks inputPaths
+    // in array order, so the order contract must hold end-to-end. Every
+    // matrix cell above uses a single feedback bind — this pins the
+    // multi-entry loop and that the order follows YAML, not scope order.
+    const yamlPath = setupFixture({
+      agents: ['fbA', 'fbB', 'target', 'gate'],
+      yaml: `
+pipeline: p
+cli: claude
+inputs: [seed]
+flow:
+  - step: fbA
+    input: $seed
+    produces: fa.md
+    bind: fbAOut
+  - step: fbB
+    input: $seed
+    produces: fb.md
+    bind: fbBOut
+  - step: target
+    input: $seed
+    produces: t.md
+    bind: tOut
+  - step: gate
+    input: $tOut
+    produces: g.json
+    bind: gateOut
+    on_fail:
+      verdict_field: status
+      retry_from: tOut
+      revise_with:
+        inputs: [$fbBOut, $fbAOut]
+`,
+    });
+    const { retryPass } = splitPasses(compile(yamlPath));
+    // YAML lists fbBOut before fbAOut, so the emitted array preserves that order.
+    expect(retryPass).toMatch(/runAgent\("target",[\s\S]*?inputPaths: \[fbBOut, fbAOut\]/);
+  });
+
+  it('non-target intermediate step keeps its original inputPaths on retry', () => {
+    // Zone = [first, gate). `first` is the retry_from target (its inputPaths
+    // swap to the revise_with bind); `middle` is an intermediate non-target
+    // member whose prompt is NOT rewritten, so it keeps its original
+    // declared-input check — proving only the retry-target member changes.
+    const yamlPath = setupFixture({
+      agents: ['fbmaker', 'first', 'middle', 'gate'],
+      yaml: `
+pipeline: p
+cli: claude
+inputs: [seed]
+flow:
+  - step: fbmaker
+    input: $seed
+    produces: fb.md
+    bind: fb
+  - step: first
+    input: $seed
+    produces: a.md
+    bind: firstOut
+  - step: middle
+    input: $firstOut
+    produces: b.md
+    bind: midOut
+  - step: gate
+    input: $midOut
+    produces: g.json
+    bind: gateOut
+    on_fail:
+      verdict_field: status
+      retry_from: firstOut
+      revise_with:
+        inputs: [$fb]
+`,
+    });
+    const { retryPass } = splitPasses(compile(yamlPath));
+    // The retry-target `first` swaps to the revise_with feedback bind.
+    expect(retryPass).toMatch(/runAgent\("first",[\s\S]*?inputPaths: \[fb\]/);
+    // The intermediate `middle` keeps its original `$firstOut` input check.
+    expect(retryPass).toMatch(/runAgent\("middle",[\s\S]*?inputPaths: \[firstOut\]/);
+  });
+});
+
 describe('processRetryGate: foreach admission', () => {
   it('admits foreach bind as retry_from target (no compile error)', () => {
     // Aggregate's `retry_from: results` targets the foreach — admitted:

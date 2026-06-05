@@ -11,7 +11,7 @@ import {
 } from '../types.js';
 import { ProducerInfo } from './scope.js';
 import { inputExprFor, multiInputExpr, computeInputPaths, substituteBindRefs } from './inputs.js';
-import { RetryGateInfo, buildRevisePromptExpr } from './revise.js';
+import { RetryGateInfo, buildRevisePromptExpr, computeReviseInputPaths } from './revise.js';
 import { isParallelFeedingAggregateGate } from './retry-gate.js';
 
 /** Emit the `await runAgent(...)` call expression for a step (no `const` /
@@ -61,17 +61,22 @@ import { isParallelFeedingAggregateGate } from './retry-gate.js';
  *    fallthrough is resolved by the emitted JS at runtime, not by
  *    loom-compile.
  *
- *  `inputPaths` is computed here (via `computeInputPaths`) so the
- *  retry-callback re-emits inherit the pre-spawn input check for free:
- *  every runAgent call site — initial pass, retry-target rewrite,
- *  intermediate-zone-member re-fire, parallel-child re-execution — flows
- *  through this single emitter, so the runtime validates declared inputs
- *  symmetrically on both passes. */
+ *  `inputPaths` defaults to `computeInputPaths(it, scope)` — the step's
+ *  declared `inputs:` — so most call sites (initial pass, intermediate-
+ *  zone-member re-fire, parallel-child re-execution, branch-terminal emit)
+ *  validate the same declared-input set on both passes. The retry-target
+ *  step is the one exception: `buildRetryBody` rewrites its prompt from
+ *  `revise_with`, so it passes `inputPathsOverride` (derived from
+ *  `revise_with` via `computeReviseInputPaths`) to keep the pre-flight check
+ *  aligned with the files the rewritten prompt actually names. An empty
+ *  override array drops the check entirely (prompt-only revise mode names no
+ *  feedback files), relying on the omit-when-empty handling below. */
 export function emitRunAgentExpr(
   it: StepItemT,
   scope: Map<string, ProducerInfo>,
   promptOverride?: string,
   overrideMode: 'replace' | 'fallback' = 'replace',
+  inputPathsOverride?: string[],
 ): string {
   const normalInputExpr = it.inputs
     ? multiInputExpr(it.inputs, scope)
@@ -95,7 +100,7 @@ export function emitRunAgentExpr(
   // into emit would dilute the single source-of-truth (`runtime/agent.ts`) and
   // lengthen every step's options bag for no behavior change.
   const timeoutExpr = it.timeout !== undefined ? `, timeout: ${it.timeout}` : '';
-  const inputPaths = computeInputPaths(it, scope);
+  const inputPaths = inputPathsOverride ?? computeInputPaths(it, scope);
   // Omit the clause when empty so steps with no resolvable inputs emit
   // byte-identical output (the runtime treats `undefined` as "skip the
   // check," matching the absence).
@@ -221,6 +226,11 @@ export function buildRetryBody(
     producesPath: targetProducer.producesPath ?? '',
   };
   const revisePromptExpr = buildRevisePromptExpr(gate, targetInfo, scope);
+  // The retry-target step's prompt is rebuilt from `revise_with`, so its
+  // pre-flight inputPaths must derive from `revise_with` too (by mode) rather
+  // than from the step's original `inputs:`. Computed once here and threaded
+  // only onto the retry-target member emit below.
+  const reviseInputPaths = computeReviseInputPaths(gate.reviseWith, scope);
 
   for (let k = retryFromIdx; k < gateIdx; k++) {
     const member = items[k];
@@ -229,7 +239,7 @@ export function buildRetryBody(
       if (memberBind === undefined) continue;
       if (k === retryFromIdx) {
         body.push(
-          `${pad}    ${memberBind} = ${emitRunAgentExpr(member, scope, revisePromptExpr)};`,
+          `${pad}    ${memberBind} = ${emitRunAgentExpr(member, scope, revisePromptExpr, 'replace', reviseInputPaths)};`,
         );
       } else {
         body.push(`${pad}    ${memberBind} = ${emitRunAgentExpr(member, scope)};`);
