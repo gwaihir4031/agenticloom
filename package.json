@@ -1,6 +1,6 @@
 {
   "name": "agenticloom",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Meta-harness compiler — composes Claude Code and Copilot CLI into reproducible multi-step workflows with verification, recovery, and human-in-the-loop as first-class primitives.",
   "type": "module",
   "license": "Apache-2.0",
@@ -28,7 +28,9 @@
     "compiler",
     "cli",
     "review-loop",
-    "human-in-the-loop"
+    "human-in-the-loop",
+    "ralph-loop",
+    "ralph-wiggum-loop"
   ],
   "engines": {
     "node": ">=20"
