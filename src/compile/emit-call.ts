@@ -14,6 +14,34 @@ import { inputExprFor, multiInputExpr, computeInputPaths, substituteBindRefs } f
 import { RetryGateInfo, buildRevisePromptExpr, computeReviseInputPaths } from './revise.js';
 import { isParallelFeedingAggregateGate } from './retry-gate.js';
 
+/** Override channels for `emitRunAgentExpr`, modeled as a discriminated
+ *  union on `mode` so the prompt/inputPaths pairing this feature restores
+ *  cannot be split across channels. Each mode owns exactly one inputPaths
+ *  channel: the `'replace'` arm carries a compile-time `inputPathsOverride`
+ *  array, the `'fallback'` arm a runtime `fallbackInputPathsIdent`. Selecting
+ *  the inputPaths channel that belongs to the other mode is an excess-property
+ *  type error, not a silently-emitted prompt/inputPaths skew — the exact
+ *  regression this feature exists to eliminate. The common no-override call is
+ *  `{}` (replace arm; `mode` defaults to `'replace'`). */
+export type RunAgentEmitOverrides =
+  | {
+      /** Compile-time wholesale substitution (default). `promptOverride`
+       *  replaces the normal input expression outright; `inputPathsOverride`
+       *  replaces the declared inputPaths (an empty array drops the clause). */
+      mode?: 'replace';
+      promptOverride?: string;
+      inputPathsOverride?: string[];
+    }
+  | {
+      /** Runtime `??` deferral. The emit becomes `<promptOverride> ?? <normal>`
+       *  and `inputPaths: <fallbackInputPathsIdent> ?? [<original>]`, so a
+       *  single terminal emit serves both passes — the emitted JS, not the
+       *  compiler, resolves which value wins. */
+      mode: 'fallback';
+      promptOverride?: string;
+      fallbackInputPathsIdent?: string;
+    };
+
 /** Emit the `await runAgent(...)` call expression for a step (no `const` /
  *  `let` prefix, no trailing `;`). Used by both the main-pass step emit
  *  (which prepends `const`/`let ${v} = ` + appends `;`) and the on_fail
@@ -24,7 +52,7 @@ import { isParallelFeedingAggregateGate } from './retry-gate.js';
  *  ONCE at the main-pass site; the retry callback re-emits the same call
  *  shape against an already-validated step.
  *
- *  The two `overrideMode` values exist because the call sites need
+ *  The two `mode` values exist because the call sites need
  *  fundamentally different emit shapes — one wants compile-time
  *  wholesale substitution, the other needs the substitution deferred
  *  to the emitted JS at runtime:
@@ -45,7 +73,7 @@ import { isParallelFeedingAggregateGate } from './retry-gate.js';
  *    `promptOverride` here is `"revisePromptForTerminal"` — the name of
  *    the JS closure parameter, NOT a literal prompt. The main-pass call
  *    site passes the literal `undefined` as the closure arg (every call
- *    site passes an explicit arg now since the parameter is required),
+ *    site passes explicit args now since the closure's two parameters are required),
  *    so at runtime the parameter is `undefined` and the runtime `??`
  *    falls through to the normal input. The retry callback invokes the
  *    closure with the rendered revise prompt, and the runtime `??`
@@ -63,31 +91,44 @@ import { isParallelFeedingAggregateGate } from './retry-gate.js';
  *
  *  `inputPaths` defaults to `computeInputPaths(it, scope)` — the step's
  *  declared `inputs:` — so most call sites (initial pass, intermediate-
- *  zone-member re-fire, parallel-child re-execution, branch-terminal emit)
- *  validate the same declared-input set on both passes. The retry-target
- *  step is the one exception: `buildRetryBody` rewrites its prompt from
- *  `revise_with`, so it passes `inputPathsOverride` (derived from
- *  `revise_with` via `computeReviseInputPaths`) to keep the pre-flight check
- *  aligned with the files the rewritten prompt actually names. An empty
- *  override array drops the check entirely (prompt-only revise mode names no
- *  feedback files), relying on the omit-when-empty handling below. */
+ *  zone-member re-fire, parallel-child re-execution) validate the same
+ *  declared-input set on both passes. Two override channels mirror the two
+ *  prompt-override modes, because the retry-target step's pre-flight check
+ *  must follow its rewritten `revise_with` prompt, not its stale `inputs:`:
+ *
+ *  - `inputPathsOverride` (pairs with `'replace'`): a compile-time token
+ *    array. `buildRetryBody` derives it from `revise_with` via
+ *    `computeReviseInputPaths` and threads it onto the retry-target STEP
+ *    member's emit. An empty array drops the check entirely (prompt-only
+ *    revise mode names no feedback files), via the omit-when-empty handling.
+ *
+ *  - `fallbackInputPathsIdent` (pairs with `'fallback'`): the NAME of the
+ *    arm closure's `reviseInputPathsForTerminal` parameter. A branch-arm
+ *    terminal is emitted ONCE and reused on both passes, so its inputPaths —
+ *    like its prompt — must be runtime-conditional, not compile-time
+ *    pass-specific. When supplied, the clause is emitted as the runtime
+ *    expression `inputPaths: <ident> ?? [<original tokens>]` and is ALWAYS
+ *    present (it cannot be compile-time-omitted, since whether the check
+ *    runs is decided at JS runtime by the `??`): the main pass calls the
+ *    closure with `undefined` (`undefined ?? [orig]` = orig), an
+ *    inputs-bearing retry passes the revise binds, and a prompt-only retry
+ *    passes `[]` (`[] ?? [orig]` = `[]` = validate nothing). */
 export function emitRunAgentExpr(
   it: StepItemT,
   scope: Map<string, ProducerInfo>,
-  promptOverride?: string,
-  overrideMode: 'replace' | 'fallback' = 'replace',
-  inputPathsOverride?: string[],
+  overrides: RunAgentEmitOverrides = {},
 ): string {
+  const { promptOverride } = overrides;
   const normalInputExpr = it.inputs
     ? multiInputExpr(it.inputs, scope)
     : inputExprFor(it.input, scope);
   let inputExpr: string;
   if (promptOverride === undefined) {
     inputExpr = normalInputExpr;
-  } else if (overrideMode === 'replace') {
-    inputExpr = promptOverride;
-  } else {
+  } else if (overrides.mode === 'fallback') {
     inputExpr = `${promptOverride} ?? ${normalInputExpr}`;
+  } else {
+    inputExpr = promptOverride;
   }
   // Explicit `undefined` (not omission) when `produces:` is unset: `opts`
   // is the 4th positional arg of `runAgent`, so the 3rd slot must be filled
@@ -100,11 +141,26 @@ export function emitRunAgentExpr(
   // into emit would dilute the single source-of-truth (`runtime/agent.ts`) and
   // lengthen every step's options bag for no behavior change.
   const timeoutExpr = it.timeout !== undefined ? `, timeout: ${it.timeout}` : '';
-  const inputPaths = inputPathsOverride ?? computeInputPaths(it, scope);
-  // Omit the clause when empty so steps with no resolvable inputs emit
-  // byte-identical output (the runtime treats `undefined` as "skip the
-  // check," matching the absence).
-  const inputPathsClause = inputPaths.length > 0 ? `, inputPaths: [${inputPaths.join(', ')}]` : '';
+  let inputPathsClause: string;
+  if (overrides.mode === 'fallback' && overrides.fallbackInputPathsIdent !== undefined) {
+    // Runtime-conditional: the same emit serves main pass (`undefined ??
+    // [orig]` = orig) and retry (`[revise] ?? [orig]` = revise, or `[] ??
+    // [orig]` = `[]` = validate nothing). Always present — the runtime `??`,
+    // not the compiler, decides whether the check runs.
+    const originalPaths = computeInputPaths(it, scope);
+    inputPathsClause = `, inputPaths: ${overrides.fallbackInputPathsIdent} ?? [${originalPaths.join(', ')}]`;
+  } else {
+    // Compile-time path: the replace arm's `inputPathsOverride`, or the
+    // declared inputs when no override is given (the fallback arm reaches
+    // here only with its ident unset, so it has no compile-time override).
+    const compileTimeOverride =
+      overrides.mode === 'fallback' ? undefined : overrides.inputPathsOverride;
+    const inputPaths = compileTimeOverride ?? computeInputPaths(it, scope);
+    // Omit the clause when empty so steps with no resolvable inputs emit
+    // byte-identical output (the runtime treats `undefined` as "skip the
+    // check," matching the absence).
+    inputPathsClause = inputPaths.length > 0 ? `, inputPaths: [${inputPaths.join(', ')}]` : '';
+  }
   const optsExpr = `{ cli: CLI, agentDirs: AGENT_DIRS, extraArgs: ${extraArgsExpr}${timeoutExpr}${inputPathsClause} }`;
   return `await runAgent(${JSON.stringify(it.step)}, ${inputExpr}${producesArg}, ${optsExpr})`;
 }
@@ -239,7 +295,7 @@ export function buildRetryBody(
       if (memberBind === undefined) continue;
       if (k === retryFromIdx) {
         body.push(
-          `${pad}    ${memberBind} = ${emitRunAgentExpr(member, scope, revisePromptExpr, 'replace', reviseInputPaths)};`,
+          `${pad}    ${memberBind} = ${emitRunAgentExpr(member, scope, { promptOverride: revisePromptExpr, inputPathsOverride: reviseInputPaths })};`,
         );
       } else {
         body.push(`${pad}    ${memberBind} = ${emitRunAgentExpr(member, scope)};`);
@@ -287,12 +343,19 @@ export function buildRetryBody(
       // Substitute $-prefixed bind refs in the when: expression — same
       // discipline the main-pass branch emit applies.
       const whenExprSub = substituteBindRefs(member.branch.when, scope);
-      // Revise-prompt threading: only the retry_from target's terminal step
-      // receives the override. Intermediate branch members re-fire their
-      // arms with no override (their terminal steps run with normal inputs).
+      // Revise-prompt + revise-inputPaths threading: only the retry_from
+      // target's terminal step receives the overrides. Intermediate branch
+      // members re-fire their arms with `undefined` for both (their terminal
+      // steps run with their normal prompt and original inputPaths via the
+      // closure's runtime `??` fallthrough). The inputPaths arg is the SAME
+      // `reviseInputPaths` tokens t1's step path uses, rendered as a runtime
+      // array literal: on the retry-target pass `[reviseBinds] ?? [orig]`
+      // resolves to the revise binds (or `[] ?? [orig]` = `[]` for prompt-
+      // only mode, validating nothing).
       const promptArg = k === retryFromIdx ? revisePromptExpr : 'undefined';
+      const inputPathsArg = k === retryFromIdx ? `[${reviseInputPaths.join(', ')}]` : 'undefined';
       body.push(
-        `${pad}    if (${whenExprSub}) ${branchBind} = await ${branchInfo.runThenName}(${promptArg});`,
+        `${pad}    if (${whenExprSub}) ${branchBind} = await ${branchInfo.runThenName}(${promptArg}, ${inputPathsArg});`,
       );
       // When the branch has no else arm, the else case assigns undefined —
       // mirroring the main-pass shape. The bind is non-consumable in this
@@ -300,7 +363,9 @@ export function buildRetryBody(
       // so downstream `$ref` was already rejected at the main-pass emit
       // and the `undefined` value never reaches a consumer.
       if (branchInfo.runElseName !== undefined) {
-        body.push(`${pad}    else ${branchBind} = await ${branchInfo.runElseName}(${promptArg});`);
+        body.push(
+          `${pad}    else ${branchBind} = await ${branchInfo.runElseName}(${promptArg}, ${inputPathsArg});`,
+        );
       } else {
         body.push(`${pad}    else ${branchBind} = undefined;`);
       }
