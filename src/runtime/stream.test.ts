@@ -92,6 +92,89 @@ describe('formatStreamEvent', () => {
     expect(formatStreamEvent(evt)).toBeNull();
   });
 
+  it('renders a fully-populated api_retry event as a single status line', async () => {
+    const { formatStreamEvent } = await import('./stream.js');
+    const evt = JSON.stringify({
+      type: 'system',
+      subtype: 'api_retry',
+      attempt: 3,
+      max_retries: 20,
+      retry_delay_ms: 8000,
+      error: 'overloaded',
+      error_status: 529,
+    });
+    expect(formatStreamEvent(evt)).toBe('  ⟳ retry 3/20 — overloaded, waiting 8s\n');
+  });
+
+  it('falls back to "?" and omits absent clauses for a sparse api_retry event', async () => {
+    const { formatStreamEvent } = await import('./stream.js');
+    const evt = JSON.stringify({ type: 'system', subtype: 'api_retry', attempt: 2 });
+    expect(formatStreamEvent(evt)).toBe('  ⟳ retry 2/?\n');
+  });
+
+  it('renders "?" for a missing attempt while keeping a present max_retries', async () => {
+    const { formatStreamEvent } = await import('./stream.js');
+    const evt = JSON.stringify({ type: 'system', subtype: 'api_retry', max_retries: 20 });
+    expect(formatStreamEvent(evt)).toBe('  ⟳ retry ?/20\n');
+  });
+
+  it('keeps the category but omits the waiting clause when retry_delay_ms is absent', async () => {
+    const { formatStreamEvent } = await import('./stream.js');
+    const evt = JSON.stringify({
+      type: 'system',
+      subtype: 'api_retry',
+      attempt: 3,
+      max_retries: 20,
+      error: 'rate_limit',
+    });
+    expect(formatStreamEvent(evt)).toBe('  ⟳ retry 3/20 — rate_limit\n');
+  });
+
+  it('keeps the waiting clause but omits the category when error is absent', async () => {
+    const { formatStreamEvent } = await import('./stream.js');
+    const evt = JSON.stringify({
+      type: 'system',
+      subtype: 'api_retry',
+      attempt: 3,
+      max_retries: 20,
+      retry_delay_ms: 5000,
+    });
+    expect(formatStreamEvent(evt)).toBe('  ⟳ retry 3/20, waiting 5s\n');
+  });
+
+  it('rounds retry_delay_ms to whole seconds rather than flooring', async () => {
+    // 8700ms is 8.7s: Math.round yields 9, a floor/truncate would yield 8.
+    const { formatStreamEvent } = await import('./stream.js');
+    const evt = JSON.stringify({
+      type: 'system',
+      subtype: 'api_retry',
+      attempt: 1,
+      max_retries: 20,
+      retry_delay_ms: 8700,
+    });
+    expect(formatStreamEvent(evt)).toBe('  ⟳ retry 1/20, waiting 9s\n');
+  });
+
+  it('does not render error_status anywhere in the api_retry line', async () => {
+    // error_status is captured for telemetry only; with no error category it
+    // must not surface as a dash clause or a raw status number.
+    const { formatStreamEvent } = await import('./stream.js');
+    const evt = JSON.stringify({
+      type: 'system',
+      subtype: 'api_retry',
+      attempt: 3,
+      max_retries: 20,
+      error_status: 529,
+    });
+    expect(formatStreamEvent(evt)).toBe('  ⟳ retry 3/20\n');
+  });
+
+  it('returns null for an unknown system subtype', async () => {
+    const { formatStreamEvent } = await import('./stream.js');
+    const evt = JSON.stringify({ type: 'system', subtype: 'compact_boundary' });
+    expect(formatStreamEvent(evt)).toBeNull();
+  });
+
   it('returns null for unhandled stream_event subtypes', async () => {
     const { formatStreamEvent } = await import('./stream.js');
     const evt = JSON.stringify({ type: 'stream_event', event: { type: 'message_start' } });
@@ -108,6 +191,31 @@ describe('formatStreamEvent', () => {
     expect(formatStreamEvent('42')).toBeNull();
     expect(formatStreamEvent('"text"')).toBeNull();
     expect(formatStreamEvent('[1,2]')).toBeNull();
+  });
+});
+
+describe('formatApiRetry', () => {
+  // Exported so the mini-mode mirror reuses the one line format; covered
+  // directly here so that reuse seam stays pinned independent of the
+  // formatStreamEvent dispatch.
+
+  it('builds the canonical full-field status line with indent and trailing newline', async () => {
+    const { formatApiRetry } = await import('./stream.js');
+    const evt = {
+      type: 'system',
+      subtype: 'api_retry',
+      attempt: 3,
+      max_retries: 20,
+      retry_delay_ms: 8000,
+      error: 'overloaded',
+      error_status: 529,
+    };
+    expect(formatApiRetry(evt)).toBe('  ⟳ retry 3/20 — overloaded, waiting 8s\n');
+  });
+
+  it('renders both counters as "?" when attempt and max_retries are absent', async () => {
+    const { formatApiRetry } = await import('./stream.js');
+    expect(formatApiRetry({ type: 'system', subtype: 'api_retry' })).toBe('  ⟳ retry ?/?\n');
   });
 });
 

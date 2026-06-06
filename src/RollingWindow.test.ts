@@ -57,6 +57,125 @@ describe('RollingWindow', () => {
       expect(all).toContain('end_turn');
     });
 
+    it('renders the retry summary on the collapse line when retry_count > 0', async () => {
+      const { RollingWindow } = await import('./RollingWindow.js');
+      const window = new RollingWindow('ac-writer', null);
+      window.start();
+      window.setResult({ retry_count: 3, retry_category: 'overloaded' });
+      stdoutWrites = []; // discard the start render
+      window.finish('ok');
+      const all = stdoutWrites.join('');
+      expect(all).toContain('✓ ac-writer');
+      expect(all).toContain('retried 3× (overloaded)');
+    });
+
+    it('merges separate setResult calls so retry summary and result telemetry both survive', async () => {
+      const { RollingWindow } = await import('./RollingWindow.js');
+      const window = new RollingWindow('ac-writer', null);
+      window.start();
+      // Two independent sinks: the incremental retry summary and the terminal
+      // result event. Neither call may clobber the other.
+      window.setResult({ retry_count: 3, retry_category: 'overloaded' });
+      window.setResult({ num_turns: 12, total_cost_usd: 0.01, stop_reason: 'end_turn' });
+      stdoutWrites = [];
+      window.finish('ok');
+      const all = stdoutWrites.join('');
+      expect(all).toContain('12 turns');
+      expect(all).toContain('$0.0100');
+      expect(all).toContain('retried 3× (overloaded)');
+    });
+
+    it('renders the retry summary on an error finish too', async () => {
+      const { RollingWindow } = await import('./RollingWindow.js');
+      const window = new RollingWindow('ac-writer', null);
+      window.start();
+      window.setResult({ retry_count: 3, retry_category: 'overloaded' });
+      stdoutWrites = [];
+      window.finish('error');
+      const all = stdoutWrites.join('');
+      expect(all).toContain('✗ ac-writer');
+      expect(all).toContain('retried 3× (overloaded)');
+    });
+
+    it('renders retry count without a parenthetical when category is absent', async () => {
+      const { RollingWindow } = await import('./RollingWindow.js');
+      const window = new RollingWindow('ac-writer', null);
+      window.start();
+      window.setResult({ retry_count: 2 });
+      stdoutWrites = [];
+      window.finish('ok');
+      const all = stdoutWrites.join('');
+      expect(all).toContain('retried 2×');
+      expect(all).not.toContain('retried 2× (');
+    });
+
+    it('omits the retry summary when retry_count is 0 or unset', async () => {
+      const { RollingWindow } = await import('./RollingWindow.js');
+      const zero = new RollingWindow('zero-agent', null);
+      zero.start();
+      zero.setResult({ retry_count: 0, num_turns: 1 });
+      stdoutWrites = [];
+      zero.finish('ok');
+      expect(stdoutWrites.join('')).not.toContain('retried');
+
+      const unset = new RollingWindow('unset-agent', null);
+      unset.start();
+      unset.setResult({ num_turns: 1 });
+      stdoutWrites = [];
+      unset.finish('ok');
+      expect(stdoutWrites.join('')).not.toContain('retried');
+    });
+
+    it('merges a result event set before the retry fields without clobbering either', async () => {
+      // Reverse of the other merge test: the terminal result event arrives
+      // first, then the incremental retry summary. The later retry call must
+      // not wipe the turns/cost already recorded.
+      const { RollingWindow } = await import('./RollingWindow.js');
+      const window = new RollingWindow('ac-writer', null);
+      window.start();
+      window.setResult({ num_turns: 12, total_cost_usd: 0.01, stop_reason: 'end_turn' });
+      window.setResult({ retry_count: 3, retry_category: 'overloaded' });
+      stdoutWrites = [];
+      window.finish('ok');
+      const all = stdoutWrites.join('');
+      expect(all).toContain('12 turns');
+      expect(all).toContain('$0.0100');
+      expect(all).toContain('retried 3× (overloaded)');
+    });
+
+    it('appends the retry clause as a dot-joined part after turns, cost, and stop_reason', async () => {
+      // Pins the ordering: the retry clause is the last meta part, joined to
+      // the result-event parts with the same ` · ` separator.
+      const { RollingWindow } = await import('./RollingWindow.js');
+      const window = new RollingWindow('ac-writer', null);
+      window.start();
+      window.setResult({
+        num_turns: 3,
+        total_cost_usd: 0.01,
+        stop_reason: 'end_turn',
+        retry_count: 3,
+        retry_category: 'overloaded',
+      });
+      stdoutWrites = [];
+      window.finish('ok');
+      const all = stdoutWrites.join('');
+      expect(all).toContain('3 turns · $0.0100 · end_turn · retried 3× (overloaded)');
+    });
+
+    it('records retry_exhausted as a typed field without rendering it on the collapse line', async () => {
+      // retry_exhausted is structured data for a future auto-resume consumer:
+      // it must never appear in the rendered status line, even when set true.
+      const { RollingWindow } = await import('./RollingWindow.js');
+      const window = new RollingWindow('ac-writer', null);
+      window.start();
+      window.setResult({ retry_count: 1, retry_category: 'overloaded', retry_exhausted: true });
+      stdoutWrites = [];
+      window.finish('error');
+      const all = stdoutWrites.join('');
+      expect(all).toContain('retried 1× (overloaded)');
+      expect(all).not.toContain('exhausted');
+    });
+
     it('renders ✗ icon on error finish', async () => {
       const { RollingWindow } = await import('./RollingWindow.js');
       const window = new RollingWindow('ac-writer', null);

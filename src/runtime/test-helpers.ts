@@ -1,5 +1,6 @@
 import { EventEmitter } from 'events';
 import { Readable } from 'node:stream';
+import { vi } from 'vitest';
 
 /** Shape of the fake child returned by `makeFakeChild`. Named so that the
  *  inferred return type doesn't drift across the multiple sibling test files
@@ -122,4 +123,19 @@ export function makeFakeRunAgentChild(
     stderr.push(null); // close the stream so the both-ended gate fires
   });
   return child;
+}
+
+/** Spy on process.stdout.write, capturing each written chunk as a string into
+ *  the returned array. Centralizes the one awkwardness process.stdout.write's
+ *  overloaded signature otherwise forces at each call site: typing the
+ *  parameter as the full `string | Uint8Array` union (rather than the narrower
+ *  `string` the call sites used) lets the implementation type-check without an
+ *  `as any` cast. Restored by the suite's existing afterEach restoreAllMocks. */
+export function captureStdoutWrites(): string[] {
+  const writes: string[] = [];
+  vi.spyOn(process.stdout, 'write').mockImplementation((chunk: string | Uint8Array) => {
+    writes.push(String(chunk));
+    return true;
+  });
+  return writes;
 }

@@ -4,7 +4,7 @@ import { homedir } from 'os';
 import * as path from 'path';
 import * as readline from 'readline';
 import { RollingWindow } from '../RollingWindow.js';
-import { formatStreamEvent, extractPrimaryArg } from './stream.js';
+import { formatStreamEvent, formatApiRetry, extractPrimaryArg } from './stream.js';
 import type { StreamEvent } from './stream.js';
 
 /** Thrown by retry-shaped primitives when their author opted into hard-fail on
@@ -380,6 +380,14 @@ export async function runAgent(
     const child = spawn(bin, finalArgs, { cwd: agentCwd, stdio: ['ignore', 'pipe', 'pipe'] });
     let settled = false;
     let textBuffer = '';
+    // Run-scoped api_retry accumulator, folded into the window's result
+    // telemetry on every retry event (not just at the terminal `result`) so the
+    // summary survives a run that dies mid-retry-storm before any result event.
+    // `retryCategory` is last-write-wins across retries; `retryExhausted` latches
+    // true once an attempt reaches its ceiling and never reverts.
+    let retryCount = 0;
+    let retryCategory: string | undefined;
+    let retryExhausted = false;
     // Rolling tail of the child's stderr — the last STDERR_TAIL_CAP UTF-16 code
     // units, reconstructed line-by-line in the stderr reader below. The THIRD
     // stderr sink (after the process.stderr echo and the --save-logs log tee);
@@ -496,6 +504,32 @@ export async function runAgent(
           ) {
             textBuffer += evt.event.delta.text ?? '';
           }
+          // Capture api_retry telemetry mode-independently, BEFORE the
+          // mini/full display split. Unlike the `result` branch above, this one
+          // must NOT return: an api_retry still has to reach both render paths
+          // below (full-mode formatStreamEvent in the else branch, mini-mode
+          // mirror inside the isMini branch), so it falls through like the
+          // text_delta check rather than short-circuiting. The setResult call
+          // records the running summary now so it persists even if the run dies
+          // before the terminal `result` event.
+          if (evt.type === 'system' && evt.subtype === 'api_retry') {
+            retryCount++;
+            if (evt.error) retryCategory = evt.error;
+            // max_retries > 0 keeps a degenerate 0/0 event from spuriously latching.
+            if (
+              evt.attempt != null &&
+              evt.max_retries != null &&
+              evt.max_retries > 0 &&
+              evt.attempt >= evt.max_retries
+            ) {
+              retryExhausted = true;
+            }
+            window.setResult({
+              retry_count: retryCount,
+              retry_category: retryCategory,
+              retry_exhausted: retryExhausted,
+            });
+          }
           // Display path differs by mode. In full mode (sequential agents)
           // the 25-row box has room for text deltas + tool args + everything
           // formatStreamEvent renders. In mini mode (parallel agents, 3
@@ -507,6 +541,14 @@ export async function runAgent(
           // `content_block_stop`; tools not in the primary-arg table get
           // the bare name (`◇ <name>`).
           if (window.isMini) {
+            // api_retry is a `system` event carrying no content_block, so it
+            // sits outside the tool-call state machine below. Mirror full
+            // mode's retry line through the same helper so the two display
+            // modes never drift.
+            if (evt.type === 'system' && evt.subtype === 'api_retry') {
+              window.feed(formatApiRetry(evt));
+              return;
+            }
             const e = evt.event;
             if (e?.type === 'content_block_start' && e?.content_block?.type === 'tool_use') {
               currentTool = { name: e.content_block.name ?? '?', argsBuffer: '' };
