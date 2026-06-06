@@ -1010,7 +1010,18 @@ export function emit(
       // Fresh path scope per parallel block: siblings share the collision check,
       // unrelated parallel blocks (and sequential steps) do not.
       const childPathScope = new Map<string, string>();
-      out.push(`${pad}const [${names.join(', ')}] = await parallel([`);
+      // Mirror the step (line ~549) and aggregate (line ~921) emitters: a
+      // parallel whose children are retry-zone members must be declared `let`,
+      // not `const`. The zone-member pre-pass adds those child binds to
+      // `zoneMembers` precisely so the gate's retry callback can re-fire the
+      // parallel and reassign the destructured names (`[a, b] = await
+      // parallel(...)`); a `const` declaration turns that reassignment into a
+      // runtime `TypeError: Assignment to constant variable` the moment the
+      // first sibling resolves, aborting the whole run. One declarator covers
+      // every name, so `.some` is the all-or-nothing choice — the carve-out
+      // marks all of a feeding parallel's children together or none of them.
+      const parallelDecl = names.some((n) => zoneMembers.has(n)) ? 'let' : 'const';
+      out.push(`${pad}${parallelDecl} [${names.join(', ')}] = await parallel([`);
       const childInfos: Array<Omit<ProducerInfo, 'declarationScope'>> = [];
       for (let ci = 0; ci < children.length; ci++) {
         const child = children[ci];

@@ -773,6 +773,85 @@ flow:
     expect(retryBody).toMatch(/overall = await aggregate/);
   });
 
+  it('declares a feeding parallel as let (not const) so the retry callback can reassign it', () => {
+    // Regression: a parallel whose children feed an aggregate retry gate is
+    // re-fired by the gate's retry callback via `[sec, api] = await
+    // parallel(...)` (asserted by the carve-out test above). If the
+    // FIRST-attempt declaration is `const`, that reassignment throws
+    // `TypeError: Assignment to constant variable` at runtime the instant the
+    // first sibling resolves — aborting the run with the other siblings still
+    // in flight. The declaration must be `let`, matching the step/aggregate
+    // zone-member emitters; this guards the keyword that makes the reassignment
+    // legal, which a text-only check of the retry body cannot see.
+    const yamlPath = setupFixture({
+      agents: ['writer', 'sec-rev', 'api-rev'],
+      yaml: `
+pipeline: p
+cli: claude
+inputs: [x]
+flow:
+  - step: writer
+    input: $x
+    produces: out.md
+    bind: writerOut
+  - parallel:
+      - step: sec-rev
+        input: $writerOut
+        produces: sec.json
+        bind: sec
+      - step: api-rev
+        input: $writerOut
+        produces: api.json
+        bind: api
+  - aggregate:
+      inputs: { security: $sec, api: $api }
+      verdict_field: status
+      bind: overall
+      retry_from: writerOut
+      revise_with:
+        prompt: Retry.
+`,
+    });
+    const emitted = compile(yamlPath);
+    expect(emitted).toMatch(/let \[sec, api\] = await parallel/);
+    expect(emitted).not.toMatch(/const \[sec, api\] = await parallel/);
+  });
+
+  it('keeps a parallel OUTSIDE any retry zone declared as const', () => {
+    // Guards the fix's surgical boundary: only zone-member parallels flip to
+    // `let`. A parallel with no enclosing retry zone is never reassigned, so
+    // its destructuring stays `const` — byte-identical to pre-fix output.
+    const yamlPath = setupFixture({
+      agents: ['writer', 'sec-rev', 'api-rev'],
+      yaml: `
+pipeline: p
+cli: claude
+inputs: [x]
+flow:
+  - step: writer
+    input: $x
+    produces: out.md
+    bind: writerOut
+  - parallel:
+      - step: sec-rev
+        input: $writerOut
+        produces: sec.json
+        bind: sec
+      - step: api-rev
+        input: $writerOut
+        produces: api.json
+        bind: api
+  - aggregate:
+      inputs: { security: $sec, api: $api }
+      verdict_field: status
+      bind: overall
+`,
+    });
+    const emitted = compile(yamlPath);
+    expect(emitted).toMatch(/const \[sec, api\] = await parallel/);
+    expect(emitted).not.toMatch(/let \[sec, api\] = await parallel/);
+  });
+
   it('admits a branch as intermediate compound member in an aggregate-gate retry zone (closure-call refire)', () => {
     // Under the explicit-rejoin rule, branches are admitted unconditionally
     // as retry-zone members — the retry callback re-fires the branch via
