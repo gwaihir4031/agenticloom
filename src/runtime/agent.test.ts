@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { EventEmitter } from 'events';
 import { Readable } from 'node:stream';
 import * as nodePath from 'node:path';
-import { makeFakeRunAgentChild } from './test-helpers.js';
+import { makeFakeRunAgentChild, captureStdoutWrites } from './test-helpers.js';
 
 // Mock child_process.spawn — runAgent spawns the cli per agent. Tests
 // assert the argv shape + stdio config + stream-event consumption. The
@@ -253,6 +253,466 @@ describe('runAgent', () => {
       extraArgs: [],
     });
     expect(result).toBe('Hello world');
+  });
+
+  describe('mini-mode api_retry mirror (parallel agents)', () => {
+    // Mini mode is reachable ONLY under TTY + an active parallel context:
+    // RollingWindow.start() allocates a mini row (flipping isMini true) solely
+    // inside its `if (this.isTTY)` branch when parallelDepth > 0. The parent
+    // describe forces isTTY=false, so this block re-enables it and brackets the
+    // run with enter/exitParallelContext. That setup is what makes the
+    // assertion non-vacuous: with isMini true the `if (window.isMini)` branch
+    // runs and the full-mode formatStreamEvent `else` is bypassed, so the
+    // asserted retry line can come ONLY from the mini mirror. Run non-TTY and
+    // the full-mode branch would render the identical line, passing green even
+    // with the mirror broken or absent.
+    beforeEach(() => {
+      Object.defineProperty(process.stdout, 'isTTY', { value: true, configurable: true });
+    });
+
+    // Drive a single claude run inside a TTY + parallel context (so the window
+    // is mini) feeding `events` as stdout lines, and return everything written
+    // to process.stdout. enter/exitParallelContext mutate module-level
+    // parallelDepth in the same RollingWindow module instance agent.js imports
+    // (shared post-resetModules registry), so the window runAgent creates
+    // allocates a mini row.
+    const runMini = async (events: string[]): Promise<string> => {
+      const writes = captureStdoutWrites();
+      const { enterParallelContext, exitParallelContext } = await import('../RollingWindow.js');
+      const { runAgent } = await import('./agent.js');
+      spawnMock.mockImplementation(() => makeFakeRunAgentChild({ stdoutLines: events }));
+      enterParallelContext();
+      try {
+        await runAgent('p-agent', 'prompt', undefined, {
+          cli: 'claude',
+          agentDirs: ['.claude/agents/', '~/.claude/agents/'],
+          extraArgs: [],
+        });
+      } finally {
+        exitParallelContext();
+      }
+      return writes.join('');
+    };
+
+    it('feeds the formatApiRetry line on an api_retry event', async () => {
+      const writes = captureStdoutWrites();
+
+      // enter/exitParallelContext mutate module-level parallelDepth in the same
+      // RollingWindow module instance agent.js imports (shared post-resetModules
+      // registry), so the window runAgent creates allocates a mini row.
+      const { enterParallelContext, exitParallelContext } = await import('../RollingWindow.js');
+      const { runAgent } = await import('./agent.js');
+
+      const events = [
+        JSON.stringify({ type: 'system', subtype: 'init', session_id: 's1' }),
+        JSON.stringify({
+          type: 'system',
+          subtype: 'api_retry',
+          attempt: 3,
+          max_retries: 20,
+          error: 'overloaded',
+          retry_delay_ms: 8000,
+        }),
+        JSON.stringify({
+          type: 'result',
+          num_turns: 1,
+          total_cost_usd: 0.001,
+          stop_reason: 'end_turn',
+        }),
+      ];
+      spawnMock.mockImplementation(() => makeFakeRunAgentChild({ stdoutLines: events }));
+
+      enterParallelContext();
+      try {
+        await runAgent('p-agent', 'prompt', undefined, {
+          cli: 'claude',
+          agentDirs: ['.claude/agents/', '~/.claude/agents/'],
+          extraArgs: [],
+        });
+      } finally {
+        exitParallelContext();
+      }
+
+      expect(writes.join('')).toContain('⟳ retry 3/20 — overloaded');
+    });
+
+    it('reuses the full formatApiRetry line including the waiting clause', async () => {
+      // The mirror must feed the SAME line full mode shows, helper-verbatim —
+      // including the `, waiting Ns` clause derived from retry_delay_ms — so the
+      // two display modes never drift.
+      const all = await runMini([
+        JSON.stringify({ type: 'system', subtype: 'init', session_id: 's1' }),
+        JSON.stringify({
+          type: 'system',
+          subtype: 'api_retry',
+          attempt: 3,
+          max_retries: 20,
+          error: 'overloaded',
+          retry_delay_ms: 8000,
+        }),
+        JSON.stringify({
+          type: 'result',
+          num_turns: 1,
+          total_cost_usd: 0.001,
+          stop_reason: 'end_turn',
+        }),
+      ]);
+      expect(all).toContain('⟳ retry 3/20 — overloaded, waiting 8s');
+    });
+
+    it('renders the placeholder form when attempt and max_retries are absent', async () => {
+      // The mirror passes the raw event straight through formatApiRetry, so a
+      // retry event missing attempt/max_retries still surfaces as `⟳ retry ?/?`
+      // rather than being dropped.
+      const all = await runMini([
+        JSON.stringify({ type: 'system', subtype: 'init', session_id: 's1' }),
+        JSON.stringify({ type: 'system', subtype: 'api_retry', error: 'rate_limit' }),
+        JSON.stringify({
+          type: 'result',
+          num_turns: 1,
+          total_cost_usd: 0.001,
+          stop_reason: 'end_turn',
+        }),
+      ]);
+      expect(all).toContain('⟳ retry ?/? — rate_limit');
+    });
+
+    it('renders the retry line without disturbing the tool-call state machine', async () => {
+      // An api_retry arriving mid tool-call block must be handled as an
+      // independent branch (carrying no content_block) and leave currentTool
+      // intact — the in-flight Read tool still resolves its primary arg at
+      // content_block_stop while the retry line also renders.
+      const all = await runMini([
+        JSON.stringify({ type: 'system', subtype: 'init', session_id: 's1' }),
+        JSON.stringify({
+          type: 'stream_event',
+          event: { type: 'content_block_start', content_block: { type: 'tool_use', name: 'Read' } },
+        }),
+        JSON.stringify({
+          type: 'system',
+          subtype: 'api_retry',
+          attempt: 1,
+          max_retries: 5,
+          error: 'overloaded',
+        }),
+        JSON.stringify({
+          type: 'stream_event',
+          event: {
+            type: 'content_block_delta',
+            delta: { type: 'input_json_delta', partial_json: '{"file_path":"ACS.md"}' },
+          },
+        }),
+        JSON.stringify({ type: 'stream_event', event: { type: 'content_block_stop' } }),
+        JSON.stringify({
+          type: 'result',
+          num_turns: 1,
+          total_cost_usd: 0.001,
+          stop_reason: 'end_turn',
+        }),
+      ]);
+      expect(all).toContain('⟳ retry 1/5 — overloaded');
+      expect(all).toContain('◇ Read: ACS.md');
+    });
+  });
+
+  describe('api_retry capture folded into result telemetry (non-TTY)', () => {
+    it('merges the running retry summary into the collapse line and still renders each retry', async () => {
+      const writes = captureStdoutWrites();
+
+      const events = [
+        JSON.stringify({ type: 'system', subtype: 'init', session_id: 's1' }),
+        JSON.stringify({
+          type: 'system',
+          subtype: 'api_retry',
+          attempt: 1,
+          max_retries: 20,
+          error: 'overloaded',
+        }),
+        JSON.stringify({
+          type: 'system',
+          subtype: 'api_retry',
+          attempt: 2,
+          max_retries: 20,
+          error: 'overloaded',
+        }),
+        JSON.stringify({
+          type: 'system',
+          subtype: 'api_retry',
+          attempt: 3,
+          max_retries: 20,
+          error: 'overloaded',
+        }),
+        JSON.stringify({
+          type: 'result',
+          num_turns: 4,
+          total_cost_usd: 0.0123,
+          stop_reason: 'end_turn',
+        }),
+      ];
+      spawnMock.mockImplementation(() => makeFakeRunAgentChild({ stdoutLines: events }));
+      const { runAgent } = await import('./agent.js');
+      await runAgent('a', 'prompt', undefined, {
+        cli: 'claude',
+        agentDirs: ['.claude/agents/', '~/.claude/agents/'],
+        extraArgs: [],
+      });
+
+      const out = writes.join('');
+      // The collapse line carries the accumulated retry summary alongside the
+      // turns/cost the terminal `result` event supplied — proof the retry
+      // setResult merged with (did not clobber) the result-event setResult.
+      expect(out).toContain('retried 3× (overloaded)');
+      expect(out).toContain('4 turns');
+      expect(out).toContain('$0.0123');
+      // Seam guard: in full (non-mini) mode commitLine tees every fed line to
+      // stdout, so the per-event retry render line is present ONLY if the
+      // capture branch fell THROUGH to the full-mode render. A stray `return`
+      // in the capture branch (like the result branch) would suppress this
+      // while the collapse-line assertions above stayed green.
+      expect(out).toContain('⟳ retry 3/20');
+    });
+
+    it('completes the run when the final retry exhausts the budget (attempt === max_retries)', async () => {
+      captureStdoutWrites();
+
+      const events = [
+        JSON.stringify({ type: 'system', subtype: 'init', session_id: 's1' }),
+        JSON.stringify({
+          type: 'system',
+          subtype: 'api_retry',
+          attempt: 19,
+          max_retries: 20,
+          error: 'overloaded',
+        }),
+        JSON.stringify({
+          type: 'system',
+          subtype: 'api_retry',
+          attempt: 20,
+          max_retries: 20,
+          error: 'overloaded',
+        }),
+        JSON.stringify({
+          type: 'stream_event',
+          event: { type: 'content_block_delta', delta: { type: 'text_delta', text: 'done' } },
+        }),
+        JSON.stringify({
+          type: 'result',
+          num_turns: 1,
+          total_cost_usd: 0.001,
+          stop_reason: 'end_turn',
+        }),
+      ];
+      spawnMock.mockImplementation(() => makeFakeRunAgentChild({ stdoutLines: events }));
+      const { runAgent } = await import('./agent.js');
+      // Budget exhaustion (attempt === max_retries) is captured as structured
+      // data only — loom never branches on it — so the run resolves normally
+      // with its accumulated text product.
+      await expect(
+        runAgent('a', 'prompt', undefined, {
+          cli: 'claude',
+          agentDirs: ['.claude/agents/', '~/.claude/agents/'],
+          extraArgs: [],
+        }),
+      ).resolves.toBe('done');
+    });
+
+    it('reflects the most recent error category (last-write-wins) on the collapse line', async () => {
+      const writes = captureStdoutWrites();
+
+      const events = [
+        JSON.stringify({ type: 'system', subtype: 'init', session_id: 's1' }),
+        JSON.stringify({
+          type: 'system',
+          subtype: 'api_retry',
+          attempt: 1,
+          max_retries: 20,
+          error: 'overloaded',
+        }),
+        JSON.stringify({
+          type: 'system',
+          subtype: 'api_retry',
+          attempt: 2,
+          max_retries: 20,
+          error: 'rate_limit',
+        }),
+        JSON.stringify({
+          type: 'result',
+          num_turns: 1,
+          total_cost_usd: 0.001,
+          stop_reason: 'end_turn',
+        }),
+      ];
+      spawnMock.mockImplementation(() => makeFakeRunAgentChild({ stdoutLines: events }));
+      const { runAgent } = await import('./agent.js');
+      await runAgent('a', 'prompt', undefined, {
+        cli: 'claude',
+        agentDirs: ['.claude/agents/', '~/.claude/agents/'],
+        extraArgs: [],
+      });
+
+      // The category is last-write-wins across retries: two events with
+      // different categories collapse to the SECOND one's category, never the
+      // first.
+      const out = writes.join('');
+      expect(out).toContain('retried 2× (rate_limit)');
+      expect(out).not.toContain('(overloaded)');
+    });
+
+    it('keeps the prior error category when a later api_retry omits error', async () => {
+      const writes = captureStdoutWrites();
+
+      const events = [
+        JSON.stringify({ type: 'system', subtype: 'init', session_id: 's1' }),
+        JSON.stringify({
+          type: 'system',
+          subtype: 'api_retry',
+          attempt: 1,
+          max_retries: 20,
+          error: 'overloaded',
+        }),
+        // Second retry carries no `error` field — the accumulator must leave
+        // the prior category in place rather than overwriting it with
+        // undefined.
+        JSON.stringify({
+          type: 'system',
+          subtype: 'api_retry',
+          attempt: 2,
+          max_retries: 20,
+        }),
+        JSON.stringify({
+          type: 'result',
+          num_turns: 1,
+          total_cost_usd: 0.001,
+          stop_reason: 'end_turn',
+        }),
+      ];
+      spawnMock.mockImplementation(() => makeFakeRunAgentChild({ stdoutLines: events }));
+      const { runAgent } = await import('./agent.js');
+      await runAgent('a', 'prompt', undefined, {
+        cli: 'claude',
+        agentDirs: ['.claude/agents/', '~/.claude/agents/'],
+        extraArgs: [],
+      });
+
+      // Count advances to 2 while the category stays 'overloaded' from the
+      // first event — proof the missing `error` did not blank it out.
+      expect(writes.join('')).toContain('retried 2× (overloaded)');
+    });
+
+    it('records the retry summary on the collapse line even when no result event arrives', async () => {
+      const writes = captureStdoutWrites();
+
+      // No terminal `result` event — the child just exits cleanly after the
+      // retries. The summary can only reach the collapse line if setResult was
+      // called on each api_retry rather than waiting for the (absent) result
+      // event; this is the survives-an-early-death guarantee.
+      const events = [
+        JSON.stringify({ type: 'system', subtype: 'init', session_id: 's1' }),
+        JSON.stringify({
+          type: 'system',
+          subtype: 'api_retry',
+          attempt: 1,
+          max_retries: 20,
+          error: 'overloaded',
+        }),
+        JSON.stringify({
+          type: 'system',
+          subtype: 'api_retry',
+          attempt: 2,
+          max_retries: 20,
+          error: 'overloaded',
+        }),
+      ];
+      spawnMock.mockImplementation(() => makeFakeRunAgentChild({ stdoutLines: events }));
+      const { runAgent } = await import('./agent.js');
+      await runAgent('a', 'prompt', undefined, {
+        cli: 'claude',
+        agentDirs: ['.claude/agents/', '~/.claude/agents/'],
+        extraArgs: [],
+      });
+
+      expect(writes.join('')).toContain('retried 2× (overloaded)');
+    });
+  });
+
+  describe('api_retry accumulator state via setResult capture', () => {
+    // The exhausted latch is not rendered anywhere (rendering is the retry-line
+    // helper's job, which only shows attempt/max_retries), so observe the
+    // accumulator directly by swapping in a RollingWindow whose setResult
+    // records every meta object it receives. afterEach undoes the doMock so it
+    // doesn't leak into sibling tests.
+    afterEach(() => {
+      vi.doUnmock('../RollingWindow.js');
+    });
+
+    it('latches retry_exhausted at the ceiling and keeps it true on a later sub-ceiling retry', async () => {
+      const setResultCalls: Array<Record<string, unknown>> = [];
+      vi.doMock('../RollingWindow.js', () => ({
+        RollingWindow: class {
+          constructor(_name: string, _logPath: string | null) {}
+          start(): void {}
+          feed(): void {}
+          setResult(meta: Record<string, unknown>): void {
+            setResultCalls.push(meta);
+          }
+          finish(): void {}
+          get isMini(): boolean {
+            return false;
+          }
+        },
+      }));
+      vi.resetModules();
+
+      const events = [
+        JSON.stringify({ type: 'system', subtype: 'init', session_id: 's1' }),
+        // Below the ceiling — not yet exhausted.
+        JSON.stringify({
+          type: 'system',
+          subtype: 'api_retry',
+          attempt: 1,
+          max_retries: 20,
+          error: 'overloaded',
+        }),
+        // Reaches the ceiling — exhausted latches true.
+        JSON.stringify({
+          type: 'system',
+          subtype: 'api_retry',
+          attempt: 20,
+          max_retries: 20,
+          error: 'overloaded',
+        }),
+        // Drops back below the ceiling — exhausted must STAY true (monotonic).
+        JSON.stringify({
+          type: 'system',
+          subtype: 'api_retry',
+          attempt: 5,
+          max_retries: 20,
+          error: 'overloaded',
+        }),
+        JSON.stringify({
+          type: 'result',
+          num_turns: 1,
+          total_cost_usd: 0.001,
+          stop_reason: 'end_turn',
+        }),
+      ];
+      spawnMock.mockImplementation(() => makeFakeRunAgentChild({ stdoutLines: events }));
+      const { runAgent } = await import('./agent.js');
+      await runAgent('a', 'prompt', undefined, {
+        cli: 'claude',
+        agentDirs: ['.claude/agents/', '~/.claude/agents/'],
+        extraArgs: [],
+      });
+
+      // One retry-bearing setResult per api_retry event, with an incrementing
+      // count; the result event's setResult carries no retry_count, so filter
+      // to the retry calls.
+      const retryCalls = setResultCalls.filter((m) => 'retry_count' in m);
+      expect(retryCalls.map((m) => m.retry_count)).toEqual([1, 2, 3]);
+      // Latch transitions false -> true at the ceiling, then never reverts even
+      // though the third retry's attempt (5) is below max_retries.
+      expect(retryCalls.map((m) => m.retry_exhausted)).toEqual([false, true, true]);
+    });
   });
 
   it('resolves without throwing when claude emits JSON-valid non-object lines', async () => {

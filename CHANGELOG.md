@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `runAgent` now surfaces the claude CLI's `api_retry` events: each transient-failure retry (HTTP 529 overload, rate-limit) renders live as `⟳ retry N/M — category, waiting Ns` in both display modes (and tees to the `--save-logs` log), and a per-run retry summary (count, category, budget-exhausted flag) is captured into the result telemetry and shown on the collapsed status line. Observe-only; claude path only — the copilot raw-stdout path has no equivalent structured event.
+
 ## [0.1.4] - 2026-06-06
 
 ### Fixed

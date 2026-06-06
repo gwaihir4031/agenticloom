@@ -5,6 +5,15 @@ export interface StreamEvent {
   type?: string;
   subtype?: string;
   session_id?: string;
+  // `api_retry` system-event telemetry (only populated when subtype ===
+  // "api_retry"). `error` is the category string (e.g. "overloaded",
+  // "rate_limit", "server_error"); `error_status` is the raw HTTP status and
+  // is captured for telemetry but not rendered.
+  attempt?: number;
+  max_retries?: number;
+  retry_delay_ms?: number;
+  error_status?: number;
+  error?: string;
   // Final `result` event telemetry (only populated when type === "result").
   num_turns?: number;
   total_cost_usd?: number;
@@ -18,9 +27,10 @@ export interface StreamEvent {
 
 /** Render one JSONL line from `claude -p --output-format stream-json` into a
  *  human-readable fragment, or null to suppress. Streams text deltas verbatim,
- *  announces each tool call by name, and inlines tool inputs as they accumulate.
- *  Result events return null — callers capture their telemetry separately for
- *  the summary line. */
+ *  announces each tool call by name, and inlines tool inputs as they accumulate;
+ *  `system` init and api_retry events render their own one-liners (api_retry via
+ *  formatApiRetry). Result events — and any unrecognized shape — return null;
+ *  callers capture result telemetry separately for the summary line. */
 export function formatStreamEvent(line: string): string | null {
   if (!line.trim()) return null;
   let evt: StreamEvent;
@@ -37,6 +47,12 @@ export function formatStreamEvent(line: string): string | null {
 
   if (evt.type === 'system' && evt.subtype === 'init') {
     return `  (session ${evt.session_id ?? '?'})\n`;
+  }
+
+  // An api_retry is a `system` event, not a `stream_event`, so it must be
+  // handled before the `stream_event` gate below.
+  if (evt.type === 'system' && evt.subtype === 'api_retry') {
+    return formatApiRetry(evt);
   }
 
   if (evt.type !== 'stream_event' || !evt.event) return null;
@@ -70,6 +86,21 @@ export function formatStreamEvent(line: string): string | null {
   }
 
   return null;
+}
+
+/** Build the single status line for an `api_retry` system event, e.g.
+ *  `  ⟳ retry 3/20 — overloaded, waiting 8s\n`. Carries the leading two-space
+ *  indent and trailing newline to match the init/tool line convention. Missing
+ *  attempt or max_retries render as `?`; the `— <category>` clause is omitted
+ *  when `error` is empty or absent, and the `, waiting Ns` clause when
+ *  `retry_delay_ms` is absent. Exported so the mini-mode mirror reuses the
+ *  one format. */
+export function formatApiRetry(evt: StreamEvent): string {
+  let line = `  ⟳ retry ${evt.attempt ?? '?'}/${evt.max_retries ?? '?'}`;
+  if (evt.error) line += ` — ${evt.error}`;
+  if (evt.retry_delay_ms !== undefined)
+    line += `, waiting ${Math.round(evt.retry_delay_ms / 1000)}s`;
+  return line + '\n';
 }
 
 /** Map from tool name → the JSON-input key whose value is most useful as a

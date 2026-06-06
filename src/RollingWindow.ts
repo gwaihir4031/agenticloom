@@ -199,12 +199,21 @@ function stripAnsi(s: string): string {
   return s.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '');
 }
 
-/** Telemetry captured from a `result` event for the summary line. Populated
- *  by `setResult` and rendered by `finish` into the collapsed status line. */
+/** Telemetry captured for the summary line, from two sources merged into one
+ *  record by `setResult`: the terminal `result` event (turns, cost, stop
+ *  reason) and the incremental retry summary accumulated as API retries
+ *  happen (count, category, exhausted flag). `finish` renders it into the
+ *  collapsed status line. */
 export interface ResultMeta {
   num_turns?: number;
   total_cost_usd?: number;
   stop_reason?: string;
+  retry_count?: number;
+  retry_category?: string;
+  // Recorded purely as structured data for a future auto-resume consumer:
+  // never rendered and never branched on. The budget-exhausted case wants a
+  // typed flag a later stage can read, not a visible signal in this run.
+  retry_exhausted?: boolean;
 }
 
 /** 25-row rolling window for one agent's streaming output. New lines scroll in
@@ -333,16 +342,17 @@ export class RollingWindow {
     this.logStream?.write(`${STDERR_LOG_MARKER}${line}\n`);
   }
 
-  /** Capture the final `result` event's telemetry for the collapsed summary
-   *  line. The agent's prose verdict already streamed via text_delta and was
-   *  fed into the window; this only keeps session-level metadata (turns,
-   *  cost, stop reason) that `finish` surfaces in the icon line. */
+  /** Sink for the collapsed summary line's telemetry, fed by two independent
+   *  callers: the terminal `result` event (turns, cost, stop reason) and the
+   *  incremental retry summary set as API retries happen (count, category,
+   *  exhausted flag). Both write through this method at different times, so the
+   *  provided fields are MERGED onto the existing record rather than replacing
+   *  it — a retry-summary call must not clobber an earlier result event, and
+   *  vice versa. The agent's prose verdict already streamed via text_delta and
+   *  was fed into the window; this only keeps session-level metadata that
+   *  `finish` surfaces in the icon line. */
   setResult(meta: ResultMeta): void {
-    this.resultMeta = {
-      num_turns: meta.num_turns,
-      total_cost_usd: meta.total_cost_usd,
-      stop_reason: meta.stop_reason,
-    };
+    this.resultMeta = { ...this.resultMeta, ...meta };
   }
 
   finish(status: 'ok' | 'error'): void {
@@ -364,6 +374,16 @@ export class RollingWindow {
       if (this.resultMeta.total_cost_usd != null)
         meta.push(`$${this.resultMeta.total_cost_usd.toFixed(4)}`);
       if (this.resultMeta.stop_reason) meta.push(this.resultMeta.stop_reason);
+      // Retry summary renders on both 'ok' and 'error': the budget-exhausted
+      // path can die before a clean result event, but the incremental
+      // setResult calls already populated retry_count here regardless.
+      if (this.resultMeta.retry_count != null && this.resultMeta.retry_count > 0) {
+        meta.push(
+          this.resultMeta.retry_category
+            ? `retried ${this.resultMeta.retry_count}× (${this.resultMeta.retry_category})`
+            : `retried ${this.resultMeta.retry_count}×`,
+        );
+      }
     }
     const icon = status === 'ok' ? '✓' : '✗';
     const summary = `${icon} ${this.agentName} (${meta.join(' · ')})`;

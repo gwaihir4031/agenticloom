@@ -3,6 +3,9 @@ dist/
 loom/runs/
 coverage/
 
+# Machine-local agent config overrides (.local.json) — never shipped.
+.claude/*.local.json
+
 # Local feature PRDs fed to loom runs — working specs, not shipped artifacts.
 prds/
 
