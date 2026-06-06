@@ -7,9 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-06-06
+
 ### Added
 
-- `runAgent` now captures agent stderr — surfaced as a bounded tail on failure errors (a failed run names why the agent died) and teed to the `--save-logs` log marked `stderr│ `.
+- `runAgent` now captures agent stderr — surfaced as a bounded tail on failure errors (a failed run names why the agent died) and teed to the `--save-logs` log marked `stderr│ `. ([#7](https://github.com/gwaihir4031/agenticloom/pull/7))
 
 ## [0.1.2] - 2026-06-05
 
@@ -31,7 +33,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Initial release. YAML → TypeScript pipeline compiler for orchestrating CLI coding agents (`claude`, `copilot`) with seven primitives: `step`, `review_loop`, `human_gate`, `parallel`, `branch`, `aggregate`, `foreach`. Ships the `loom` / `agenticloom` CLI plus the `loom-author` Claude/Copilot skill.
 
-[Unreleased]: https://github.com/gwaihir4031/agenticloom/compare/v0.1.2...HEAD
+[Unreleased]: https://github.com/gwaihir4031/agenticloom/compare/v0.1.3...HEAD
+[0.1.3]: https://github.com/gwaihir4031/agenticloom/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/gwaihir4031/agenticloom/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/gwaihir4031/agenticloom/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/gwaihir4031/agenticloom/releases/tag/v0.1.0
