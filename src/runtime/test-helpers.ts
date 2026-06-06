@@ -71,7 +71,10 @@ export type FakeRunAgentChild = EventEmitter & {
  *  fully drain before the `'exit'` handler resolves/rejects. Each stream emits
  *  'end' only once a consumer reads it, so this presumes runAgent reads both
  *  fds (it does). The child exposes a writable-stub stdin matching the humanGate
- *  makeFakeChild shape for symmetry. */
+ *  makeFakeChild shape for symmetry.
+ *
+ *  `exitCode` defaults to 0 when omitted; an explicit `null` is emitted
+ *  verbatim (the signal-killed / code === null case), not collapsed to 0. */
 export function makeFakeRunAgentChild(
   opts: {
     stdoutLines?: string[];
@@ -94,7 +97,8 @@ export function makeFakeRunAgentChild(
   let stderrEnded = false;
   const emitExitWhenBothEnded = (): void => {
     if (stdoutEnded && stderrEnded) {
-      queueMicrotask(() => child.emit('exit', opts.exitCode ?? 0));
+      // `?? 0` would collapse an explicit null (signal-kill) to 0; emit verbatim.
+      queueMicrotask(() => child.emit('exit', opts.exitCode === undefined ? 0 : opts.exitCode));
     }
   };
   stdout.on('end', () => {

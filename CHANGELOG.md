@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `runAgent` now captures agent stderr — surfaced as a bounded tail on failure errors (a failed run names why the agent died) and teed to the `--save-logs` log marked `stderr│ `.
+
 ## [0.1.2] - 2026-06-05
 
 ### Added

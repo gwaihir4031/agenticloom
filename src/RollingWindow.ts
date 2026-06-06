@@ -317,7 +317,7 @@ export class RollingWindow {
 
   /** Write one stderr line into the per-agent log stream, marked with
    *  `STDERR_LOG_MARKER` so a post-mortem reader can tell it apart from the
-   *  stdout lines `commitLine` tees into the same file. The marked sibling of
+   *  stdout lines `commitLine` tees into the same file — the marked sibling of
    *  that stdout tee. Log-only by design: the live stderr echo and the failure
    *  tail are the caller's (runAgent's) responsibility, so this never touches
    *  `this.lines`/`this.currentLine`, stdout, or the collapse line. Callers

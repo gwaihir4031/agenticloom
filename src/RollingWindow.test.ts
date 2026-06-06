@@ -588,5 +588,22 @@ describe('RollingWindow', () => {
       expect(writeStreamMock.write).toHaveBeenCalledTimes(1);
       expect(writeStreamMock.write).toHaveBeenCalledWith('stderr│ \n');
     });
+
+    it('interleaves stdout and stderr on the same log stream in arrival order, only stderr marked', async () => {
+      // The marker's whole reason to exist (PRD scope boundary): stdout
+      // (commitLine) and stderr (logStderrLine) tee into the SAME log stream in
+      // arrival order, and ONLY the stderr lines carry `stderr│ ` so a
+      // post-mortem reader can tell the two streams apart in the merged log.
+      // The isolated tests above pin each half; this pins their coexistence —
+      // the actual post-mortem-reader contract.
+      const { RollingWindow } = await import('./RollingWindow.js');
+      const window = new RollingWindow('a', 'logs/a.log');
+      window.start();
+      writeStreamMock.write.mockClear(); // discard the start() header write
+      window.feed('out\n');
+      window.logStderrLine('err');
+      window.feed('out2\n');
+      expect(writeStreamMock.write.mock.calls).toEqual([['out\n'], ['stderr│ err\n'], ['out2\n']]);
+    });
   });
 });
