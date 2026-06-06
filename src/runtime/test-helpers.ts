@@ -47,43 +47,75 @@ export function makeFakeChild(
 
 /** Shape of the fake child returned by `makeFakeRunAgentChild`. Distinct
  *  from `FakeChild` because runAgent consumes `stdout` (the stream-json line
- *  feed) rather than `stderr`. Named for the same cross-file-contract reason
- *  as `FakeChild`. */
+ *  feed); it now also captures `stderr` (the piped fd-2 line feed). Named for
+ *  the same cross-file-contract reason as `FakeChild`. */
 export type FakeRunAgentChild = EventEmitter & {
   stdin: { write: (s: string) => void; end: () => void };
   stdout: Readable;
+  stderr: Readable;
   kill: (sig?: string) => void;
 };
 
 /** Build a fake spawned child for runAgent tests. `stdoutLines` are emitted as
- *  '\n'-terminated chunks on the child's stdout; the child fires 'exit' with the
- *  given code AFTER the stdout stream has finished, mirroring real Node
- *  child_process ordering (stdout flushes before the child exits, so the
- *  consumer's `'line'` events all fire before the `'exit'` handler resolves).
- *  The child exposes a writable-stub stdin matching the humanGate
+ *  '\n'-terminated chunks on the child's stdout (a forced newline per line).
+ *  `stderrLines` are pushed VERBATIM onto the child's stderr — no forced
+ *  newline — so a newline-less final line is exercisable downstream (runAgent's
+ *  readline must flush that unterminated remainder on stream end). The stderr
+ *  stream is always created and closed via `push(null)`, even when
+ *  `stderrLines` is omitted, so the exit barrier below still fires.
+ *
+ *  The child fires 'exit' only AFTER BOTH the stdout and stderr streams have
+ *  ended — a two-stream barrier, unlike the single-stream ordering
+ *  `makeFakeChild` uses. Real Node child_process flushes both pipes before the
+ *  child exits; the barrier reproduces that so both readline `'line'` handlers
+ *  fully drain before the `'exit'` handler resolves/rejects. Each stream emits
+ *  'end' only once a consumer reads it, so this presumes runAgent reads both
+ *  fds (it does). The child exposes a writable-stub stdin matching the humanGate
  *  makeFakeChild shape for symmetry. */
 export function makeFakeRunAgentChild(
   opts: {
     stdoutLines?: string[];
+    stderrLines?: string[];
     exitCode?: number | null;
   } = {},
 ): FakeRunAgentChild {
   const stdout = new Readable({ read() {} });
+  const stderr = new Readable({ read() {} });
   const child = new EventEmitter() as FakeRunAgentChild;
   child.stdin = { write() {}, end() {} };
   child.stdout = stdout;
+  child.stderr = stderr;
   child.kill = () => undefined;
-  // Push data on the next microtask so the consumer has time to attach
-  // listeners; emit 'exit' only after the stream's 'end' has fired so the
-  // line handler has fully drained.
+  // Two-stream barrier: emit 'exit' only after BOTH streams' 'end' events have
+  // fired, so neither readline handler is still draining when the exit handler
+  // runs. Emitting on the first 'end' would race the second stream's tail
+  // line.
+  let stdoutEnded = false;
+  let stderrEnded = false;
+  const emitExitWhenBothEnded = (): void => {
+    if (stdoutEnded && stderrEnded) {
+      queueMicrotask(() => child.emit('exit', opts.exitCode ?? 0));
+    }
+  };
   stdout.on('end', () => {
-    queueMicrotask(() => child.emit('exit', opts.exitCode ?? 0));
+    stdoutEnded = true;
+    emitExitWhenBothEnded();
   });
+  stderr.on('end', () => {
+    stderrEnded = true;
+    emitExitWhenBothEnded();
+  });
+  // Push data on the next microtask so the consumers have time to attach
+  // listeners before the streams flow and close.
   queueMicrotask(() => {
     for (const line of opts.stdoutLines ?? []) {
       stdout.push(line.endsWith('\n') ? line : line + '\n');
     }
     stdout.push(null); // close the stream
+    for (const chunk of opts.stderrLines ?? []) {
+      stderr.push(chunk); // verbatim — no forced newline (contrast stdout above)
+    }
+    stderr.push(null); // close the stream so the both-ended gate fires
   });
   return child;
 }

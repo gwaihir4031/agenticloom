@@ -169,7 +169,7 @@ describe('runAgent', () => {
     expect(args).toContain('haiku');
   });
 
-  it('uses stdio: pipe-stdout-inherit-stderr', async () => {
+  it('uses stdio: pipe-stdout-pipe-stderr (fd 2 captured, not inherited)', async () => {
     spawnMock.mockImplementation(() => makeFakeRunAgentChild());
     const { runAgent } = await import('./agent.js');
     await runAgent('a', 'prompt', undefined, {
@@ -178,7 +178,7 @@ describe('runAgent', () => {
       extraArgs: [],
     });
     const options = spawnMock.mock.calls[0][2];
-    expect(options.stdio).toEqual(['ignore', 'pipe', 'inherit']);
+    expect(options.stdio).toEqual(['ignore', 'pipe', 'pipe']);
   });
 
   describe('spawn cwd threading via LOOM_INVOCATION_CWD', () => {
@@ -728,6 +728,200 @@ describe('runAgent', () => {
       }),
     ).rejects.toThrow(/interrupted by Ctrl-C/);
     expect(killed).toBe(true);
+  });
+
+  describe('stderr capture', () => {
+    // fd 2 is piped (not inherited): runAgent reads child.stderr line by line
+    // and tees each line to its LIVE sinks — an echo on the parent's
+    // process.stderr and the window's --save-logs sink (logStderrLine) — while
+    // keeping stderr out of textBuffer so it cannot contaminate the
+    // no-producesPath return value. (The rolling failure tail is t3.) The
+    // logStderrLine tests swap in a spy RollingWindow via doMock, so undo it
+    // here (a no-op for the tests that don't mock it).
+    afterEach(() => {
+      vi.doUnmock('../RollingWindow.js');
+      delete process.env.LOOM_SAVE_LOGS;
+    });
+
+    it('echoes each captured stderr line to process.stderr (line + newline)', async () => {
+      spawnMock.mockImplementation(() =>
+        makeFakeRunAgentChild({
+          stderrLines: ['auth error: token expired\n', 'retrying once\n'],
+        }),
+      );
+      const stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+      try {
+        const { runAgent } = await import('./agent.js');
+        await runAgent('a', 'prompt', undefined, {
+          cli: 'claude',
+          agentDirs: ['.claude/agents/', '~/.claude/agents/'],
+          extraArgs: [],
+        });
+        // readline strips the trailing newline off each line; runAgent re-adds
+        // exactly one when echoing, preserving today's fd-2 destination.
+        expect(stderrSpy).toHaveBeenCalledWith('auth error: token expired\n');
+        expect(stderrSpy).toHaveBeenCalledWith('retrying once\n');
+      } finally {
+        stderrSpy.mockRestore();
+      }
+    });
+
+    it('tees each stderr line to window.logStderrLine (the --save-logs sink)', async () => {
+      process.env.LOOM_SAVE_LOGS = '1';
+      const logStderrSpy = vi.fn();
+      vi.doMock('../RollingWindow.js', () => ({
+        RollingWindow: class {
+          constructor(_name: string, _logPath: string | null) {}
+          start(): void {}
+          feed(): void {}
+          setResult(): void {}
+          finish(): void {}
+          logStderrLine(line: string): void {
+            logStderrSpy(line);
+          }
+        },
+      }));
+      vi.resetModules();
+      spawnMock.mockImplementation(() =>
+        makeFakeRunAgentChild({ stderrLines: ['boom\n', 'second diagnostic\n'] }),
+      );
+      const stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+      try {
+        const { runAgent } = await import('./agent.js');
+        await runAgent('ac-writer', 'prompt', undefined, {
+          cli: 'claude',
+          agentDirs: ['.claude/agents/', '~/.claude/agents/'],
+          extraArgs: [],
+        });
+        // logStderrLine receives the readline-split line WITHOUT a trailing
+        // newline — the window adds its marker + newline itself (t1).
+        expect(logStderrSpy).toHaveBeenCalledWith('boom');
+        expect(logStderrSpy).toHaveBeenCalledWith('second diagnostic');
+      } finally {
+        stderrSpy.mockRestore();
+      }
+    });
+
+    it('flushes a newline-less final stderr line to the live sinks', async () => {
+      process.env.LOOM_SAVE_LOGS = '1';
+      const logStderrSpy = vi.fn();
+      vi.doMock('../RollingWindow.js', () => ({
+        RollingWindow: class {
+          constructor(_name: string, _logPath: string | null) {}
+          start(): void {}
+          feed(): void {}
+          setResult(): void {}
+          finish(): void {}
+          logStderrLine(line: string): void {
+            logStderrSpy(line);
+          }
+        },
+      }));
+      vi.resetModules();
+      // The final chunk carries NO trailing newline (pushed verbatim by the
+      // fake child); the reader must flush that unterminated remainder on
+      // stream end so it still reaches the sinks.
+      spawnMock.mockImplementation(() =>
+        makeFakeRunAgentChild({ stderrLines: ['fatal: no newline at end'] }),
+      );
+      const stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+      try {
+        const { runAgent } = await import('./agent.js');
+        await runAgent('ac-writer', 'prompt', undefined, {
+          cli: 'claude',
+          agentDirs: ['.claude/agents/', '~/.claude/agents/'],
+          extraArgs: [],
+        });
+        expect(logStderrSpy).toHaveBeenCalledWith('fatal: no newline at end');
+      } finally {
+        stderrSpy.mockRestore();
+      }
+    });
+
+    it('never lets stderr contaminate the no-producesPath return value', async () => {
+      // A stderr-only child (no stdout lines at all): textBuffer must stay
+      // empty so the trimmed return value is '', proving stderr never fed
+      // textBuffer.
+      spawnMock.mockImplementation(() =>
+        makeFakeRunAgentChild({ stdoutLines: [], stderrLines: ['noise on stderr\n'] }),
+      );
+      const stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+      try {
+        const { runAgent } = await import('./agent.js');
+        const result = await runAgent('a', 'prompt', undefined, {
+          cli: 'claude',
+          agentDirs: ['.claude/agents/', '~/.claude/agents/'],
+          extraArgs: [],
+        });
+        expect(result).toBe('');
+      } finally {
+        stderrSpy.mockRestore();
+      }
+    });
+
+    it('tees one sink call per readline-split line, not per raw chunk', async () => {
+      // The reader must split each stderr chunk on '\n' via readline and tee
+      // PER LINE, not per chunk. A single three-line blob therefore produces
+      // exactly three logStderrLine calls, in order, with no empty trailing
+      // call for the final newline.
+      process.env.LOOM_SAVE_LOGS = '1';
+      const logStderrSpy = vi.fn();
+      vi.doMock('../RollingWindow.js', () => ({
+        RollingWindow: class {
+          constructor(_name: string, _logPath: string | null) {}
+          start(): void {}
+          feed(): void {}
+          setResult(): void {}
+          finish(): void {}
+          logStderrLine(line: string): void {
+            logStderrSpy(line);
+          }
+        },
+      }));
+      vi.resetModules();
+      spawnMock.mockImplementation(() =>
+        makeFakeRunAgentChild({ stderrLines: ['multi\nline\nchunk\n'] }),
+      );
+      const stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+      try {
+        const { runAgent } = await import('./agent.js');
+        await runAgent('ac-writer', 'prompt', undefined, {
+          cli: 'claude',
+          agentDirs: ['.claude/agents/', '~/.claude/agents/'],
+          extraArgs: [],
+        });
+        expect(logStderrSpy.mock.calls).toEqual([['multi'], ['line'], ['chunk']]);
+      } finally {
+        stderrSpy.mockRestore();
+      }
+    });
+
+    it('keeps stderr out of the copilot raw-stdout return value', async () => {
+      // The copilot path accumulates EVERY stdout line into textBuffer
+      // (textBuffer += line + '\n'), so it is the most exposed contamination
+      // surface: if stderr were ever routed through the same accumulate, the
+      // return value would absorb it. Assert the return is the stdout work
+      // product alone while stderr still reaches its live echo sink.
+      spawnMock.mockImplementation(() =>
+        makeFakeRunAgentChild({
+          stdoutLines: ['real copilot output'],
+          stderrLines: ['stderr noise\n'],
+        }),
+      );
+      const stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+      try {
+        const { runAgent } = await import('./agent.js');
+        const result = await runAgent('a', 'prompt', undefined, {
+          cli: 'copilot',
+          agentDirs: ['.github/agents/', '~/.copilot/agents/'],
+          extraArgs: [],
+        });
+        expect(result).toBe('real copilot output');
+        expect(stderrSpy).toHaveBeenCalledWith('stderr noise\n');
+      } finally {
+        stderrSpy.mockRestore();
+      }
+    });
   });
 });
 

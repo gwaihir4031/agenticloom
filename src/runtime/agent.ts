@@ -365,7 +365,7 @@ export async function runAgent(
   // external embedders) where no cli was in the loop.
   const agentCwd = process.env.LOOM_INVOCATION_CWD ?? process.cwd();
   return await new Promise<string>((resolve, reject) => {
-    const child = spawn(bin, finalArgs, { cwd: agentCwd, stdio: ['ignore', 'pipe', 'inherit'] });
+    const child = spawn(bin, finalArgs, { cwd: agentCwd, stdio: ['ignore', 'pipe', 'pipe'] });
     let settled = false;
     let textBuffer = '';
     // Set when the parent receives SIGINT (Ctrl-C). Read in the exit handler:
@@ -500,6 +500,24 @@ export async function runAgent(
           textBuffer += line + '\n';
           window.feed(line + '\n');
         }
+      });
+    }
+
+    // fd 2 is piped (not inherited), so read the child's stderr line by line
+    // exactly as stdout is read above. Each line tees to its LIVE sinks:
+    // (a) an echo back out on the parent's process.stderr — preserving
+    // today's fd-2 destination, now line-oriented rather than the byte-shared
+    // fd that `inherit` gave (immaterial for the diagnostic-only stderr of
+    // loom's `-p` agents); (b) the window's marked --save-logs sink, itself a
+    // silent no-op when --save-logs is off. stderr is deliberately kept OUT of
+    // `textBuffer`: the no-producesPath return value is the agent's stdout work
+    // product alone. readline flushes the final unterminated line on stream
+    // end, so a newline-less last diagnostic still reaches both sinks.
+    if (child.stderr) {
+      const errLines = readline.createInterface({ input: child.stderr, crlfDelay: Infinity });
+      errLines.on('line', (line: string) => {
+        process.stderr.write(line + '\n');
+        window.logStderrLine(line);
       });
     }
 
