@@ -3,6 +3,14 @@ import * as path from 'path';
 
 const WINDOW_ROWS = 25;
 
+// Prefix stamped on every stderr line teed into the per-agent log by
+// `logStderrLine`, so a post-mortem reader can tell stderr apart from the
+// stdout lines `commitLine` writes into the same merged `logs/<agent>.log`.
+// The separator is the box-drawing light vertical U+2502 (│), not an ASCII
+// pipe '|', so the marker stays visually distinct from the pipe characters
+// that routinely appear in agent stderr (shell commands, tracebacks, tables).
+const STDERR_LOG_MARKER = 'stderr│ ';
+
 // Module-level alt-screen state. The terminal alt-screen buffer is entered
 // per agent (on each `start()` in TTY mode) and exited per agent (on each
 // `finish()`). A depth counter handles parallel cases where multiple agents
@@ -305,6 +313,24 @@ export class RollingWindow {
       i = nl + 1;
     }
     if (this.isTTY) this.render();
+  }
+
+  /** Write one stderr line into the per-agent log stream, marked with
+   *  `STDERR_LOG_MARKER` so a post-mortem reader can tell it apart from the
+   *  stdout lines `commitLine` tees into the same file. The marked sibling of
+   *  that stdout tee. Log-only by design: the live stderr echo and the failure
+   *  tail are the caller's (runAgent's) responsibility, so this never touches
+   *  `this.lines`/`this.currentLine`, stdout, or the collapse line. Callers
+   *  pass readline-split lines carrying no trailing newline; the newline is
+   *  appended here, in the same single write as the marker.
+   *
+   *  Two guards mirror the stdout path in `feed`/`commitLine`: the `finished`
+   *  check drops late lines (finish() ends the log stream, so a stderr line
+   *  arriving after a timeout race must not write-after-end), and the optional
+   *  chain makes the method a no-op when `--save-logs` is off (logStream null). */
+  logStderrLine(line: string): void {
+    if (this.finished) return;
+    this.logStream?.write(`${STDERR_LOG_MARKER}${line}\n`);
   }
 
   /** Capture the final `result` event's telemetry for the collapsed summary
