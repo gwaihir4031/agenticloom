@@ -50,7 +50,7 @@
   "scripts": {
     "build": "tsc",
     "postbuild": "chmod +x dist/cli.js",
-    "prepare": "npm run build",
+    "prepare": "husky && npm run build",
     "loom": "tsx src/cli.ts",
     "test": "vitest run",
     "lint": "eslint src/",
@@ -68,10 +68,15 @@
     "@types/node": "^25.9.1",
     "@vitest/coverage-v8": "^4.1.7",
     "eslint": "^10.4.0",
+    "husky": "^9.1.7",
+    "lint-staged": "^17.0.7",
     "prettier": "^3.8.3",
     "tsx": "^4.22.3",
     "typescript": "^6.0.3",
     "typescript-eslint": "^8.59.4",
     "vitest": "^4.1.7"
+  },
+  "lint-staged": {
+    "*": "prettier --write --ignore-unknown"
   }
 }
