@@ -145,8 +145,9 @@ async function spawnInteractiveAgent(opts: InteractiveGateOpts): Promise<void> {
   // For the expected use case (CLI auth/model/entitlement diagnostics,
   // largely ASCII) units equal bytes. For non-BMP content (emoji, CJK
   // supplementary plane) the cap drifts and the slice could split a
-  // surrogate pair producing one U+FFFD glyph at the boundary. Both
-  // acceptable for a memory-safety floor on diagnostic output.
+  // surrogate pair, leaving a lone surrogate that renders as one U+FFFD
+  // glyph at the boundary. Both acceptable for a memory-safety floor on
+  // diagnostic output.
   let stderrCapture = '';
   const STDERR_CAPTURE_CAP = 8 * 1024; // 8K UTF-16 code units; see note above.
 

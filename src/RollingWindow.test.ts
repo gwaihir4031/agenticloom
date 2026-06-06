@@ -65,6 +65,41 @@ describe('RollingWindow', () => {
       window.finish('error');
       expect(stdoutWrites.join('')).toContain('✗ ac-writer');
     });
+
+    it('logStderrLine writes nothing to stdout (the live stderr echo belongs to runAgent)', async () => {
+      // Constraint: logStderrLine is log-stream-only. It must neither echo to
+      // stdout nor trigger a window render. In TTY mode, where stdout is
+      // otherwise active, a clean call therefore produces zero stdout writes.
+      // (logPath is null here; the no-stdout guarantee is independent of
+      // whether a log stream exists, since the method never touches stdout.)
+      const { RollingWindow } = await import('./RollingWindow.js');
+      const window = new RollingWindow('ac-writer', null);
+      window.start();
+      stdoutWrites = []; // discard the start() box render
+      window.logStderrLine('boom');
+      expect(stdoutWrites).toHaveLength(0);
+      window.finish('ok'); // close the lifecycle so the resize listener is removed
+    });
+
+    it('logStderrLine does not surface the stderr line in the live rolling window', async () => {
+      // Constraint: log-stream-only — logStderrLine must not push to the
+      // window's line buffer. If it did, the stderr text would scroll into the
+      // box on the next render. Feed stdout lines around a logStderrLine call
+      // and confirm the re-render shows only the stdout lines, never the stderr.
+      Object.defineProperty(process.stdout, 'columns', { value: 80, configurable: true });
+      const { RollingWindow } = await import('./RollingWindow.js');
+      const window = new RollingWindow('ac-writer', null);
+      window.start();
+      window.feed('alpha\n');
+      window.logStderrLine('beta');
+      stdoutWrites = []; // capture only the render triggered by the next feed
+      window.feed('gamma\n');
+      const all = stdoutWrites.join('');
+      expect(all).toContain('alpha');
+      expect(all).toContain('gamma');
+      expect(all).not.toContain('beta');
+      window.finish('ok'); // close the lifecycle so the resize listener is removed
+    });
   });
 
   describe('non-TTY mode', () => {
@@ -499,6 +534,76 @@ describe('RollingWindow', () => {
       expect(msg).toContain('EACCES: permission denied');
       expect(() => window.feed('line after error\n')).not.toThrow();
       consoleErrorSpy.mockRestore();
+    });
+
+    it('tees a stderr line to the log stream marked, in a single write', async () => {
+      const { RollingWindow } = await import('./RollingWindow.js');
+      const window = new RollingWindow('a', 'logs/a.log');
+      window.start();
+      writeStreamMock.write.mockClear(); // discard the start() header write
+      window.logStderrLine('boom');
+      // One write of the marker + line + trailing newline (NOT three writes).
+      // Literal expected string pins the exact wire format independently of
+      // the STDERR_LOG_MARKER constant.
+      expect(writeStreamMock.write).toHaveBeenCalledTimes(1);
+      expect(writeStreamMock.write).toHaveBeenCalledWith('stderr│ boom\n');
+    });
+
+    it('does NOT write a stderr line when logPath is null', async () => {
+      const { RollingWindow } = await import('./RollingWindow.js');
+      const window = new RollingWindow('a', null);
+      window.start();
+      // logStream is null (--save-logs off): the optional chain makes this a
+      // silent no-op rather than throwing.
+      expect(() => window.logStderrLine('boom')).not.toThrow();
+      expect(writeStreamMock.write).not.toHaveBeenCalled();
+    });
+
+    it('drops logStderrLine() calls after finish() — no stream write-after-end', async () => {
+      // Same timeout-then-late-event race as the feed()-after-finish drop:
+      // finish() ends the log stream, so a stderr line arriving afterward must
+      // not write to the ended stream (ERR_STREAM_WRITE_AFTER_END). The
+      // `if (this.finished) return;` guard drops it instead.
+      const { RollingWindow } = await import('./RollingWindow.js');
+      const window = new RollingWindow('a', 'logs/a.log');
+      window.start();
+      writeStreamMock.write.mockClear();
+      window.finish('ok');
+      const callsAfterFinish = writeStreamMock.write.mock.calls.length;
+      expect(() => window.logStderrLine('late')).not.toThrow();
+      expect(writeStreamMock.write).toHaveBeenCalledTimes(callsAfterFinish);
+    });
+
+    it('preserves a blank stderr line as a marked empty line (does not drop it)', async () => {
+      // No empty-guard on the method: a blank stderr line still tees exactly
+      // one marked write (`stderr│ \n`), mirroring how the stdout tee preserves
+      // a blank stdout line as `\n`. Keeps stderr's vertical spacing intact in
+      // the post-mortem log and guards against a future `if (!line) return`
+      // that would silently swallow blank stderr lines.
+      const { RollingWindow } = await import('./RollingWindow.js');
+      const window = new RollingWindow('a', 'logs/a.log');
+      window.start();
+      writeStreamMock.write.mockClear(); // discard the start() header write
+      window.logStderrLine('');
+      expect(writeStreamMock.write).toHaveBeenCalledTimes(1);
+      expect(writeStreamMock.write).toHaveBeenCalledWith('stderr│ \n');
+    });
+
+    it('interleaves stdout and stderr on the same log stream in arrival order, only stderr marked', async () => {
+      // The marker's whole reason to exist (PRD scope boundary): stdout
+      // (commitLine) and stderr (logStderrLine) tee into the SAME log stream in
+      // arrival order, and ONLY the stderr lines carry `stderr│ ` so a
+      // post-mortem reader can tell the two streams apart in the merged log.
+      // The isolated tests above pin each half; this pins their coexistence —
+      // the actual post-mortem-reader contract.
+      const { RollingWindow } = await import('./RollingWindow.js');
+      const window = new RollingWindow('a', 'logs/a.log');
+      window.start();
+      writeStreamMock.write.mockClear(); // discard the start() header write
+      window.feed('out\n');
+      window.logStderrLine('err');
+      window.feed('out2\n');
+      expect(writeStreamMock.write.mock.calls).toEqual([['out\n'], ['stderr│ err\n'], ['out2\n']]);
     });
   });
 });

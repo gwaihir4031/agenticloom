@@ -39,6 +39,11 @@ vi.mock('readline', () => ({
         if (buf.length > 0) emitter.emit('line', buf);
         emitter.emit('close');
       });
+      // Mirror real readline: a 'error' on the input stream is RE-EMITTED onto
+      // the interface (not left on the raw stream). Production guards the
+      // interface (errLines.on('error', ...)) precisely because of this
+      // re-emission, so the mock must reproduce it for the guard test to bite.
+      opts.input.on('error', (err: Error) => emitter.emit('error', err));
       emitter.close = () => undefined;
       return emitter;
     }
@@ -169,7 +174,7 @@ describe('runAgent', () => {
     expect(args).toContain('haiku');
   });
 
-  it('uses stdio: pipe-stdout-inherit-stderr', async () => {
+  it('uses stdio: pipe-stdout-pipe-stderr (fd 2 captured, not inherited)', async () => {
     spawnMock.mockImplementation(() => makeFakeRunAgentChild());
     const { runAgent } = await import('./agent.js');
     await runAgent('a', 'prompt', undefined, {
@@ -178,7 +183,7 @@ describe('runAgent', () => {
       extraArgs: [],
     });
     const options = spawnMock.mock.calls[0][2];
-    expect(options.stdio).toEqual(['ignore', 'pipe', 'inherit']);
+    expect(options.stdio).toEqual(['ignore', 'pipe', 'pipe']);
   });
 
   describe('spawn cwd threading via LOOM_INVOCATION_CWD', () => {
@@ -728,6 +733,632 @@ describe('runAgent', () => {
       }),
     ).rejects.toThrow(/interrupted by Ctrl-C/);
     expect(killed).toBe(true);
+  });
+
+  describe('stderr capture', () => {
+    // fd 2 is piped (not inherited): runAgent reads child.stderr line by line
+    // and tees each line to its LIVE sinks — an echo on the parent's
+    // process.stderr and the window's --save-logs sink (logStderrLine) — while
+    // keeping stderr out of textBuffer so it cannot contaminate the
+    // no-producesPath return value. The rolling failure tail is the
+    // `stderr failure tail` describe below. The logStderrLine tests swap in a
+    // spy RollingWindow via doMock, so undo it
+    // here (a no-op for the tests that don't mock it).
+    afterEach(() => {
+      vi.doUnmock('../RollingWindow.js');
+      delete process.env.LOOM_SAVE_LOGS;
+    });
+
+    it('echoes each captured stderr line to process.stderr (line + newline)', async () => {
+      spawnMock.mockImplementation(() =>
+        makeFakeRunAgentChild({
+          stderrLines: ['auth error: token expired\n', 'retrying once\n'],
+        }),
+      );
+      const stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+      try {
+        const { runAgent } = await import('./agent.js');
+        await runAgent('a', 'prompt', undefined, {
+          cli: 'claude',
+          agentDirs: ['.claude/agents/', '~/.claude/agents/'],
+          extraArgs: [],
+        });
+        // readline strips the trailing newline off each line; runAgent re-adds
+        // exactly one when echoing, preserving today's fd-2 destination.
+        expect(stderrSpy).toHaveBeenCalledWith('auth error: token expired\n');
+        expect(stderrSpy).toHaveBeenCalledWith('retrying once\n');
+      } finally {
+        stderrSpy.mockRestore();
+      }
+    });
+
+    it('tees each stderr line to window.logStderrLine (the --save-logs sink)', async () => {
+      process.env.LOOM_SAVE_LOGS = '1';
+      const logStderrSpy = vi.fn();
+      vi.doMock('../RollingWindow.js', () => ({
+        RollingWindow: class {
+          constructor(_name: string, _logPath: string | null) {}
+          start(): void {}
+          feed(): void {}
+          setResult(): void {}
+          finish(): void {}
+          logStderrLine(line: string): void {
+            logStderrSpy(line);
+          }
+        },
+      }));
+      vi.resetModules();
+      spawnMock.mockImplementation(() =>
+        makeFakeRunAgentChild({ stderrLines: ['boom\n', 'second diagnostic\n'] }),
+      );
+      const stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+      try {
+        const { runAgent } = await import('./agent.js');
+        await runAgent('ac-writer', 'prompt', undefined, {
+          cli: 'claude',
+          agentDirs: ['.claude/agents/', '~/.claude/agents/'],
+          extraArgs: [],
+        });
+        // logStderrLine receives the readline-split line WITHOUT a trailing
+        // newline — the window adds its marker + newline itself.
+        expect(logStderrSpy).toHaveBeenCalledWith('boom');
+        expect(logStderrSpy).toHaveBeenCalledWith('second diagnostic');
+      } finally {
+        stderrSpy.mockRestore();
+      }
+    });
+
+    it('flushes a newline-less final stderr line to the live sinks', async () => {
+      process.env.LOOM_SAVE_LOGS = '1';
+      const logStderrSpy = vi.fn();
+      vi.doMock('../RollingWindow.js', () => ({
+        RollingWindow: class {
+          constructor(_name: string, _logPath: string | null) {}
+          start(): void {}
+          feed(): void {}
+          setResult(): void {}
+          finish(): void {}
+          logStderrLine(line: string): void {
+            logStderrSpy(line);
+          }
+        },
+      }));
+      vi.resetModules();
+      // The final chunk carries NO trailing newline (pushed verbatim by the
+      // fake child); the reader must flush that unterminated remainder on
+      // stream end so it still reaches the sinks.
+      spawnMock.mockImplementation(() =>
+        makeFakeRunAgentChild({ stderrLines: ['fatal: no newline at end'] }),
+      );
+      const stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+      try {
+        const { runAgent } = await import('./agent.js');
+        await runAgent('ac-writer', 'prompt', undefined, {
+          cli: 'claude',
+          agentDirs: ['.claude/agents/', '~/.claude/agents/'],
+          extraArgs: [],
+        });
+        expect(logStderrSpy).toHaveBeenCalledWith('fatal: no newline at end');
+      } finally {
+        stderrSpy.mockRestore();
+      }
+    });
+
+    it('never lets stderr contaminate the no-producesPath return value', async () => {
+      // A stderr-only child (no stdout lines at all): textBuffer must stay
+      // empty so the trimmed return value is '', proving stderr never fed
+      // textBuffer.
+      spawnMock.mockImplementation(() =>
+        makeFakeRunAgentChild({ stdoutLines: [], stderrLines: ['noise on stderr\n'] }),
+      );
+      const stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+      try {
+        const { runAgent } = await import('./agent.js');
+        const result = await runAgent('a', 'prompt', undefined, {
+          cli: 'claude',
+          agentDirs: ['.claude/agents/', '~/.claude/agents/'],
+          extraArgs: [],
+        });
+        expect(result).toBe('');
+      } finally {
+        stderrSpy.mockRestore();
+      }
+    });
+
+    it('tees one sink call per readline-split line, not per raw chunk', async () => {
+      // The reader must split each stderr chunk on '\n' via readline and tee
+      // PER LINE, not per chunk. A single three-line blob therefore produces
+      // exactly three logStderrLine calls, in order, with no empty trailing
+      // call for the final newline.
+      process.env.LOOM_SAVE_LOGS = '1';
+      const logStderrSpy = vi.fn();
+      vi.doMock('../RollingWindow.js', () => ({
+        RollingWindow: class {
+          constructor(_name: string, _logPath: string | null) {}
+          start(): void {}
+          feed(): void {}
+          setResult(): void {}
+          finish(): void {}
+          logStderrLine(line: string): void {
+            logStderrSpy(line);
+          }
+        },
+      }));
+      vi.resetModules();
+      spawnMock.mockImplementation(() =>
+        makeFakeRunAgentChild({ stderrLines: ['multi\nline\nchunk\n'] }),
+      );
+      const stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+      try {
+        const { runAgent } = await import('./agent.js');
+        await runAgent('ac-writer', 'prompt', undefined, {
+          cli: 'claude',
+          agentDirs: ['.claude/agents/', '~/.claude/agents/'],
+          extraArgs: [],
+        });
+        expect(logStderrSpy.mock.calls).toEqual([['multi'], ['line'], ['chunk']]);
+      } finally {
+        stderrSpy.mockRestore();
+      }
+    });
+
+    it('keeps stderr out of the copilot raw-stdout return value', async () => {
+      // The copilot path accumulates EVERY stdout line into textBuffer
+      // (textBuffer += line + '\n'), so it is the most exposed contamination
+      // surface: if stderr were ever routed through the same accumulate, the
+      // return value would absorb it. Assert the return is the stdout work
+      // product alone while stderr still reaches its live echo sink.
+      spawnMock.mockImplementation(() =>
+        makeFakeRunAgentChild({
+          stdoutLines: ['real copilot output'],
+          stderrLines: ['stderr noise\n'],
+        }),
+      );
+      const stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+      try {
+        const { runAgent } = await import('./agent.js');
+        const result = await runAgent('a', 'prompt', undefined, {
+          cli: 'copilot',
+          agentDirs: ['.github/agents/', '~/.copilot/agents/'],
+          extraArgs: [],
+        });
+        expect(result).toBe('real copilot output');
+        expect(stderrSpy).toHaveBeenCalledWith('stderr noise\n');
+      } finally {
+        stderrSpy.mockRestore();
+      }
+    });
+  });
+
+  describe('stderr failure tail', () => {
+    // The THIRD stderr sink: a rolling 8K tail surfaced on the five
+    // agent/cli-death reject paths so a failed run always carries the reason
+    // the child died, with or without --save-logs. A `--- stderr (tail) ---`
+    // delimiter line separates the base reject message from the captured tail.
+    // The SIGINT reject is deliberately NOT wrapped — a user Ctrl-C is not an
+    // agent/cli death. Each test suppresses the
+    // process.stderr echo so the captured lines don't bleed into the runner's
+    // own stderr (mirrors the `stderr capture` block's spy pattern).
+    it('survives a stderr stream error and still settles via the exit handler', async () => {
+      // A low-level fd-2 read fault surfaces as an 'error' on child.stderr.
+      // readline re-emits it onto the interface, where runAgent's guard
+      // (errLines.on('error', ...)) swallows it — without that guard the
+      // re-emitted error escapes as an uncaughtException and the promise never
+      // settles. Drive the fault, then a clean exit, and assert runAgent
+      // resolves normally (code 0, no producesPath → the trimmed textBuffer).
+      const stdout = new Readable({ read() {} });
+      const stderr = new Readable({ read() {} });
+      const child = new EventEmitter() as EventEmitter & {
+        stdin: any;
+        stdout: Readable;
+        stderr: Readable;
+        kill: any;
+      };
+      child.stdin = { write() {}, end() {} };
+      child.stdout = stdout;
+      child.stderr = stderr;
+      child.kill = () => undefined;
+      spawnMock.mockImplementation(() => {
+        queueMicrotask(() => {
+          stdout.push(null);
+          // The fault: an 'error' on fd 2. A stream is destroyed by 'error', so
+          // it won't emit 'end' afterward — drive the resolve directly via
+          // 'exit' rather than relying on a stderr-end barrier.
+          stderr.emit('error', new Error('read fault on fd 2'));
+          child.emit('exit', 0);
+        });
+        return child;
+      });
+      const stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+      try {
+        const { runAgent } = await import('./agent.js');
+        await expect(
+          runAgent('a', 'prompt', undefined, {
+            cli: 'claude',
+            agentDirs: ['.claude/agents/', '~/.claude/agents/'],
+            extraArgs: [],
+          }),
+        ).resolves.toBe('');
+      } finally {
+        stderrSpy.mockRestore();
+      }
+    });
+
+    it('appends the stderr tail to the nonzero-exit reject message', async () => {
+      spawnMock.mockImplementation(() =>
+        makeFakeRunAgentChild({ stderrLines: ['auth error: token expired\n'], exitCode: 2 }),
+      );
+      const stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+      try {
+        const { runAgent } = await import('./agent.js');
+        await expect(
+          runAgent('a', 'prompt', undefined, {
+            cli: 'claude',
+            agentDirs: ['.claude/agents/', '~/.claude/agents/'],
+            extraArgs: [],
+          }),
+        ).rejects.toThrow(/exited with code 2\n--- stderr \(tail\) ---\nauth error: token expired/);
+      } finally {
+        stderrSpy.mockRestore();
+      }
+    });
+
+    it('flushes a newline-less final stderr line into the tail', async () => {
+      // The fake child pushes stderrLines VERBATIM (no forced newline),
+      // so the unterminated remainder only reaches the tail if readline flushes
+      // it on stream end. Proves the last diagnostic a crashing child prints —
+      // often newline-less — still makes the failure summary.
+      spawnMock.mockImplementation(() =>
+        makeFakeRunAgentChild({ stderrLines: ['fatal: no newline at end'], exitCode: 2 }),
+      );
+      const stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+      try {
+        const { runAgent } = await import('./agent.js');
+        await expect(
+          runAgent('a', 'prompt', undefined, {
+            cli: 'claude',
+            agentDirs: ['.claude/agents/', '~/.claude/agents/'],
+            extraArgs: [],
+          }),
+        ).rejects.toThrow(/--- stderr \(tail\) ---\nfatal: no newline at end/);
+      } finally {
+        stderrSpy.mockRestore();
+      }
+    });
+
+    it('appends the stderr tail to the did-not-write-expected-file reject', async () => {
+      // No fakeFs entry for the produces path → the post-exit existence check
+      // fails on a code-0 child; the tail must ride along on that reject too.
+      spawnMock.mockImplementation(() =>
+        makeFakeRunAgentChild({ stderrLines: ['could not open output: EACCES\n'], exitCode: 0 }),
+      );
+      const stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+      try {
+        const { runAgent } = await import('./agent.js');
+        await expect(
+          runAgent('a', 'prompt', 'missing-out.json', {
+            cli: 'claude',
+            agentDirs: ['.claude/agents/', '~/.claude/agents/'],
+            extraArgs: [],
+          }),
+        ).rejects.toThrow(
+          /did not write expected file: .*\n--- stderr \(tail\) ---\ncould not open output: EACCES/,
+        );
+      } finally {
+        stderrSpy.mockRestore();
+      }
+    });
+
+    it('appends the stderr tail to the timeout reject message', async () => {
+      vi.useFakeTimers();
+      const stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+      const stdout = new Readable({ read() {} });
+      const stderr = new Readable({ read() {} });
+      const child = new EventEmitter() as EventEmitter & {
+        stdin: any;
+        stdout: Readable;
+        stderr: Readable;
+        kill: any;
+      };
+      child.stdin = { write() {}, end() {} };
+      child.stdout = stdout;
+      child.stderr = stderr;
+      // The timeout handler calls child.kill('SIGTERM'); simulate the OS by
+      // ending both streams and emitting a signal-killed exit on the next
+      // microtask. runAgent's `settled` guard means the exit branch never fires
+      // — the timeout reject (carrying the pre-SIGTERM tail) wins.
+      child.kill = () => {
+        queueMicrotask(() => {
+          stdout.push(null);
+          stderr.push(null);
+          child.emit('exit', null);
+        });
+      };
+      spawnMock.mockImplementation(() => child);
+      try {
+        const { runAgent } = await import('./agent.js');
+        const p = runAgent('slow-agent', 'prompt', undefined, {
+          cli: 'claude',
+          agentDirs: ['.claude/agents/', '~/.claude/agents/'],
+          extraArgs: [],
+          timeout: 1000,
+        });
+        // The reader is attached now; a diagnostic the child printed BEFORE it
+        // hung flows straight into the tail (stream already flowing).
+        stderr.push('still waiting on upstream...\n');
+        await Promise.resolve();
+        // Pre-attach the matcher before advancing time (see the sibling timeout
+        // test for the PromiseRejectionHandledWarning rationale).
+        const assertion = expect(p).rejects.toThrow(
+          /timed out after 1000ms\n--- stderr \(tail\) ---\nstill waiting on upstream/,
+        );
+        await vi.advanceTimersByTimeAsync(1500);
+        await assertion;
+      } finally {
+        stderrSpy.mockRestore();
+        vi.useRealTimers();
+      }
+    });
+
+    it('keeps the SIGINT reject bare (no tail) even when stderr was captured', async () => {
+      // makeFakeRunAgentChild's two-stream barrier guarantees the stderr line
+      // is fully drained into the tail BEFORE 'exit' fires, so the capture is
+      // real by the time the reject lands. The interrupt is injected
+      // synchronously right after spawn so interruptedBySigint is set before
+      // that exit — the graceful-SIGINT path (child exits 0 after cleanup) with
+      // stderr present, the worst case for a tail leaking onto the message.
+      spawnMock.mockImplementation(() =>
+        makeFakeRunAgentChild({ stderrLines: ['mid-run diagnostic\n'] }),
+      );
+      const stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+      try {
+        const { runAgent } = await import('./agent.js');
+        const settled = runAgent('a', 'prompt', undefined, {
+          cli: 'claude',
+          agentDirs: ['.claude/agents/', '~/.claude/agents/'],
+          extraArgs: [],
+        }).catch((e) => e as Error);
+        process.emit('SIGINT');
+        const err = await settled;
+        // stderr WAS captured (the reader echoed it before exit)...
+        expect(stderrSpy).toHaveBeenCalledWith('mid-run diagnostic\n');
+        // ...yet the user-initiated SIGINT reject carries neither the delimiter
+        // nor the captured line — it is not an agent/cli death.
+        expect(err.message).toMatch(/interrupted by Ctrl-C/);
+        expect(err.message).not.toContain('--- stderr (tail) ---');
+      } finally {
+        stderrSpy.mockRestore();
+      }
+    });
+
+    it('leaves the reject message bare (no delimiter) when no stderr was captured', async () => {
+      // withStderrTail returns the base message UNCHANGED when the tail is
+      // empty, so a clean failure (the child died but printed nothing to
+      // stderr) stays clean — no dangling `--- stderr (tail) ---` header. The
+      // negative companion to the nonzero-exit-with-tail test above; pins the
+      // empty-tail branch of the helper.
+      spawnMock.mockImplementation(() => makeFakeRunAgentChild({ exitCode: 2 }));
+      const { runAgent } = await import('./agent.js');
+      const err = await runAgent('a', 'prompt', undefined, {
+        cli: 'claude',
+        agentDirs: ['.claude/agents/', '~/.claude/agents/'],
+        extraArgs: [],
+      }).catch((e) => e as Error);
+      expect(err.message).toMatch(/exited with code 2/);
+      expect(err.message).not.toContain('--- stderr (tail) ---');
+    });
+
+    it('leaves the reject message bare when only blank/whitespace stderr was captured', async () => {
+      // A child that printed only blank/whitespace lines makes stderrTail
+      // non-empty ('\n   \n') but trim-empty, so withStderrTail's
+      // `stderrTail.trim() === ''` gate must still omit the delimiter — no bare
+      // `--- stderr (tail) ---` header over an empty body. Distinct from the
+      // no-stderr case above (literally ''): this case would FAIL under a plain
+      // `stderrTail === ''` gate, so it pins the trim specifically.
+      spawnMock.mockImplementation(() =>
+        makeFakeRunAgentChild({ stderrLines: ['\n', '   \n'], exitCode: 2 }),
+      );
+      const stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+      try {
+        const { runAgent } = await import('./agent.js');
+        const err = await runAgent('a', 'prompt', undefined, {
+          cli: 'claude',
+          agentDirs: ['.claude/agents/', '~/.claude/agents/'],
+          extraArgs: [],
+        }).catch((e) => e as Error);
+        expect(err.message).toMatch(/exited with code 2/);
+        expect(err.message).not.toContain('--- stderr (tail) ---');
+      } finally {
+        stderrSpy.mockRestore();
+      }
+    });
+
+    it('caps the tail to the trailing STDERR_TAIL_CAP, keeping the newest stderr and dropping the oldest', async () => {
+      // STDERR_TAIL_CAP is 8 * 1024 UTF-16 code units (a module-local const, not
+      // exported — mirrored here). Push well over the cap with a recognizable
+      // marker at the very start and end: after the per-line slice(-CAP) trims,
+      // the surfaced tail must retain the END marker, drop the START marker, and
+      // never exceed the cap. This is the runaway-chatty-child memory floor.
+      const CAP = 8 * 1024;
+      spawnMock.mockImplementation(() =>
+        makeFakeRunAgentChild({
+          stderrLines: ['START-MARKER\n', 'x'.repeat(9000) + '\n', 'END-MARKER\n'],
+          exitCode: 2,
+        }),
+      );
+      const stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+      try {
+        const { runAgent } = await import('./agent.js');
+        const err = await runAgent('a', 'prompt', undefined, {
+          cli: 'claude',
+          agentDirs: ['.claude/agents/', '~/.claude/agents/'],
+          extraArgs: [],
+        }).catch((e) => e as Error);
+        const delimiter = '--- stderr (tail) ---\n';
+        expect(err.message).toContain(delimiter);
+        const tail = err.message.slice(err.message.indexOf(delimiter) + delimiter.length);
+        expect(tail.length).toBeLessThanOrEqual(CAP);
+        expect(tail).toContain('END-MARKER');
+        expect(tail).not.toContain('START-MARKER');
+      } finally {
+        stderrSpy.mockRestore();
+      }
+    });
+
+    it('caps the tail across many small lines whose cumulative length crosses the cap', async () => {
+      // The realistic runaway-chatty-child shape: every line is well under the
+      // cap, but their running sum crosses it. A second cap shape (many small
+      // lines vs the single oversized line above): verifies the surfaced tail
+      // stays <= CAP with the newest lines kept and the oldest evicted.
+      const CAP = 8 * 1024;
+      const lines = Array.from({ length: 2000 }, (_, i) => `log line ${i}\n`);
+      spawnMock.mockImplementation(() =>
+        makeFakeRunAgentChild({ stderrLines: lines, exitCode: 2 }),
+      );
+      const stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+      try {
+        const { runAgent } = await import('./agent.js');
+        const err = await runAgent('a', 'prompt', undefined, {
+          cli: 'claude',
+          agentDirs: ['.claude/agents/', '~/.claude/agents/'],
+          extraArgs: [],
+        }).catch((e) => e as Error);
+        const delimiter = '--- stderr (tail) ---\n';
+        const tail = err.message.slice(err.message.indexOf(delimiter) + delimiter.length);
+        expect(tail.length).toBeLessThanOrEqual(CAP);
+        // Newest lines survive; the oldest are evicted.
+        expect(tail).toContain('log line 1999');
+        expect(tail).not.toContain('log line 0\n');
+      } finally {
+        stderrSpy.mockRestore();
+      }
+    });
+
+    it('appends the stderr tail to the signal-killed (code === null) reject message', async () => {
+      // An external signal kill (e.g. the OOM killer SIGKILL) surfaces as
+      // code === null WITHOUT a parent SIGINT, hitting the "was killed by
+      // signal" reject — an agent/cli death, so the tail rides along. Distinct
+      // from the user-initiated Ctrl-C path above, which stays bare. The
+      // helper's two-stream barrier drains the stderr line into the tail before
+      // the null-exit reject lands.
+      spawnMock.mockImplementation(() =>
+        makeFakeRunAgentChild({ stderrLines: ['Killed: out of memory\n'], exitCode: null }),
+      );
+      const stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+      try {
+        const { runAgent } = await import('./agent.js');
+        await expect(
+          runAgent('a', 'prompt', undefined, {
+            cli: 'claude',
+            agentDirs: ['.claude/agents/', '~/.claude/agents/'],
+            extraArgs: [],
+          }),
+        ).rejects.toThrow(/was killed by signal\n--- stderr \(tail\) ---\nKilled: out of memory/);
+      } finally {
+        stderrSpy.mockRestore();
+      }
+    });
+
+    it('appends the stderr tail to a generic (non-ENOENT) spawn-error reject and preserves the cause', async () => {
+      // The spawn 'error' handler wraps non-ENOENT errors as
+      // withStderrTail(err.message) with { cause: err }. A child that printed a
+      // diagnostic and then surfaced a post-spawn error (e.g. a failed kill)
+      // must carry that diagnostic on the reject. The 'error' is emitted only
+      // after stderr's 'end' so the line is fully drained into the tail first —
+      // a hand-rolled race here would be flaky (mirrors the helper's barrier).
+      const original = new Error('spawn EACCES') as NodeJS.ErrnoException;
+      original.code = 'EACCES';
+      spawnMock.mockImplementation(() => {
+        const stdout = new Readable({ read() {} });
+        const stderr = new Readable({ read() {} });
+        const child = new EventEmitter() as EventEmitter & {
+          stdin: any;
+          stdout: Readable;
+          stderr: Readable;
+          kill: any;
+        };
+        child.stdin = { write() {}, end() {} };
+        child.stdout = stdout;
+        child.stderr = stderr;
+        child.kill = () => undefined;
+        stderr.on('end', () => {
+          queueMicrotask(() => child.emit('error', original));
+        });
+        queueMicrotask(() => {
+          stdout.push(null);
+          stderr.push('exec format error: bad binary\n');
+          stderr.push(null);
+        });
+        return child;
+      });
+      const stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+      try {
+        const { runAgent } = await import('./agent.js');
+        const err = await runAgent('a', 'prompt', undefined, {
+          cli: 'claude',
+          agentDirs: ['.claude/agents/', '~/.claude/agents/'],
+          extraArgs: [],
+        }).catch((e) => e as Error);
+        expect(err.message).toMatch(
+          /spawn EACCES\n--- stderr \(tail\) ---\nexec format error: bad binary/,
+        );
+        // The generic branch keeps the raw err.message — NOT the ENOENT remediation.
+        expect(err.message).not.toContain('not found on PATH');
+        // The original spawn error is preserved as the cause (no info loss).
+        expect(err.cause).toBe(original);
+      } finally {
+        stderrSpy.mockRestore();
+      }
+    });
+
+    it('appends the stderr tail to the ENOENT spawn-error reject (alongside the remediation)', async () => {
+      // The ENOENT branch builds its OWN remediation message ("not found on
+      // PATH"), distinct from the generic branch above, and must also route
+      // through withStderrTail. A real missing-binary ENOENT prints nothing —
+      // the bare-remediation case is the 'throws on spawn ENOENT with
+      // remediation' test — so this drives a child that emitted a diagnostic
+      // then failed ENOENT, pinning the tail wrap on the remediation message
+      // too. The 'error' fires only after stderr 'end' so the line drains first.
+      const original = new Error('spawn claude ENOENT') as NodeJS.ErrnoException;
+      original.code = 'ENOENT';
+      spawnMock.mockImplementation(() => {
+        const stdout = new Readable({ read() {} });
+        const stderr = new Readable({ read() {} });
+        const child = new EventEmitter() as EventEmitter & {
+          stdin: any;
+          stdout: Readable;
+          stderr: Readable;
+          kill: any;
+        };
+        child.stdin = { write() {}, end() {} };
+        child.stdout = stdout;
+        child.stderr = stderr;
+        child.kill = () => undefined;
+        stderr.on('end', () => {
+          queueMicrotask(() => child.emit('error', original));
+        });
+        queueMicrotask(() => {
+          stdout.push(null);
+          stderr.push('dyld: missing shared library\n');
+          stderr.push(null);
+        });
+        return child;
+      });
+      const stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+      try {
+        const { runAgent } = await import('./agent.js');
+        const err = await runAgent('a', 'prompt', undefined, {
+          cli: 'claude',
+          agentDirs: ['.claude/agents/', '~/.claude/agents/'],
+          extraArgs: [],
+        }).catch((e) => e as Error);
+        expect(err.message).toMatch(
+          /not found on PATH\. Install the cli before running an agent\.\n--- stderr \(tail\) ---\ndyld: missing shared library/,
+        );
+      } finally {
+        stderrSpy.mockRestore();
+      }
+    });
   });
 });
 

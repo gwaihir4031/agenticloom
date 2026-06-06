@@ -216,6 +216,18 @@ You MAY include additional top-level fields (e.g. "reviewer_notes").
 Do not emit prose to stdout; the verdict lives in the JSON file's "status" field.`;
 }
 
+/** Cap on the rolling stderr failure tail, in UTF-16 code units. The reader
+ *  retains only the trailing slice so a runaway-chatty child can't blow memory,
+ *  while a failed run still carries the death reason on its reject message. Same
+ *  8K floor the interactive gate uses (STDERR_CAPTURE_CAP in human-gate.ts);
+ *  duplicated, not shared, because the two capture sites are independent (this
+ *  one reads readline-split lines; the gate reads StringDecoder-decoded chunks); the
+ *  shared 8K is a convention the two may diverge from, not an enforced invariant.
+ *  The unit is code units, not bytes — for non-BMP content the slice may split a
+ *  surrogate pair, leaving a lone surrogate that renders as one U+FFFD glyph at
+ *  the boundary, acceptable for a diagnostic memory floor. */
+const STDERR_TAIL_CAP = 8 * 1024;
+
 /** Spawn the configured CLI for this agent and stream its output through a
  *  RollingWindow renderer. Returns the producesPath when set, otherwise the
  *  trimmed text content the agent emitted.
@@ -365,9 +377,29 @@ export async function runAgent(
   // external embedders) where no cli was in the loop.
   const agentCwd = process.env.LOOM_INVOCATION_CWD ?? process.cwd();
   return await new Promise<string>((resolve, reject) => {
-    const child = spawn(bin, finalArgs, { cwd: agentCwd, stdio: ['ignore', 'pipe', 'inherit'] });
+    const child = spawn(bin, finalArgs, { cwd: agentCwd, stdio: ['ignore', 'pipe', 'pipe'] });
     let settled = false;
     let textBuffer = '';
+    // Rolling tail of the child's stderr — the last STDERR_TAIL_CAP UTF-16 code
+    // units, reconstructed line-by-line in the stderr reader below. The THIRD
+    // stderr sink (after the process.stderr echo and the --save-logs log tee);
+    // surfaced on the agent/cli-death reject paths via withStderrTail so a
+    // failed run always names why the child died, with or without --save-logs.
+    // Deliberately separate from textBuffer: stderr is diagnostic, never part
+    // of the no-producesPath work product.
+    let stderrTail = '';
+    // Append the captured tail (when it carries non-whitespace) under a
+    // labelled delimiter so the death reason rides along with the base reject
+    // message; return the base unchanged when nothing meaningful was captured
+    // so clean errors stay clean. The trim-before-gate means a child that
+    // printed only blank stderr lines (stderrTail = '\n') counts as "nothing
+    // captured" — no bare `--- stderr (tail) ---` header over an empty body.
+    // The appended tail's single trailing newline is stripped so the rendered
+    // error ends on the last diagnostic line, not a dangling blank one.
+    const withStderrTail = (base: string): string =>
+      stderrTail.trim() === ''
+        ? base
+        : `${base}\n--- stderr (tail) ---\n${stderrTail.replace(/\n$/, '')}`;
     // Set when the parent receives SIGINT (Ctrl-C). Read in the exit handler:
     // even if the child exits with code 0 (claude can clean up gracefully on
     // SIGINT) AND the producesPath file exists, runAgent must REJECT — otherwise
@@ -399,7 +431,9 @@ export async function runAgent(
       process.off('SIGINT', onSigint);
       child.kill('SIGTERM');
       window.finish('error');
-      reject(new Error(`agent '${name}' timed out after ${timeoutMs}ms`));
+      // Append whatever stderr was captured before the SIGTERM above — a
+      // timed-out run still names the cause if the child printed one.
+      reject(new Error(withStderrTail(`agent '${name}' timed out after ${timeoutMs}ms`)));
     }, timeoutMs);
 
     const cleanup = (): void => {
@@ -503,6 +537,41 @@ export async function runAgent(
       });
     }
 
+    // fd 2 is piped (not inherited), so read the child's stderr line by line
+    // exactly as stdout is read above. Each line tees to its LIVE sinks:
+    // (a) an echo back out on the parent's process.stderr — preserving
+    // today's fd-2 destination, now line-oriented rather than the byte-shared
+    // fd that `inherit` gave (immaterial for the diagnostic-only stderr of
+    // loom's `-p` agents); (b) the window's marked --save-logs sink, itself a
+    // silent no-op when --save-logs is off; (c) the rolling failure tail
+    // (STDERR_TAIL_CAP-capped), surfaced on the agent/cli-death reject paths
+    // via withStderrTail. stderr is deliberately kept OUT of `textBuffer`: the
+    // no-producesPath return value is the agent's stdout work product alone.
+    // readline flushes the final unterminated line on stream end, so a
+    // newline-less last diagnostic still reaches all three sinks.
+    if (child.stderr) {
+      const errLines = readline.createInterface({ input: child.stderr, crlfDelay: Infinity });
+      // Drop a low-level pipe read fault rather than let an unhandled stream
+      // 'error' become an uncaughtException — that would bypass BOTH the
+      // friendly-cli-errors surface and the stderr tail this reader exists to
+      // provide. The guard MUST be on errLines, not child.stderr: readline
+      // attaches its own input listener and RE-EMITS the input's 'error' onto
+      // the interface, so a listener on child.stderr alone does NOT prevent the
+      // crash (the re-emitted error lands on errLines with no handler). The
+      // exit/error reject handlers below still report the death. (The
+      // pre-existing child.stdout reader has the same latent gap; left as a
+      // separate, out-of-scope follow-up.)
+      errLines.on('error', () => {});
+      errLines.on('line', (line: string) => {
+        process.stderr.write(line + '\n');
+        window.logStderrLine(line);
+        // Third sink: append to the rolling failure tail, reconstructing the
+        // newline readline stripped, then trim to the trailing cap.
+        stderrTail += line + '\n';
+        if (stderrTail.length > STDERR_TAIL_CAP) stderrTail = stderrTail.slice(-STDERR_TAIL_CAP);
+      });
+    }
+
     child.on('error', (err) => {
       if (settled) return;
       settled = true;
@@ -510,11 +579,15 @@ export async function runAgent(
       window.finish('error');
       if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
         reject(
-          new Error(`'${opts.cli}' not found on PATH. Install the cli before running an agent.`),
+          new Error(
+            withStderrTail(
+              `'${opts.cli}' not found on PATH. Install the cli before running an agent.`,
+            ),
+          ),
         );
         return;
       }
-      reject(err);
+      reject(new Error(withStderrTail(err.message), { cause: err }));
     });
 
     child.on('exit', (code) => {
@@ -533,20 +606,24 @@ export async function runAgent(
       }
       if (code !== 0 && code !== null) {
         window.finish('error');
-        reject(new Error(`${opts.cli} (${name}) exited with code ${code}`));
+        reject(new Error(withStderrTail(`${opts.cli} (${name}) exited with code ${code}`)));
         return;
       }
       // code === null typically means signal-killed (Ctrl-C). Treat as failure
       // so callers don't silently consume an interrupted run.
       if (code === null) {
         window.finish('error');
-        reject(new Error(`${opts.cli} (${name}) was killed by signal`));
+        reject(new Error(withStderrTail(`${opts.cli} (${name}) was killed by signal`)));
         return;
       }
       if (producesPathAbs) {
         if (!existsSync(producesPathAbs)) {
           window.finish('error');
-          reject(new Error(`agent '${name}' did not write expected file: ${producesPathAbs}`));
+          reject(
+            new Error(
+              withStderrTail(`agent '${name}' did not write expected file: ${producesPathAbs}`),
+            ),
+          );
           return;
         }
         window.finish('ok');
