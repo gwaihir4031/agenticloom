@@ -7,9 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.5] - 2026-06-06
+
 ### Added
 
-- `runAgent` now surfaces the claude CLI's `api_retry` events: each transient-failure retry (HTTP 529 overload, rate-limit) renders live as `⟳ retry N/M — category, waiting Ns` in both display modes (and tees to the `--save-logs` log), and a per-run retry summary (count, category, budget-exhausted flag) is captured into the result telemetry and shown on the collapsed status line. Observe-only; claude path only — the copilot raw-stdout path has no equivalent structured event.
+- `runAgent` now surfaces the claude CLI's `api_retry` events: each transient-failure retry (HTTP 529 overload, rate-limit) renders live as `⟳ retry N/M — category, waiting Ns` in both display modes (and tees to the `--save-logs` log), and a per-run retry summary (count, category, budget-exhausted flag) is captured into the result telemetry and shown on the collapsed status line. Observe-only; claude path only — the copilot raw-stdout path has no equivalent structured event. ([#12](https://github.com/gwaihir4031/agenticloom/pull/12))
 
 ## [0.1.4] - 2026-06-06
 
@@ -43,7 +45,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Initial release. YAML → TypeScript pipeline compiler for orchestrating CLI coding agents (`claude`, `copilot`) with seven primitives: `step`, `review_loop`, `human_gate`, `parallel`, `branch`, `aggregate`, `foreach`. Ships the `loom` / `agenticloom` CLI plus the `loom-author` Claude/Copilot skill.
 
-[Unreleased]: https://github.com/gwaihir4031/agenticloom/compare/v0.1.4...HEAD
+[Unreleased]: https://github.com/gwaihir4031/agenticloom/compare/v0.1.5...HEAD
+[0.1.5]: https://github.com/gwaihir4031/agenticloom/compare/v0.1.4...v0.1.5
 [0.1.4]: https://github.com/gwaihir4031/agenticloom/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/gwaihir4031/agenticloom/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/gwaihir4031/agenticloom/compare/v0.1.1...v0.1.2
