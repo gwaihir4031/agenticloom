@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { EventEmitter } from 'events';
 import { Readable } from 'node:stream';
 import * as nodePath from 'node:path';
-import { makeFakeChild } from './test-helpers.js';
+import { makeFakeChild, captureStdoutWrites } from './test-helpers.js';
 
 // Mock child_process.spawn — interactive gates spawn the cli. Tests assert
 // the argv shape + stdio config. The mocked child emits a synchronous
@@ -849,6 +849,118 @@ describe('humanGate — interactive mode', () => {
         stderrSpy.mockRestore();
       }
     });
+  });
+});
+
+describe('humanGate — general gate (agent omitted)', () => {
+  let originalIsTTY: boolean;
+  beforeEach(() => {
+    originalIsTTY = process.stdout.isTTY;
+    Object.defineProperty(process.stdout, 'isTTY', { value: true, configurable: true });
+    Object.defineProperty(process.stdin, 'isTTY', { value: true, configurable: true });
+  });
+  afterEach(() => {
+    Object.defineProperty(process.stdout, 'isTTY', { value: originalIsTTY, configurable: true });
+    Object.defineProperty(process.stdin, 'isTTY', { value: originalIsTTY, configurable: true });
+  });
+
+  it('spawns claude with NO --agent flag (full argv is extraArgs + initial message)', async () => {
+    spawnMock.mockImplementation(() => makeFakeChild());
+    await humanGate({
+      interactive: true,
+      cli: 'claude',
+      agentDirs: ['.claude/agents/', '~/.claude/agents/'],
+      extraArgs: ['--model', 'sonnet'],
+      input: 'ACS.md',
+      prompt: 'iterate on ACS',
+    });
+    const [cmd, args] = spawnMock.mock.calls[0];
+    expect(cmd).toBe('claude');
+    // A general gate omits --agent entirely; the cli spawns with all tools and
+    // no persona. The argv is fully determined: extraArgs then the trailing
+    // initial message. An exact match catches a stray --agent re-appearing.
+    expect(args).toEqual([
+      '--model',
+      'sonnet',
+      `iterate on ACS\n\nThe artifact is at: ${nodePath.resolve('ACS.md')}`,
+    ]);
+    expect(args).not.toContain('--agent');
+  });
+
+  it('spawns copilot with NO --agent flag but keeps --interactive <message>', async () => {
+    spawnMock.mockImplementation(() => makeFakeChild());
+    await humanGate({
+      interactive: true,
+      cli: 'copilot',
+      agentDirs: ['.github/agents/', '~/.copilot/agents/'],
+      extraArgs: ['--no-color'],
+      input: 'ACS.md',
+      prompt: 'iterate on ACS',
+    });
+    const [cmd, args] = spawnMock.mock.calls[0];
+    expect(cmd).toBe('copilot');
+    // No --agent; --interactive still opens the TUI with the prompt pre-loaded.
+    expect(args).toEqual([
+      '--no-color',
+      '--interactive',
+      `iterate on ACS\n\nThe artifact is at: ${nodePath.resolve('ACS.md')}`,
+    ]);
+    expect(args).not.toContain('--agent');
+  });
+
+  it('announces the session with the human-gate fallback label', async () => {
+    spawnMock.mockImplementation(() => makeFakeChild());
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    try {
+      await humanGate({
+        interactive: true,
+        cli: 'claude',
+        agentDirs: ['.claude/agents/', '~/.claude/agents/'],
+        extraArgs: ['--model', 'sonnet'],
+        input: 'ACS.md',
+        prompt: 'iterate',
+      });
+      expect(logSpy).toHaveBeenCalledWith(
+        expect.stringContaining('interactive session with human-gate'),
+      );
+    } finally {
+      logSpy.mockRestore();
+    }
+  });
+
+  it('collapses the gate to a line tagged with the human-gate fallback label', async () => {
+    spawnMock.mockImplementation(() => makeFakeChild());
+    questionAnswer = 'y';
+    const writes = captureStdoutWrites();
+    await humanGate({
+      interactive: true,
+      cli: 'claude',
+      agentDirs: ['.claude/agents/', '~/.claude/agents/'],
+      extraArgs: ['--model', 'sonnet'],
+      input: 'ACS.md',
+      prompt: 'iterate',
+    });
+    const collapse = writes.find((w) => w.includes('↪ human gate ('));
+    expect(collapse).toBeDefined();
+    expect(collapse).toContain('human gate (human-gate ·');
+  });
+
+  it('names the human-gate fallback label in the non-TTY error', async () => {
+    // The TTY guard fires before any spawn; its context string interpolates
+    // the same fallback label, so a general gate reports 'human-gate' rather
+    // than an empty/undefined agent name.
+    Object.defineProperty(process.stdout, 'isTTY', { value: false, configurable: true });
+    await expect(
+      humanGate({
+        interactive: true,
+        cli: 'claude',
+        agentDirs: ['.claude/agents/', '~/.claude/agents/'],
+        extraArgs: ['--model', 'sonnet'],
+        input: 'ACS.md',
+        prompt: 'iterate',
+      }),
+    ).rejects.toThrow(/human-gate/);
+    expect(spawnMock).not.toHaveBeenCalled();
   });
 });
 

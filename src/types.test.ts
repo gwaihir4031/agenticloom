@@ -353,16 +353,13 @@ describe('HumanGateItem schema', () => {
     expect(HumanGateItem.safeParse(valid).success).toBe(true);
   });
 
-  it('rejects interactive: true missing agent', () => {
+  it('accepts interactive: true with agent omitted (general gate)', () => {
+    // A general gate omits `agent:`; the gate's required `prompt:` is the
+    // agent's task and it spawns with all tools and no persona.
     const result = HumanGateItem.safeParse({
       human_gate: { interactive: true, input: '$x', prompt: 'iterate' },
     });
-    expect(result.success).toBe(false);
-    if (!result.success) {
-      expect(result.error.issues[0].message).toMatch(
-        /'agent:', 'input:', and 'prompt:' are all required/,
-      );
-    }
+    expect(result.success).toBe(true);
   });
 
   it('rejects interactive: true missing input', () => {
@@ -409,6 +406,21 @@ describe('HumanGateItem schema', () => {
       human_gate: {
         interactive: true,
         agent: 'ac-writer',
+        input: '$x',
+        prompt: 'iterate',
+        extra_args: ['--model', 'haiku'],
+      },
+    };
+    expect(HumanGateItem.safeParse(valid).success).toBe(true);
+  });
+
+  it('accepts a general gate (agent omitted) with an extra_args override', () => {
+    // The relaxed first refine makes `agent:` optional. A general gate still
+    // carries interactive's required input/prompt and may add a per-gate
+    // extra_args override — only the persona name is dropped.
+    const valid = {
+      human_gate: {
+        interactive: true,
         input: '$x',
         prompt: 'iterate',
         extra_args: ['--model', 'haiku'],

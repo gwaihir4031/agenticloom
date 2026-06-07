@@ -406,6 +406,84 @@ flow:
   });
 });
 
+describe('emit shape — general (omitted-agent) human_gate', () => {
+  it('omits the agent field for a general gate while keeping every other field', () => {
+    // A general gate omits `agent:`; the emitted humanGate({...}) carries no
+    // `agent:` field but still emits interactive/cli/agentDirs/extraArgs/
+    // input/prompt. No persona file is created — the probe must be skipped.
+    const yamlPath = setupFixture({
+      yaml: `
+pipeline: general-gate
+cli: claude
+default_extra_args: ["--model", "sonnet"]
+inputs: [x]
+flow:
+  - human_gate:
+      interactive: true
+      input: $x
+      prompt: iterate
+`,
+    });
+    const emitted = compile(yamlPath);
+    // Every always-emitted field is present.
+    expect(emitted).toMatch(/await humanGate\({[\s\S]*?interactive: true/);
+    expect(emitted).toMatch(/await humanGate\({[\s\S]*?cli: CLI/);
+    expect(emitted).toMatch(/await humanGate\({[\s\S]*?agentDirs: AGENT_DIRS/);
+    expect(emitted).toMatch(/await humanGate\({[\s\S]*?extraArgs: DEFAULT_EXTRA_ARGS/);
+    expect(emitted).toMatch(/await humanGate\({[\s\S]*?prompt: "iterate"/);
+    // ...but the `agent:` field is absent. `agentDirs:` is not a false match —
+    // the literal `agent: ` requires the colon immediately after `agent`.
+    expect(emitted).not.toMatch(/await humanGate\({[\s\S]*?agent: /);
+  });
+
+  it('compiles a general gate nested in a branch arm with no persona file (probe skipped)', () => {
+    // The persona probe (firstExisting + agentFileLeaf) runs only when `agent`
+    // is present, at every emit() site including the recursive branch-arm one.
+    // A general gate references no persona file, so compile must not probe —
+    // it would otherwise throw a missing-persona error for a file that was
+    // never meant to exist. No agents are created here.
+    const yamlPath = setupFixture({
+      yaml: `
+pipeline: general-gate-in-branch
+cli: copilot
+inputs: [x]
+flow:
+  - branch:
+      when: 'true'
+      then:
+        - human_gate:
+            interactive: true
+            input: $x
+            prompt: review
+`,
+    });
+    expect(() => compile(yamlPath)).not.toThrow();
+  });
+
+  it('keeps the agent field for a persona gate (contrast with the general form)', () => {
+    // Parity guard for the persona path: when `agent:` is present the emit
+    // still carries `agent: <name>`, byte-identical to the pre-general-gate
+    // behavior. Paired with the general-gate test above so the persona-vs-
+    // general split is asserted from both sides.
+    const yamlPath = setupFixture({
+      agents: ['gate-agent'],
+      yaml: `
+pipeline: persona-gate
+cli: claude
+inputs: [x]
+flow:
+  - human_gate:
+      interactive: true
+      agent: gate-agent
+      input: $x
+      prompt: iterate
+`,
+    });
+    const emitted = compile(yamlPath);
+    expect(emitted).toMatch(/await humanGate\({[\s\S]*?agent: "gate-agent"/);
+  });
+});
+
 describe('emit shape — step timeout', () => {
   it('threads timeout into the options bag when set', () => {
     const yamlPath = setupFixture({

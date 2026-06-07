@@ -366,6 +366,28 @@ flow:
     );
     expect(out).toMatch(/n\d+\{\{"human_gate \(interactive\): ac-writer"\}\}/);
   });
+
+  it('renders a general interactive gate (agent omitted) with the human-gate label', () => {
+    // A general gate has no persona, so the node label falls back to
+    // 'human-gate' rather than asserting an agent name that does not exist.
+    const out = emitMermaid(
+      spec(`
+pipeline: p
+cli: claude
+inputs: [x]
+flow:
+  - step: pre
+    input: $x
+    produces: out.md
+    bind: o
+  - human_gate:
+      interactive: true
+      input: $o
+      prompt: "iterate"
+`),
+    );
+    expect(out).toMatch(/n\d+\{\{"human_gate \(interactive\): human-gate"\}\}/);
+  });
 });
 
 describe('emitMermaid — foreach', () => {

@@ -326,10 +326,15 @@ export const HumanGateItemBody = z.strictObject({
     .strictObject({
       // `interactive` is a literal-true-or-absent flag, not a boolean: there
       // is no `interactive: false` state. The plain y/N path is "no
-      // interactive field at all"; the four interactive-mode fields
-      // (interactive/agent/input/prompt) are required together or absent
-      // together. `extra_args:` is optional even with interactive set; when
-      // omitted the gate uses the pipeline default. See refines below.
+      // interactive field at all". Interactive mode requires `input:` and
+      // `prompt:` together; `agent:` is optional. Present → a persona gate
+      // (delegated to the cli via `--agent`). Absent → a general gate: the
+      // gate's already-mandatory `prompt:` is the agent's task, spawned with
+      // all tools and no persona. (A general agent is expressed here by
+      // omitting `agent:`, not by an inline object, because the gate prompt
+      // already supplies the task.) `extra_args:` is optional even with
+      // interactive set; when omitted the gate uses the pipeline default.
+      // See refines below.
       interactive: z.literal(true).optional(),
       agent: z.string().optional(),
       input: ValueExpr.optional(),
@@ -345,12 +350,13 @@ export const HumanGateItemBody = z.strictObject({
     .refine(
       (v) => {
         if (v.interactive !== true) return true;
-        return v.agent !== undefined && v.input !== undefined && v.prompt !== undefined;
+        return v.input !== undefined && v.prompt !== undefined;
       },
       {
         error:
-          "human_gate: when 'interactive: true' is set, 'agent:', 'input:', and 'prompt:' are all required. " +
-          'Together they specify which agent to spawn, the artifact bind it edits, and its initial message.',
+          "human_gate: when 'interactive: true' is set, 'input:' and 'prompt:' are required. " +
+          "'input:' is the artifact bind the agent edits; 'prompt:' is its initial message (and, for a general gate, its task). " +
+          "'agent:' is optional — omit it for a general gate spawned with all tools and no persona.",
       },
     )
     .refine(

@@ -169,10 +169,12 @@ function walkItem(
   if (isHumanGate(item)) {
     const h = item.human_gate;
     const id = fresh();
-    // Schema refine guarantees `agent` is set when `interactive: true`.
+    // A persona gate labels with its agent name; a general gate (interactive
+    // with `agent:` omitted) has no persona, so it falls back to the
+    // 'human-gate' label.
     const label =
       h.interactive === true
-        ? `human_gate (interactive): ${escapeLabel(h.agent!)}`
+        ? `human_gate (interactive): ${escapeLabel(h.agent ?? 'human-gate')}`
         : `human_gate (y/N)`;
     lines.push(`${indent}${id}{{"${label}"}}`);
     return { heads: [id], tails: [id] };

@@ -859,29 +859,35 @@ export function emit(
     } else if (isHumanGate(item)) {
       const h = item.human_gate;
       if (h.interactive === true) {
-        // Schema refine guarantees agent/input/prompt are defined together
-        // with `interactive: true`. Pin the narrowing once so the rest of
-        // this branch sees the non-undefined values without `!` repeated.
-        const agent = h.agent!;
+        // Schema refine guarantees input/prompt are defined together with
+        // `interactive: true`. `agent` is optional: present for a persona
+        // gate (delegated to the cli via `--agent`), absent for a general
+        // gate (the gate's mandatory `prompt:` is the agent's task, spawned
+        // with all tools and no persona).
         const input = h.input!;
         const prompt = h.prompt!;
-        // Compile-time check: the agent must have a persona file in at
-        // least one layer of agentDirs. Same layered probe as the
-        // flow-walking check (validateAgentFilesExist) but inlined here
-        // because human_gate has its own emit branch and the agent name
-        // is read from h.agent. Shares the same cli-aware leaf so both
-        // sites validate the exact filename the CLI will open.
-        const { found, attempted } = firstExisting(agentDirs, agentFileLeaf(cli, agent));
-        if (found === null) {
-          throw new Error(
-            `Compile error: human_gate interactive mode references agent '${agent}' ` +
-              `but no persona file exists at either layer:\n` +
-              attempted.map((p) => `  ${p}`).join('\n') +
-              '\n' +
-              `Create the file at either path or fix the agent name.`,
-          );
+        const agent = h.agent;
+        const gateLabel =
+          agent !== undefined ? `human_gate (agent '${agent}')` : 'human_gate (general)';
+        if (agent !== undefined) {
+          // Persona gate: the agent must have a persona file in at least one
+          // layer of agentDirs. Same layered probe as the flow-walking check
+          // (validateAgentFilesExist) but inlined here because human_gate has
+          // its own emit branch. Shares the same cli-aware leaf so both sites
+          // validate the exact filename the CLI will open. A general gate
+          // (agent omitted) spawns no persona, so there is nothing to probe.
+          const { found, attempted } = firstExisting(agentDirs, agentFileLeaf(cli, agent));
+          if (found === null) {
+            throw new Error(
+              `Compile error: human_gate interactive mode references agent '${agent}' ` +
+                `but no persona file exists at either layer:\n` +
+                attempted.map((p) => `  ${p}`).join('\n') +
+                '\n' +
+                `Create the file at either path or fix the agent name.`,
+            );
+          }
         }
-        checkConsume(input, `human_gate (agent '${agent}').input`, scope);
+        checkConsume(input, `${gateLabel}.input`, scope);
         // `input:` resolves to the artifact PATH (a string identifier referring
         // to the path the producer wrote). The runtime auto-appends "The
         // artifact is at: <path>" to the agent's initial message — so we emit
@@ -899,7 +905,10 @@ export function emit(
           h.extra_args !== undefined ? JSON.stringify(h.extra_args) : 'DEFAULT_EXTRA_ARGS';
         out.push(`${pad}await humanGate({`);
         out.push(`${pad}  interactive: true,`);
-        out.push(`${pad}  agent: ${JSON.stringify(agent)},`);
+        // Persona gate emits the agent name (delegated via `--agent`); a
+        // general gate omits the field entirely so the runtime spawns with
+        // no persona and all tools.
+        if (agent !== undefined) out.push(`${pad}  agent: ${JSON.stringify(agent)},`);
         out.push(`${pad}  cli: CLI,`);
         out.push(`${pad}  agentDirs: AGENT_DIRS,`);
         out.push(`${pad}  extraArgs: ${extraArgsExpr},`);
