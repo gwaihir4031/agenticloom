@@ -47,14 +47,12 @@ vi.mock('readline', () => ({
   },
 }));
 
-// Mock fs — humanGate's copilot branch reads agent persona files via
-// loadAgentSystemPrompt. promptFileBody = null simulates "missing on
-// disk" (a runtime contract violation that the runtime asserts against
-// loudly). humanGate doesn't otherwise hit fakeFs but we keep the mock
-// shape symmetric with the other runtime/ test files.
-let promptFileBody: string | null = '---\nname: test-agent\n---\nSYS PROMPT BODY\n';
+// Mock fs for shape-symmetry with the other runtime/ test files. The copilot
+// interactive gate delegates persona resolution to the cli via `--agent <name>`
+// and no longer reads persona files itself, so these tests never exercise this
+// mock — it stays only to keep the runtime/ test setup consistent (the `fakeFs`
+// path was already unhit before this change).
 let fakeFs: Record<string, string> = {};
-const looksLikePersonaPath = (p: string): boolean => /(?:^|\/)agents\/[^/]+\.md$/.test(p);
 const fakeFsLookup = (p: string): string | undefined => {
   if (Object.prototype.hasOwnProperty.call(fakeFs, p)) return fakeFs[p];
   if (nodePath.isAbsolute(p)) {
@@ -65,12 +63,8 @@ const fakeFsLookup = (p: string): string | undefined => {
 };
 
 vi.mock('fs', () => ({
-  existsSync: (p: string) => {
-    if (looksLikePersonaPath(p)) return promptFileBody !== null;
-    return fakeFsLookup(p) !== undefined;
-  },
+  existsSync: (p: string) => fakeFsLookup(p) !== undefined,
   readFileSync: (p: string, _enc?: string) => {
-    if (looksLikePersonaPath(p)) return promptFileBody ?? '';
     const v = fakeFsLookup(p);
     if (v !== undefined) return v;
     const err = new Error(
@@ -89,7 +83,6 @@ beforeEach(async () => {
   spawnMock.mockReset();
   readlineCloseMock.mockReset();
   questionAnswer = 'y';
-  promptFileBody = '---\nname: test-agent\n---\nSYS PROMPT BODY\n';
   fakeFs = {};
 });
 
@@ -569,7 +562,7 @@ describe('humanGate — interactive mode', () => {
       Object.defineProperty(process.stdin, 'isTTY', { value: originalIsTTY, configurable: true });
     });
 
-    it('spawns copilot with --interactive + prompt argv shape (no --agent or -p flag)', async () => {
+    it('spawns copilot with --agent <name> + --interactive <prompt> argv shape (no -p flag)', async () => {
       spawnMock.mockImplementation(() => makeFakeChild());
       await humanGate({
         interactive: true,
@@ -582,16 +575,43 @@ describe('humanGate — interactive mode', () => {
       });
       const [cmd, args] = spawnMock.mock.calls[0];
       expect(cmd).toBe('copilot');
-      // copilot has no --agent (no per-agent system-prompt flag);
-      // -p is non-interactive scripting mode, the opposite of what we want.
-      expect(args).not.toContain('--agent');
+      // copilot delegates persona resolution to the cli via --agent <name>
+      // (the same shape the claude path uses). -p is non-interactive scripting
+      // mode, the opposite of the TUI we want, so it must NOT appear.
+      expect(args).toContain('--agent');
+      expect(args[args.indexOf('--agent') + 1]).toBe('copilot-agent');
       expect(args).not.toContain('-p');
       // --interactive <prompt> pre-loads the prompt as turn 1 and opens
       // the TUI. Without it, bare copilot with piped+EOF'd stdin entered
-      // non-interactive mode and exited without opening a TUI — the bug
-      // this fix addresses.
+      // non-interactive mode and exited without opening a TUI.
       expect(args).toContain('--interactive');
       expect(args[args.indexOf('--interactive') + 1]).toContain('iterate on ACS');
+    });
+
+    it('builds the full copilot argv as --agent <name> then trailing --interactive <message> (empty extra_args)', async () => {
+      // With no extra_args the argv is fully determined, so pin it exactly:
+      // leading `--agent <name>` (the native persona delegation) and the
+      // trailing `--interactive <message>` pair whose value is the loom
+      // initial message alone. A full-array assertion (vs the scattered
+      // toContain checks) is the only thing that catches a stray flag or a
+      // re-baked persona body re-appearing as extra argv elements.
+      spawnMock.mockImplementation(() => makeFakeChild());
+      await humanGate({
+        interactive: true,
+        cli: 'copilot',
+        agentDirs: ['.github/agents/', '~/.copilot/agents/'],
+        extraArgs: [],
+        agent: 'copilot-agent',
+        input: 'ACS.md',
+        prompt: 'iterate on ACS',
+      });
+      const args = spawnMock.mock.calls[0][1] as string[];
+      expect(args).toEqual([
+        '--agent',
+        'copilot-agent',
+        '--interactive',
+        `iterate on ACS\n\nThe artifact is at: ${nodePath.resolve('ACS.md')}`,
+      ]);
     });
 
     it('uses inherited stdin+stdout with stderr piped (TUI works; stderr captured for replay)', async () => {
@@ -664,7 +684,7 @@ describe('humanGate — interactive mode', () => {
       });
     });
 
-    it('passes system prompt + loom prompt + path injection as the --interactive argv value', async () => {
+    it('passes the loom initial message alone as the --interactive value (no persona body baked in)', async () => {
       spawnMock.mockImplementation(() => makeFakeChild());
       await humanGate({
         interactive: true,
@@ -677,14 +697,11 @@ describe('humanGate — interactive mode', () => {
       });
       const args = spawnMock.mock.calls[0][1] as string[];
       const interactiveValue = args[args.indexOf('--interactive') + 1];
-      // Persona body is frontmatter-stripped before going in.
-      expect(interactiveValue).not.toMatch(/^---/);
-      expect(interactiveValue).toContain('SYS PROMPT BODY');
-      expect(interactiveValue).toContain('iterate on ACS');
-      expect(interactiveValue).toContain(`The artifact is at: ${nodePath.resolve('ACS.md')}`);
-      // Persona body comes before the loom prompt, separated by `---`.
-      expect(interactiveValue.indexOf('SYS PROMPT BODY')).toBeLessThan(
-        interactiveValue.indexOf('iterate on ACS'),
+      // --agent delegation means the cli loads the persona itself; the
+      // --interactive value is the loom-built initial message verbatim (gate
+      // prompt + artifact pointer) — no persona body, no `---` separator.
+      expect(interactiveValue).toBe(
+        `iterate on ACS\n\nThe artifact is at: ${nodePath.resolve('ACS.md')}`,
       );
     });
 
@@ -737,37 +754,6 @@ describe('humanGate — interactive mode', () => {
           prompt: 'iterate',
         }),
       ).rejects.toThrow(/not found on PATH/);
-    });
-
-    it('omits system prompt prefix when persona file is frontmatter-only (bare-cli agent)', async () => {
-      // The bare-cli agent convention: a .md file with frontmatter and no
-      // body. loadAgentSystemPrompt strips frontmatter and trims, leaving
-      // an empty string; the runtime treats empty-body the same as
-      // no-prompt and the --interactive argv value carries only the
-      // loom-built initial message (no persona body, no `---` separator).
-      const savedBody = promptFileBody;
-      try {
-        promptFileBody = '---\nname: test-agent\n---\n'; // frontmatter only, no body
-        vi.resetModules();
-        ({ humanGate } = await import('./human-gate.js'));
-        spawnMock.mockImplementation(() => makeFakeChild());
-        await humanGate({
-          interactive: true,
-          cli: 'copilot',
-          agentDirs: ['.github/agents/', '~/.copilot/agents/'],
-          extraArgs: [],
-          agent: 'copilot-agent',
-          input: 'ACS.md',
-          prompt: 'iterate',
-        });
-        const args = spawnMock.mock.calls[0][1] as string[];
-        const interactiveValue = args[args.indexOf('--interactive') + 1];
-        expect(interactiveValue).not.toContain('SYS PROMPT BODY');
-        expect(interactiveValue).toContain('iterate');
-        expect(interactiveValue).toContain(`The artifact is at: ${nodePath.resolve('ACS.md')}`);
-      } finally {
-        promptFileBody = savedBody;
-      }
     });
 
     it('after copilot exits, asks y/N and throws on non-y', async () => {

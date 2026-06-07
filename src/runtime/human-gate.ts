@@ -3,7 +3,6 @@ import * as path from 'path';
 import * as readline from 'readline';
 import { StringDecoder } from 'string_decoder';
 import { formatDuration, activateAltScreen, deactivateAltScreen } from '../RollingWindow.js';
-import { loadAgentSystemPrompt } from './agent.js';
 import type { AgentCli } from './agent.js';
 
 /** Options for the interactive `human_gate` mode. The plain y/N mode takes
@@ -23,11 +22,12 @@ export interface InteractiveGateOpts {
    *  and `copilot`; the schema enum enforces this at compile time. */
   cli: AgentCli;
   /** Layered persona-file lookup directories — project layer first, global
-   *  layer second. Each entry is a directory; the agent's persona file
-   *  resolves to the first existing `<dir>/<agent>.md` (with `~/` expanded
-   *  per dir at lookup time). Layer convention is owned by the compiler
-   *  (see `src/compile/index.ts:AGENT_DIR_DEFAULTS` for per-cli paths);
-   *  the runtime is a dumb iterator. */
+   *  layer second. Layer convention is owned by the compiler (see
+   *  `src/compile/index.ts:AGENT_DIR_DEFAULTS` for per-cli paths). Persona
+   *  resolution at spawn time is delegated to the cli via `--agent <name>`
+   *  (the cli resolves the persona file itself), so the runtime no longer
+   *  reads this list; it remains in the options bag because the compiler
+   *  still emits it. */
   agentDirs: string[];
   /** Extra args to pass to the spawned cli. Compile emits the pipeline-level
    *  `DEFAULT_EXTRA_ARGS` constant here by default; the YAML can override
@@ -37,8 +37,8 @@ export interface InteractiveGateOpts {
    *  this interface because the runtime always receives a concrete array
    *  from the emit; the optional/fallback shape lives at compile time. */
   extraArgs: string[];
-  /** Agent name; resolves to the first `<dir>/<agent>.md` that exists when
-   *  iterating `agentDirs` in order. */
+  /** Agent name; passed to the cli as `--agent <name>`, which resolves the
+   *  matching `<dir>/<agent>.md` persona file natively. */
   agent: string;
   /** Path to the artifact the agent edits. Loom auto-appends "The artifact
    *  is at: <input>" to the agent's initial message. Absolute or relative;
@@ -81,12 +81,13 @@ async function confirmYesOrThrow(): Promise<void> {
 }
 
 /** Spawn the interactive agent session for a `human_gate` with
- *  `interactive: true`. Branches by cli: claude takes `--agent <name>` plus
- *  the initial message as a positional argv; copilot takes
- *  `-i/--interactive <prompt>` — the analog of claude's argv form.
- *  copilot has no per-agent system-prompt flag, so the agent's persona
- *  body (frontmatter-stripped, with `---` separator) is baked into the
- *  `--interactive` prompt value before the loom-built initial message.
+ *  `interactive: true`. Both clis delegate persona resolution natively via
+ *  `--agent <name>`: claude takes `--agent <name>` plus the initial message
+ *  as a positional argv; copilot takes `--agent <name>` plus
+ *  `-i/--interactive <prompt>` to open its TUI with the prompt pre-loaded as
+ *  turn 1. Neither path bakes the persona body into the prompt — the cli
+ *  reads the persona file itself, so the prompt value is the loom-built
+ *  initial message alone.
  *
  *  TTY check first: if stdin or stdout isn't a TTY (e.g. CI, piped script,
  *  non-`-it` docker), throw with a clear remediation — silent fall-back
@@ -114,20 +115,6 @@ async function spawnInteractiveAgent(opts: InteractiveGateOpts): Promise<void> {
   // the spawn site, ~60 lines below).
   const inputAbs = path.resolve(opts.input);
   const initialMessage = `${opts.prompt}\n\nThe artifact is at: ${inputAbs}`;
-
-  // Pre-build the copilot --interactive prompt BEFORE spawn. If
-  // `readFileSync` were to throw (EACCES/EIO etc.) inside the Promise
-  // executor below, the spawn would have already succeeded — the
-  // synchronous reject would leave the child alive and the SIGINT handler
-  // registered. Building here moves any FS failure to a point where no
-  // child or handler exists yet.
-  const copilotInteractivePrompt: string | null =
-    opts.cli === 'copilot'
-      ? (() => {
-          const sys = loadAgentSystemPrompt(opts.agent, opts.agentDirs);
-          return (sys === '' ? '' : `${sys}\n\n---\n\n`) + initialMessage;
-        })()
-      : null;
 
   console.log(`⏸  HUMAN GATE: interactive session with ${opts.agent}`);
 
@@ -192,15 +179,15 @@ async function spawnInteractiveAgent(opts: InteractiveGateOpts): Promise<void> {
         const args = ['--agent', opts.agent, ...opts.extraArgs, initialMessage];
         child = spawn('claude', args, { stdio: ['inherit', 'inherit', 'pipe'], cwd: childCwd });
       } else if (opts.cli === 'copilot') {
-        // `copilot --interactive <prompt>` opens the TUI with the prompt
-        // pre-loaded as turn 1 — the documented analog of claude's
-        // `--agent <name> "<msg>"` shape. The persona body is baked into
-        // the prompt value (copilot has no per-agent system-prompt flag).
-        // Piping to stdin enters non-interactive scripting mode
-        // (equivalent to `-p <text>`) and exits without opening the TUI,
-        // which is why the TUI must be opened via the `--interactive`
-        // flag instead.
-        const args = [...opts.extraArgs, '--interactive', copilotInteractivePrompt!];
+        // `copilot --agent <name> --interactive <prompt>` resolves the persona
+        // natively (the same delegation as the claude path) and opens the TUI
+        // with the prompt pre-loaded as turn 1. The `--interactive` value is
+        // the loom-built initial message alone — the cli reads the persona
+        // file itself, so nothing is baked in. Piping to stdin enters
+        // non-interactive scripting mode (equivalent to `-p <text>`) and exits
+        // without opening the TUI, which is why the TUI must be opened via the
+        // `--interactive` flag instead.
+        const args = ['--agent', opts.agent, ...opts.extraArgs, '--interactive', initialMessage];
         child = spawn('copilot', args, { stdio: ['inherit', 'inherit', 'pipe'], cwd: childCwd });
       } else {
         // Unreachable — schema enum is ['claude', 'copilot']. Defensive only.
