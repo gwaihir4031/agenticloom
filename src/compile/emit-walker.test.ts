@@ -4847,3 +4847,282 @@ flow:
     );
   });
 });
+
+describe('emit shape — inline-agent review_loop writer/reviewer', () => {
+  // An inline `writer:` or single `reviewer:` (object form) resolves to a label
+  // — name, else (writer only) the loop bind, else a flow-position token — used
+  // as the reviewLoop `writer:` / `reviewer:` string, plus a baked
+  // `writerInlinePrompt:` / `reviewerInlinePrompt:`. The reviewer's positional
+  // fallback is `inline-<i>-reviewer`, distinct from the writer's `inline-<i>`.
+  // Persona writer+reviewer emit byte-identically (no inline-prompt fields).
+
+  it('bakes an inline named writer as writer label + writerInlinePrompt (persona reviewer)', () => {
+    const yamlPath = setupFixture({
+      agents: ['r'],
+      yaml: `
+pipeline: p
+cli: claude
+inputs: [x]
+flow:
+  - review_loop:
+      writer:
+        prompt: Draft the spec.
+        name: drafter
+      reviewer: r
+      input: $x
+      writer_produces: out.md
+      reviewer_produces: review.json
+      verdict_field: status
+`,
+    });
+    const emitted = compile(yamlPath);
+    expect(emitted).toMatch(/writer: "drafter",/);
+    expect(emitted).toMatch(/writerInlinePrompt: "Draft the spec\.",/);
+    // The persona reviewer carries no inline prompt.
+    expect(emitted).toMatch(/reviewer: "r",/);
+    expect(emitted).not.toMatch(/reviewerInlinePrompt:/);
+  });
+
+  it('falls back to the loop bind as the writer label when the inline writer is nameless', () => {
+    const yamlPath = setupFixture({
+      agents: ['r'],
+      yaml: `
+pipeline: p
+cli: claude
+inputs: [x]
+flow:
+  - review_loop:
+      writer:
+        prompt: Draft the spec.
+      reviewer: r
+      input: $x
+      bind: spec
+      writer_produces: out.md
+      reviewer_produces: review.json
+      verdict_field: status
+`,
+    });
+    const emitted = compile(yamlPath);
+    expect(emitted).toMatch(/writer: "spec",/);
+    expect(emitted).toMatch(/writerInlinePrompt: "Draft the spec\.",/);
+  });
+
+  it('falls back to a flow-position inline-<i> token when the inline writer is nameless and bindless', () => {
+    // The review_loop is the only top-level item (index 0), so the writer's
+    // positional fallback is `inline-0` — the flow index, not the mutating
+    // fresh() counter.
+    const yamlPath = setupFixture({
+      agents: ['r'],
+      yaml: `
+pipeline: p
+cli: claude
+inputs: [x]
+flow:
+  - review_loop:
+      writer:
+        prompt: Draft the spec.
+      reviewer: r
+      input: $x
+      writer_produces: out.md
+      reviewer_produces: review.json
+      verdict_field: status
+`,
+    });
+    const emitted = compile(yamlPath);
+    expect(emitted).toMatch(/writer: "inline-0",/);
+    expect(emitted).toMatch(/writerInlinePrompt: "Draft the spec\.",/);
+  });
+
+  it('bakes an inline named single reviewer as reviewer label + reviewerInlinePrompt (persona writer)', () => {
+    const yamlPath = setupFixture({
+      agents: ['w'],
+      yaml: `
+pipeline: p
+cli: claude
+inputs: [x]
+flow:
+  - review_loop:
+      writer: w
+      reviewer:
+        prompt: Audit the draft.
+        name: auditor
+      input: $x
+      writer_produces: out.md
+      reviewer_produces: review.json
+      verdict_field: status
+`,
+    });
+    const emitted = compile(yamlPath);
+    expect(emitted).toMatch(/reviewer: "auditor",/);
+    expect(emitted).toMatch(/reviewerInlinePrompt: "Audit the draft\.",/);
+    // The persona writer carries no inline prompt.
+    expect(emitted).toMatch(/writer: "w",/);
+    expect(emitted).not.toMatch(/writerInlinePrompt:/);
+  });
+
+  it('falls back to inline-<i>-reviewer for a nameless inline single reviewer', () => {
+    // The reviewer's positional fallback (`inline-0-reviewer`) is distinct from
+    // the writer's (`inline-<i>`) so a nameless writer and a nameless reviewer
+    // in the same loop never collide on a label.
+    const yamlPath = setupFixture({
+      agents: ['w'],
+      yaml: `
+pipeline: p
+cli: claude
+inputs: [x]
+flow:
+  - review_loop:
+      writer: w
+      reviewer:
+        prompt: Audit the draft.
+      input: $x
+      writer_produces: out.md
+      reviewer_produces: review.json
+      verdict_field: status
+`,
+    });
+    const emitted = compile(yamlPath);
+    expect(emitted).toMatch(/reviewer: "inline-0-reviewer",/);
+    expect(emitted).toMatch(/reviewerInlinePrompt: "Audit the draft\.",/);
+  });
+
+  it('bakes both inline writer and inline reviewer prompts (no persona files needed)', () => {
+    // Neither role references a persona file — validateAgentFilesExist skips
+    // inline agents on both the writer and single-reviewer positions, so a
+    // fixture with no `agents:` still compiles.
+    const yamlPath = setupFixture({
+      yaml: `
+pipeline: p
+cli: claude
+inputs: [x]
+flow:
+  - review_loop:
+      writer:
+        prompt: Draft the spec.
+        name: drafter
+      reviewer:
+        prompt: Audit the draft.
+        name: auditor
+      input: $x
+      writer_produces: out.md
+      reviewer_produces: review.json
+      verdict_field: status
+`,
+    });
+    expect(() => compile(yamlPath)).not.toThrow();
+    const emitted = compile(yamlPath);
+    expect(emitted).toMatch(/writer: "drafter",/);
+    expect(emitted).toMatch(/writerInlinePrompt: "Draft the spec\.",/);
+    expect(emitted).toMatch(/reviewer: "auditor",/);
+    expect(emitted).toMatch(/reviewerInlinePrompt: "Audit the draft\.",/);
+  });
+
+  it('emits a persona writer + persona reviewer byte-identically — no inline-prompt fields', () => {
+    // Parity guard: the inline-prompt fields are gated on inline-ness, so an
+    // all-persona single-reviewer loop emits the same shape as before the
+    // AgentRef retype.
+    const yamlPath = setupFixture({
+      agents: ['w', 'r'],
+      yaml: `
+pipeline: p
+cli: claude
+inputs: [x]
+flow:
+  - review_loop:
+      writer: w
+      reviewer: r
+      input: $x
+      writer_produces: out.md
+      reviewer_produces: review.json
+      verdict_field: status
+`,
+    });
+    const emitted = compile(yamlPath);
+    expect(emitted).toMatch(/writer: "w",/);
+    expect(emitted).toMatch(/reviewer: "r",/);
+    expect(emitted).not.toMatch(/writerInlinePrompt:/);
+    expect(emitted).not.toMatch(/reviewerInlinePrompt:/);
+  });
+
+  it('bakes an inline writer prompt on the compound (subflow) reviewer path', () => {
+    // The compound path emits the writer label + writerInlinePrompt the same
+    // way the single path does; the subflow is unchanged and carries no single
+    // reviewerInlinePrompt.
+    const yamlPath = setupFixture({
+      agents: ['sec', 'api'],
+      yaml: `
+pipeline: p
+cli: claude
+inputs: [x]
+flow:
+  - review_loop:
+      writer:
+        prompt: Draft the spec.
+        name: drafter
+      input: $x
+      writer_produces: out.md
+      bind: spec
+      reviewer:
+        - step: sec
+          input: $spec
+          produces: sec.json
+          bind: secOut
+        - step: api
+          input: $spec
+          produces: api.json
+          bind: apiOut
+        - aggregate:
+            inputs:
+              security: $secOut
+              api: $apiOut
+            verdict_field: status
+            bind: overall
+`,
+    });
+    const emitted = compile(yamlPath);
+    expect(emitted).toContain("kind: 'compound'");
+    expect(emitted).toMatch(/writer: "drafter",/);
+    expect(emitted).toMatch(/writerInlinePrompt: "Draft the spec\.",/);
+    expect(emitted).not.toMatch(/reviewerInlinePrompt:/);
+  });
+
+  it('resolves an inline reviewer step to its label in the compound reviewerPaths slot', () => {
+    // The compound path hands the writer a `reviewerPaths` array on revise; each
+    // entry's `agentName` is resolved through agentLabel, so an inline reviewer
+    // step inside the subflow contributes its resolved label (here its `name`),
+    // not the raw inline object. With an inline writer too, the whole loop needs
+    // no persona files.
+    const yamlPath = setupFixture({
+      yaml: `
+pipeline: p
+cli: claude
+inputs: [x]
+flow:
+  - review_loop:
+      writer:
+        prompt: Draft the spec.
+        name: drafter
+      input: $x
+      writer_produces: out.md
+      bind: spec
+      reviewer:
+        - step:
+            prompt: Audit the draft for security issues.
+            name: secReviewer
+          input: $spec
+          produces: sec.json
+          bind: secOut
+        - aggregate:
+            inputs:
+              security: $secOut
+            verdict_field: status
+            bind: overall
+`,
+    });
+    const emitted = compile(yamlPath);
+    expect(emitted).toContain("kind: 'compound'");
+    // The reviewerPaths entry carries the inline reviewer step's resolved label,
+    // not the inline object — exercises collectReviewerPaths' agentLabel call.
+    expect(emitted).toMatch(/reviewerPaths: \[\{ agentName: "secReviewer", path: secOut \}\]/);
+  });
+});

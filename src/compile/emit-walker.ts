@@ -142,14 +142,17 @@ export function emitPreCursorItem(
   if (isReviewLoop(item)) {
     const r = item.review_loop;
     if (r.bind === undefined) return [];
+    // Bind-bearing by the guard above, so the resolved writer label's fallback
+    // is the loop's bind — the flow-position token is never reached here.
+    const resolvedWriter = agentLabel(r.writer, r.bind);
     declare(
       r.bind,
       {
         kind: 'review_loop',
         fileBound: true,
-        location: `review_loop writer='${r.writer}'`,
+        location: `review_loop writer='${resolvedWriter}'`,
         fileField: 'writer_produces',
-        agentName: r.writer,
+        agentName: resolvedWriter,
       },
       scope,
       currentScopeId,
@@ -215,14 +218,17 @@ export function emitPreCursorItem(
       } else if (isReviewLoop(child)) {
         const r = child.review_loop;
         if (r.bind === undefined) continue;
+        // Bind-bearing by the guard above, so the resolved writer label's
+        // fallback is the loop's bind.
+        const resolvedWriter = agentLabel(r.writer, r.bind);
         declare(
           r.bind,
           {
             kind: 'review_loop',
             fileBound: true,
-            location: `review_loop writer='${r.writer}' (hoisted from parallel)`,
+            location: `review_loop writer='${resolvedWriter}' (hoisted from parallel)`,
             fileField: 'writer_produces',
-            agentName: r.writer,
+            agentName: resolvedWriter,
             hoistedFromParallel: true,
           },
           scope,
@@ -646,7 +652,17 @@ export function emit(
     } else if (isReviewLoop(item)) {
       const r = item.review_loop;
       const v = r.bind ?? fresh();
-      const label = `review_loop writer='${r.writer}'`;
+      // Resolve the writer's agent reference to a label once: a persona name is
+      // itself; an inline agent is its `name`, else the loop's bind, else a
+      // flow-position `inline-<i>` token. The positional fallback is the item's
+      // flow index `i` (resume-stable — the same item lands at the same index
+      // on full and --resume-from compiles), never the mutating fresh()
+      // counter. When the writer is inline, its baked prompt threads to the
+      // runtime as `writerInlinePrompt`; persona writers leave it undefined and
+      // take runAgent's `--agent` path.
+      const writerLabel = agentLabel(r.writer, r.bind ?? `inline-${i}`);
+      const writerInlinePrompt = isInlineAgent(r.writer) ? r.writer.prompt : undefined;
+      const label = `review_loop writer='${writerLabel}'`;
       checkConsume(r.input, `${label}.input`, scope);
       validatePath(r.writer_produces, 'writer_produces', label);
       registerPath(r.writer_produces, 'writer_produces', label, pathScope);
@@ -661,15 +677,24 @@ export function emit(
         fileBound: true,
         location: label,
         fileField: 'writer_produces',
-        agentName: r.writer,
+        agentName: writerLabel,
       };
 
-      if (typeof r.reviewer === 'string') {
+      // Array → subflow (compound) reviewer; string or inline object → single
+      // reviewer. Splitting on Array.isArray (not typeof === 'string') routes
+      // an inline-object reviewer through the single path, where its verdict
+      // comes from reviewer_produces/verdict_field exactly as a persona's does.
+      if (!Array.isArray(r.reviewer)) {
         // Schema refines guarantee reviewer_produces + verdict_field are set
-        // when reviewer is a string. Read once with `!` so the rest of this
-        // branch stays narrowed.
+        // when reviewer is a single agent. Read once with `!` so the rest of
+        // this branch stays narrowed.
         const reviewerProduces = r.reviewer_produces!;
         const verdictField = r.verdict_field!;
+        // Resolve the reviewer's agent reference the same way as the writer.
+        // The positional fallback is `inline-<i>-reviewer` so a nameless,
+        // bindless inline reviewer stays distinct from the writer's token.
+        const reviewerLabel = agentLabel(r.reviewer, `inline-${i}-reviewer`);
+        const reviewerInlinePrompt = isInlineAgent(r.reviewer) ? r.reviewer.prompt : undefined;
         validatePath(reviewerProduces, 'reviewer_produces', label);
         // Intra-block self-collision: each role has its own file. Same path
         // across roles means one overwrites the other between iterations or
@@ -684,20 +709,31 @@ export function emit(
         registerPath(reviewerProduces, 'reviewer_produces', label, pathScope);
 
         declare(v, loopProducerInfo, scope, currentScopeId);
+        // writer:/reviewer: carry the resolved LABEL string; writerInlinePrompt:
+        // / reviewerInlinePrompt: are emitted only for inline agents (the
+        // runtime's inline-prompt fields). For persona writer+reviewer the labels
+        // are the bare names and the inline fields are absent, so this is
+        // byte-identical to the pre-inline emit.
         const lines = [
           `${pad}const ${v} = await reviewLoop({`,
           `${pad}  kind: 'single',`,
           `${pad}  cli: CLI,`,
           `${pad}  agentDirs: AGENT_DIRS,`,
           `${pad}  defaultExtraArgs: DEFAULT_EXTRA_ARGS,`,
-          `${pad}  writer: ${JSON.stringify(r.writer)},`,
-          `${pad}  reviewer: ${JSON.stringify(r.reviewer)},`,
+          `${pad}  writer: ${JSON.stringify(writerLabel)},`,
+        ];
+        if (writerInlinePrompt !== undefined)
+          lines.push(`${pad}  writerInlinePrompt: ${JSON.stringify(writerInlinePrompt)},`);
+        lines.push(`${pad}  reviewer: ${JSON.stringify(reviewerLabel)},`);
+        if (reviewerInlinePrompt !== undefined)
+          lines.push(`${pad}  reviewerInlinePrompt: ${JSON.stringify(reviewerInlinePrompt)},`);
+        lines.push(
           `${pad}  input: ${inputExprFor(r.input, scope)},`,
           `${pad}  maxIters: ${r.max_iters ?? 3},`,
           `${pad}  writerProduces: ${JSON.stringify(r.writer_produces)},`,
           `${pad}  reviewerProduces: ${JSON.stringify(reviewerProduces)},`,
           `${pad}  verdictField: ${JSON.stringify(verdictField)},`,
-        ];
+        );
         if (r.approve_when) lines.push(`${pad}  approveWhen: ${JSON.stringify(r.approve_when)},`);
         if (r.on_max_exceeded)
           lines.push(`${pad}  onMaxExceeded: ${JSON.stringify(r.on_max_exceeded)},`);
@@ -785,13 +821,21 @@ export function emit(
           )
           .join(', ');
 
+        // writer: carries the resolved LABEL; writerInlinePrompt: is emitted
+        // only for an inline writer (the compound reviewer is a subflow, whose
+        // inner steps carry their own inline handling, so there is no single
+        // reviewerInlinePrompt here). Persona writer → byte-identical to before.
         const lines = [
           `${pad}const ${v} = await reviewLoop({`,
           `${pad}  kind: 'compound',`,
           `${pad}  cli: CLI,`,
           `${pad}  agentDirs: AGENT_DIRS,`,
           `${pad}  defaultExtraArgs: DEFAULT_EXTRA_ARGS,`,
-          `${pad}  writer: ${JSON.stringify(r.writer)},`,
+          `${pad}  writer: ${JSON.stringify(writerLabel)},`,
+        ];
+        if (writerInlinePrompt !== undefined)
+          lines.push(`${pad}  writerInlinePrompt: ${JSON.stringify(writerInlinePrompt)},`);
+        lines.push(
           `${pad}  reviewerSubflow: async (${r.bind ?? v}) => {`,
           ...subBody,
           `${pad}    return { verdict: ${aggBind}, reviewerPaths: [${pathEntries}] };`,
@@ -799,7 +843,7 @@ export function emit(
           `${pad}  input: ${inputExprFor(r.input, scope)},`,
           `${pad}  maxIters: ${r.max_iters ?? 3},`,
           `${pad}  writerProduces: ${JSON.stringify(r.writer_produces)},`,
-        ];
+        );
         // No `verdictField:` on the compound branch — the aggregate inside
         // the subflow already extracts the verdict; the loop only consumes
         // the aggregate's pre-extracted string. The compound runtime

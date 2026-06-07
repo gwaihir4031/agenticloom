@@ -709,3 +709,137 @@ flow:
     expect(out).toMatch(/n\d+\(\["inline-1"\]\)/);
   });
 });
+
+describe('emitMermaid — inline-agent review_loop writer/reviewer node labels', () => {
+  // The writer node and a single reviewer node label by the resolved agent
+  // reference: name, else (writer only) the loop bind, else a flow-position
+  // token — `inline-<index>` for the writer, `inline-<index>-reviewer` for the
+  // reviewer. Persona names route through agentLabel unchanged.
+
+  it('labels an inline writer node by its name when set', () => {
+    const out = emitMermaid(
+      spec(`
+pipeline: p
+cli: claude
+inputs: [x]
+flow:
+  - review_loop:
+      writer:
+        prompt: Draft the spec.
+        name: drafter
+      reviewer: r
+      input: $x
+      writer_produces: out.md
+      reviewer_produces: rev.json
+      verdict_field: status
+`),
+    );
+    expect(out).toMatch(/n\d+\(\["drafter"\]\)/);
+  });
+
+  it('falls back to the loop bind for a nameless inline writer node', () => {
+    const out = emitMermaid(
+      spec(`
+pipeline: p
+cli: claude
+inputs: [x]
+flow:
+  - review_loop:
+      writer:
+        prompt: Draft the spec.
+      reviewer: r
+      input: $x
+      bind: spec
+      writer_produces: out.md
+      reviewer_produces: rev.json
+      verdict_field: status
+`),
+    );
+    expect(out).toMatch(/n\d+\(\["spec"\]\)/);
+  });
+
+  it('falls back to a flow-position inline-<index> token for a nameless, bindless inline writer', () => {
+    // The review_loop is the only top-level item (index 0), so the writer's
+    // positional fallback is `inline-0`.
+    const out = emitMermaid(
+      spec(`
+pipeline: p
+cli: claude
+inputs: [x]
+flow:
+  - review_loop:
+      writer:
+        prompt: Draft the spec.
+      reviewer: r
+      input: $x
+      writer_produces: out.md
+      reviewer_produces: rev.json
+      verdict_field: status
+`),
+    );
+    expect(out).toMatch(/n\d+\(\["inline-0"\]\)/);
+  });
+
+  it('labels an inline single reviewer node by its name when set', () => {
+    const out = emitMermaid(
+      spec(`
+pipeline: p
+cli: claude
+inputs: [x]
+flow:
+  - review_loop:
+      writer: w
+      reviewer:
+        prompt: Audit the draft.
+        name: auditor
+      input: $x
+      writer_produces: out.md
+      reviewer_produces: rev.json
+      verdict_field: status
+`),
+    );
+    expect(out).toMatch(/n\d+\(\["auditor"\]\)/);
+  });
+
+  it('falls back to inline-<index>-reviewer for a nameless inline single reviewer node', () => {
+    const out = emitMermaid(
+      spec(`
+pipeline: p
+cli: claude
+inputs: [x]
+flow:
+  - review_loop:
+      writer: w
+      reviewer:
+        prompt: Audit the draft.
+      input: $x
+      writer_produces: out.md
+      reviewer_produces: rev.json
+      verdict_field: status
+`),
+    );
+    expect(out).toMatch(/n\d+\(\["inline-0-reviewer"\]\)/);
+  });
+
+  it('renders persona writer + reviewer node labels byte-identically', () => {
+    // Parity guard: persona names resolve to themselves through agentLabel, so
+    // the node labels match the pre-retype output.
+    const out = emitMermaid(
+      spec(`
+pipeline: p
+cli: claude
+inputs: [x]
+flow:
+  - review_loop:
+      writer: w
+      reviewer: r
+      input: $x
+      writer_produces: out.md
+      reviewer_produces: rev.json
+      verdict_field: status
+`),
+    );
+    expect(out).toMatch(/n\d+\(\["w"\]\)/);
+    expect(out).toMatch(/n\d+\(\["r"\]\)/);
+  });
+});

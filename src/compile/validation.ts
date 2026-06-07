@@ -94,12 +94,15 @@ export function validateAgentFilesExist(
       if (typeof item.step === 'string') referenced.add(item.step);
     } else if (isReviewLoop(item)) {
       const r = item.review_loop;
-      referenced.add(r.writer);
-      if (typeof r.reviewer === 'string') {
-        referenced.add(r.reviewer);
-      } else {
+      // Only persona-name writers/reviewers reference a file; inline agents
+      // (object form) carry their prompt inline and reference no persona file.
+      if (typeof r.writer === 'string') referenced.add(r.writer);
+      if (Array.isArray(r.reviewer)) {
         for (const child of r.reviewer) walk(child);
+      } else if (typeof r.reviewer === 'string') {
+        referenced.add(r.reviewer);
       }
+      // An inline-object reviewer has no persona file — skip it.
     } else if (isParallel(item)) {
       for (const child of item.parallel) walk(child);
     } else if (isBranch(item)) {

@@ -112,20 +112,29 @@ function walkItem(
     lines.push(`${indent}subgraph ${loopId}["${title}"]`);
     const inner = indent + '    ';
     const writerId = fresh();
-    lines.push(`${inner}${writerId}(["${escapeLabel(r.writer)}"])`);
+    // Label the writer node by its resolved agent reference: a persona name is
+    // itself (byte-identical to before); an inline agent is its `name`, else the
+    // loop's bind, else its flow-position `inline-<index>` token.
+    lines.push(
+      `${inner}${writerId}(["${escapeLabel(agentLabel(r.writer, r.bind ?? `inline-${index}`))}"])`,
+    );
 
-    if (typeof r.reviewer === 'string') {
-      // Single-reviewer form. Emit reviewer node, forward + back edges.
+    if (!Array.isArray(r.reviewer)) {
+      // Single-reviewer form (persona name or inline agent). Emit reviewer node,
+      // forward + back edges. A nameless inline reviewer falls back to the
+      // `inline-<index>-reviewer` token.
       const reviewerId = fresh();
-      lines.push(`${inner}${reviewerId}(["${escapeLabel(r.reviewer)}"])`);
+      lines.push(
+        `${inner}${reviewerId}(["${escapeLabel(agentLabel(r.reviewer, `inline-${index}-reviewer`))}"])`,
+      );
       lines.push(`${inner}${writerId} -->|"writer_produces"| ${reviewerId}`);
       lines.push(`${inner}${reviewerId} -.->|"on fail"| ${writerId}`);
     } else {
-      // Compound form. Walk the reviewer subflow inside the subgraph; the
-      // last item's tails feed the loop's on-fail back-edge to the writer.
-      // The schema (validateReviewerSubflow in compile/validation.ts) guarantees the
-      // last item is an aggregate, but mermaid doesn't enforce that —
-      // whatever tails the subflow exposes back-edge to the writer.
+      // Compound form (subflow array). Walk the reviewer subflow inside the
+      // subgraph; the last item's tails feed the loop's on-fail back-edge to the
+      // writer. The schema (validateReviewerSubflow in compile/validation.ts)
+      // guarantees the last item is an aggregate, but mermaid doesn't enforce
+      // that — whatever tails the subflow exposes back-edge to the writer.
       const subflow = emitSequence(r.reviewer, lines, fresh, inner, bindNodes);
       // Writer feeds the subflow's first item(s); use writer_produces label
       // for the first hop (matches the single-form semantics — writer's

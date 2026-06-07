@@ -144,8 +144,8 @@ export interface StepItemT {
 
 export interface ReviewLoopItemT {
   review_loop: {
-    writer: string;
-    reviewer: string | FlowItem[];
+    writer: AgentRef;
+    reviewer: AgentRef | FlowItem[];
     input: string;
     max_iters?: number;
     approve_when?: string;
@@ -280,11 +280,16 @@ export const StepItem: z.ZodType<StepItemT> = StepItemBody.refine(
 export const ReviewLoopItemBody = z.strictObject({
   review_loop: z
     .strictObject({
-      writer: z.string(),
-      // Structural rule "subflow's last item must be aggregate" is enforced at
-      // compile time in validateReviewerSubflow (compile/validation.ts). Zod's recursive
-      // refine on a lazy cycle is awkward; the gap is intentional.
-      reviewer: z.union([z.string(), z.lazy(() => z.array(FlowItemSchema))]),
+      writer: AgentRef,
+      // Three distinct JSON types so the union is unambiguous: a string persona
+      // name, an inline `{ prompt, name? }` agent (object), or a subflow
+      // (array). The structural rule "subflow's last item must be aggregate" is
+      // enforced at compile time in validateReviewerSubflow (compile/validation.ts);
+      // Zod's recursive refine on a lazy cycle is awkward, so that gap is
+      // intentional. The refines below treat string and inline-object alike as
+      // the single-reviewer arm (verdict via reviewer_produces/verdict_field);
+      // only the array arm is the subflow.
+      reviewer: z.union([z.string(), InlineAgent, z.lazy(() => z.array(FlowItemSchema))]),
       input: ValueExpr,
       max_iters: z.number().int().positive().optional(),
       approve_when: z.string().min(1).optional(),
@@ -294,19 +299,19 @@ export const ReviewLoopItemBody = z.strictObject({
       bind: BindName.optional(),
       on_max_exceeded: z.enum(['fail', 'continue']).optional(),
     })
-    .refine((v) => typeof v.reviewer !== 'string' || v.reviewer_produces !== undefined, {
+    .refine((v) => Array.isArray(v.reviewer) || v.reviewer_produces !== undefined, {
       error:
-        "review_loop: 'reviewer_produces' is required when 'reviewer' is an agent name (string). The reviewer writes its JSON verdict to that path.",
+        "review_loop: 'reviewer_produces' is required when 'reviewer' is a single agent (a persona name or an inline agent). The reviewer writes its JSON verdict to that path.",
     })
-    .refine((v) => typeof v.reviewer === 'string' || v.reviewer_produces === undefined, {
+    .refine((v) => !Array.isArray(v.reviewer) || v.reviewer_produces === undefined, {
       error:
         "review_loop: 'reviewer_produces' must be omitted when 'reviewer' is a subflow. The subflow's own steps declare their 'produces:' paths.",
     })
-    .refine((v) => typeof v.reviewer !== 'string' || v.verdict_field !== undefined, {
+    .refine((v) => Array.isArray(v.reviewer) || v.verdict_field !== undefined, {
       error:
-        "review_loop: 'verdict_field' is required when 'reviewer' is an agent name (string). The loop reads that field from the reviewer's JSON verdict file.",
+        "review_loop: 'verdict_field' is required when 'reviewer' is a single agent (a persona name or an inline agent). The loop reads that field from the reviewer's JSON verdict file.",
     })
-    .refine((v) => typeof v.reviewer === 'string' || v.verdict_field === undefined, {
+    .refine((v) => !Array.isArray(v.reviewer) || v.verdict_field === undefined, {
       error:
         "review_loop: 'verdict_field' must be omitted when 'reviewer' is a subflow. The terminal aggregate inside the subflow performs its own verdict extraction; the loop receives the aggregate's pre-extracted overall verdict string.",
     }),

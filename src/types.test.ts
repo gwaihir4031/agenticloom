@@ -195,7 +195,7 @@ describe('ReviewLoopItem schema', () => {
     expect(result.success).toBe(false);
     if (!result.success) {
       expect(result.error.issues[0].message).toMatch(
-        /'reviewer_produces' is required when 'reviewer' is an agent name/,
+        /'reviewer_produces' is required when 'reviewer' is a single agent/,
       );
     }
   });
@@ -206,7 +206,7 @@ describe('ReviewLoopItem schema', () => {
     expect(result.success).toBe(false);
     if (!result.success) {
       expect(result.error.issues[0].message).toMatch(
-        /'verdict_field' is required when 'reviewer' is an agent name/,
+        /'verdict_field' is required when 'reviewer' is a single agent/,
       );
     }
   });
@@ -1512,5 +1512,162 @@ describe('StepItem.step accepts the AgentRef union', () => {
       bind: 'r',
     });
     expect(parsed.step).toEqual({ prompt: 'Produce the artifact.', name: 'producer' });
+  });
+});
+
+// ============================================================================
+// review_loop.writer / reviewer retype — AgentRef accepted through ReviewLoopItem
+// ============================================================================
+//
+// `review_loop.writer` is now an `AgentRef` (persona-name string OR inline-agent
+// object), and `reviewer` is a three-arm union (string / inline-agent object /
+// subflow array). The single-reviewer refines (reviewer_produces + verdict_field
+// required) fire for an inline-object reviewer exactly as they do for a string
+// reviewer — only the subflow array arm is exempt. The InlineAgent/AgentRef
+// blocks above pin the union in isolation; these pin it THROUGH ReviewLoopItem,
+// the surface a pipeline author parses. Before the retype, `writer: { prompt }`
+// failed the bare `z.string()` and an inline-object `reviewer:` matched no arm.
+
+describe('review_loop.writer accepts the AgentRef union', () => {
+  const base = {
+    reviewer: 'r',
+    input: '$x',
+    writer_produces: 'out.md',
+    reviewer_produces: 'review.json',
+    verdict_field: 'status',
+  };
+
+  it('still accepts a persona-name string writer after the retype', () => {
+    // Parity arm: the string branch must keep parsing exactly as the old
+    // `z.string()` did, so all-persona review loops are unaffected.
+    expect(ReviewLoopItem.safeParse({ review_loop: { ...base, writer: 'w' } }).success).toBe(true);
+  });
+
+  it('accepts an inline-agent object writer (prompt + name)', () => {
+    expect(
+      ReviewLoopItem.safeParse({
+        review_loop: { ...base, writer: { prompt: 'Draft the spec.', name: 'drafter' } },
+      }).success,
+    ).toBe(true);
+  });
+
+  it('accepts an inline-agent object writer (prompt only)', () => {
+    expect(
+      ReviewLoopItem.safeParse({
+        review_loop: { ...base, writer: { prompt: 'Draft the spec.' } },
+      }).success,
+    ).toBe(true);
+  });
+
+  it('rejects an inline-agent object writer with no prompt', () => {
+    // The object arm is InlineAgent, which requires `prompt`. A name-only
+    // object satisfies neither the string arm nor the InlineAgent arm — the
+    // union widened to admit inline agents, not arbitrary objects.
+    expect(
+      ReviewLoopItem.safeParse({
+        review_loop: { ...base, writer: { name: 'drafter' } },
+      }).success,
+    ).toBe(false);
+  });
+
+  it('rejects an inline-agent object writer with an empty prompt', () => {
+    expect(
+      ReviewLoopItem.safeParse({
+        review_loop: { ...base, writer: { prompt: '' } },
+      }).success,
+    ).toBe(false);
+  });
+
+  it('preserves the inline writer object on parse alongside the other fields', () => {
+    // Downstream emit reads `r.writer` as the object (isInlineAgent / the baked
+    // prompt), so the union must survive the parse without collapsing to a string.
+    const parsed = ReviewLoopItem.parse({
+      review_loop: { ...base, writer: { prompt: 'Draft the spec.', name: 'drafter' } },
+    });
+    expect(parsed.review_loop.writer).toEqual({ prompt: 'Draft the spec.', name: 'drafter' });
+  });
+});
+
+describe('review_loop.reviewer accepts the inline-agent arm', () => {
+  const base = {
+    writer: 'w',
+    input: '$x',
+    writer_produces: 'out.md',
+    reviewer_produces: 'review.json',
+    verdict_field: 'status',
+  };
+
+  it('still accepts a persona-name string reviewer after the retype', () => {
+    expect(ReviewLoopItem.safeParse({ review_loop: { ...base, reviewer: 'r' } }).success).toBe(
+      true,
+    );
+  });
+
+  it('accepts an inline-agent object reviewer with reviewer_produces + verdict_field', () => {
+    expect(
+      ReviewLoopItem.safeParse({
+        review_loop: { ...base, reviewer: { prompt: 'Audit the draft.', name: 'auditor' } },
+      }).success,
+    ).toBe(true);
+  });
+
+  it('accepts an inline-agent object reviewer (prompt only)', () => {
+    expect(
+      ReviewLoopItem.safeParse({
+        review_loop: { ...base, reviewer: { prompt: 'Audit the draft.' } },
+      }).success,
+    ).toBe(true);
+  });
+
+  it('accepts a subflow-array reviewer (third arm, unchanged)', () => {
+    // Parity arm: the array branch is still the subflow form and still parses
+    // without reviewer_produces / verdict_field.
+    expect(
+      ReviewLoopItem.safeParse({
+        review_loop: {
+          writer: 'w',
+          reviewer: [{ aggregate: { inputs: { a: '$a' }, verdict_field: 'status' } }],
+          input: '$x',
+          writer_produces: 'out.md',
+        },
+      }).success,
+    ).toBe(true);
+  });
+
+  it('rejects an inline reviewer missing reviewer_produces (single-agent rule applies to inline)', () => {
+    // An inline-object reviewer follows the STRING-reviewer rules, not the
+    // subflow rules: the refine discriminates on Array.isArray(reviewer) (false
+    // for an inline object), so reviewer_produces is required just as for a
+    // persona-name reviewer.
+    const { reviewer_produces, ...rest } = base;
+    const result = ReviewLoopItem.safeParse({
+      review_loop: { ...rest, reviewer: { prompt: 'Audit the draft.' } },
+    });
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error.issues[0].message).toMatch(
+        /'reviewer_produces' is required when 'reviewer' is a single agent/,
+      );
+    }
+  });
+
+  it('rejects an inline reviewer missing verdict_field (single-agent rule applies to inline)', () => {
+    const { verdict_field, ...rest } = base;
+    const result = ReviewLoopItem.safeParse({
+      review_loop: { ...rest, reviewer: { prompt: 'Audit the draft.' } },
+    });
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error.issues[0].message).toMatch(
+        /'verdict_field' is required when 'reviewer' is a single agent/,
+      );
+    }
+  });
+
+  it('preserves the inline reviewer object on parse', () => {
+    const parsed = ReviewLoopItem.parse({
+      review_loop: { ...base, reviewer: { prompt: 'Audit the draft.', name: 'auditor' } },
+    });
+    expect(parsed.review_loop.reviewer).toEqual({ prompt: 'Audit the draft.', name: 'auditor' });
   });
 });
