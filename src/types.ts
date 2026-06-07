@@ -60,6 +60,25 @@ export const OnFail = z.strictObject({
   revise_with: ReviseWith,
 });
 
+/** A general (inline) agent: no persona file, all tools. `prompt` is the agent's
+ *  task — required and static (no `$ref` interpolation; data flows via `input:` /
+ *  `inputs:`). `name` is an optional fs-safe label for logs / windows / mermaid
+ *  nodes. The object form (vs a bare persona-name string) is the discriminator
+ *  that lets compile reject a task-less inline agent. */
+export const InlineAgent = z.strictObject({
+  prompt: z.string().min(1),
+  name: z
+    .string()
+    .regex(/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/)
+    .optional(),
+});
+
+/** An agent reference — the value of `step:` / `review_loop.writer` /
+ *  `review_loop.reviewer`. A bare string is a persona name (the CLI loads its
+ *  agent file); an object is an inline general agent. The arms are distinct JSON
+ *  types, so the union is unambiguous. */
+export const AgentRef = z.union([z.string(), InlineAgent]);
+
 // Hand-written interface types — mirror the Zod schema shapes so they can be
 // used as static return types of type-guard predicates (e.g. `isStep(item): i
 // is StepItemT`). The `T` suffix avoids colliding with the schema constants
@@ -100,6 +119,17 @@ export interface OnFailT {
   verdict_field: string;
   approve_when?: string;
 }
+
+/** Static-typing mirror of the `InlineAgent` Zod shape. Hand-written (like the
+ *  sibling `*T` interfaces) so it can be the narrowed target of `isInlineAgent`
+ *  and a stable type for downstream compile / mermaid consumers. */
+export interface InlineAgentT {
+  prompt: string;
+  name?: string;
+}
+
+/** Static-typing mirror of the `AgentRef` Zod union. */
+export type AgentRef = string | InlineAgentT;
 
 export interface StepItemT {
   step: string;
@@ -188,6 +218,19 @@ export const isParallel = (i: FlowItem): i is ParallelItemT => 'parallel' in i;
 export const isBranch = (i: FlowItem): i is BranchItemT => 'branch' in i;
 export const isAggregate = (i: FlowItem): i is AggregateItemT => 'aggregate' in i;
 export const isForeach = (i: FlowItem): i is ForeachItemT => 'foreach' in i;
+
+/** Read helpers over `AgentRef`. Unlike the FlowItem guards above, these narrow
+ *  an agent reference (string persona vs inline object), not a `FlowItem`.
+ *  Centralized so every later compile + mermaid site resolves the union the same
+ *  way. */
+export const isInlineAgent = (ref: AgentRef): ref is InlineAgentT => typeof ref === 'object';
+
+/** Resolve an agent reference to its display label: a persona name is itself; an
+ *  inline agent is its `name`, or `fallback` when `name` is omitted (callers pass
+ *  the step's bind, else a positional `inline-<index>`). Label only — it never
+ *  drives spawn behavior. */
+export const agentLabel = (ref: AgentRef, fallback: string): string =>
+  isInlineAgent(ref) ? (ref.name ?? fallback) : ref;
 
 /** Raw schema body for `StepItem`, BEFORE the `z.ZodType<StepItemT>`
  *  annotation widens away the inferred type. Exported so the bidirectional

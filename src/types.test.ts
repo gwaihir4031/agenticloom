@@ -7,6 +7,8 @@ import {
   Pipeline,
   BindName,
   ReviseWith,
+  InlineAgent,
+  AgentRef,
   isStep,
   isReviewLoop,
   isHumanGate,
@@ -14,6 +16,8 @@ import {
   isBranch,
   isAggregate,
   isForeach,
+  isInlineAgent,
+  agentLabel,
 } from './types.js';
 import type { FlowItem } from './types.js';
 
@@ -1353,4 +1357,102 @@ describe('FlowItem variant discriminators are unique', () => {
       }
     });
   }
+});
+
+// ============================================================================
+// Inline-agent grammar — InlineAgent / AgentRef schemas + read helpers
+// ============================================================================
+//
+// An agent reference is either a bare persona-name string (the CLI loads its
+// agent file) or an inline-agent object. The object form is the discriminator
+// that lets a later compile pass reject a task-less inline agent. These blocks
+// pin the schema's accept/reject surface and the two pure read helpers
+// (isInlineAgent / agentLabel) that every later compile + mermaid site resolves
+// the union through.
+
+describe('InlineAgent schema', () => {
+  it('accepts a minimal inline agent (prompt only)', () => {
+    expect(InlineAgent.safeParse({ prompt: 'do the thing' }).success).toBe(true);
+  });
+
+  it('accepts an inline agent with a valid name label', () => {
+    // The label regex is broader than BindName: a digit may lead, and '.' / '-'
+    // are allowed in non-leading positions (an fs-safe label for logs / windows
+    // / mermaid nodes).
+    expect(InlineAgent.safeParse({ prompt: 'p', name: 'code-reviewer.v2' }).success).toBe(true);
+  });
+
+  it('rejects an inline agent missing prompt', () => {
+    expect(InlineAgent.safeParse({ name: 'x' }).success).toBe(false);
+  });
+
+  it('rejects an inline agent with an empty prompt string', () => {
+    expect(InlineAgent.safeParse({ prompt: '' }).success).toBe(false);
+  });
+
+  it('rejects a name with a leading underscore', () => {
+    // Diverges from BindName (which permits a leading underscore): the label
+    // regex requires an alphanumeric first character.
+    expect(InlineAgent.safeParse({ prompt: 'p', name: '_internal' }).success).toBe(false);
+  });
+
+  it('rejects a name containing whitespace', () => {
+    expect(InlineAgent.safeParse({ prompt: 'p', name: 'has space' }).success).toBe(false);
+  });
+
+  it('rejects an empty name string', () => {
+    expect(InlineAgent.safeParse({ prompt: 'p', name: '' }).success).toBe(false);
+  });
+
+  it('rejects unknown keys (strict mode)', () => {
+    expect(InlineAgent.safeParse({ prompt: 'p', unknown_key: 'x' }).success).toBe(false);
+  });
+});
+
+describe('AgentRef schema', () => {
+  it('accepts a bare persona-name string', () => {
+    expect(AgentRef.safeParse('code-reviewer').success).toBe(true);
+  });
+
+  it('accepts an inline-agent object', () => {
+    expect(AgentRef.safeParse({ prompt: 'do the thing' }).success).toBe(true);
+  });
+
+  it('rejects an object that satisfies neither arm (missing prompt)', () => {
+    // The object arm is InlineAgent, not "any object": a prompt-less object
+    // fails the string arm and the InlineAgent arm both.
+    expect(AgentRef.safeParse({ name: 'x' }).success).toBe(false);
+  });
+});
+
+describe('AgentRef read helpers — isInlineAgent', () => {
+  it('returns false for a persona-name string', () => {
+    expect(isInlineAgent('code-reviewer')).toBe(false);
+  });
+
+  it('returns true for an inline-agent object', () => {
+    expect(isInlineAgent({ prompt: 'p' })).toBe(true);
+  });
+});
+
+describe('AgentRef read helpers — agentLabel', () => {
+  it('returns the persona name itself for a string ref', () => {
+    expect(agentLabel('code-reviewer', 'fallback')).toBe('code-reviewer');
+  });
+
+  it('returns the fallback for an inline agent with no name', () => {
+    expect(agentLabel({ prompt: 'p' }, 'fallback')).toBe('fallback');
+  });
+
+  it('returns the name for an inline agent that has one', () => {
+    expect(agentLabel({ prompt: 'p', name: 'reviewer' }, 'fallback')).toBe('reviewer');
+  });
+
+  it('keeps an empty name rather than falling back (?? semantics, not ||)', () => {
+    // The helper uses `?? fallback`, so only null/undefined trigger the
+    // fallback — an empty-string name resolves to ''. Parsed refs never carry
+    // an empty name (the label regex forbids it), so this pins the operator
+    // choice rather than a reachable pipeline path.
+    expect(agentLabel({ prompt: 'p', name: '' }, 'fallback')).toBe('');
+  });
 });
