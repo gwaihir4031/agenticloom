@@ -89,7 +89,9 @@ export function validateAgentFilesExist(
   const referenced = new Set<string>();
   function walk(item: FlowItem): void {
     if (isStep(item)) {
-      referenced.add(item.step);
+      // Only persona-name steps have a file to check; inline agents (object
+      // form) carry their prompt inline and reference no persona file.
+      if (typeof item.step === 'string') referenced.add(item.step);
     } else if (isReviewLoop(item)) {
       const r = item.review_loop;
       referenced.add(r.writer);

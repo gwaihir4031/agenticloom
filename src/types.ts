@@ -132,7 +132,7 @@ export interface InlineAgentT {
 export type AgentRef = string | InlineAgentT;
 
 export interface StepItemT {
-  step: string;
+  step: AgentRef;
   input?: string;
   inputs?: Record<string, string>;
   bind?: string;
@@ -241,7 +241,7 @@ export const agentLabel = (ref: AgentRef, fallback: string): string =>
  *  `StepItem` below is the public schema — pipeline parsing uses it,
  *  refines and all. */
 export const StepItemBody = z.strictObject({
-  step: z.string(),
+  step: AgentRef,
   input: ValueExpr.optional(),
   inputs: z.record(z.string(), ValueExpr).optional(),
   bind: BindName.optional(),

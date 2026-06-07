@@ -4665,3 +4665,185 @@ flow:
     expect(emitted).not.toContain('let ');
   });
 });
+
+describe('emit shape — inline-agent step', () => {
+  // An inline `step:` (object form) resolves to a label — name, else the
+  // step's bind, else a flow-position `inline-<i>` token — used as the
+  // runAgent name, and ALWAYS bakes its prompt into the opts bag as
+  // `inlinePrompt:`. Persona-name steps emit byte-identically (no inlinePrompt).
+
+  it('uses the inline name as the runAgent name and bakes inlinePrompt', () => {
+    // No `agents:` — an inline agent references no persona file.
+    const yamlPath = setupFixture({
+      yaml: `
+pipeline: p
+cli: claude
+inputs: [x]
+flow:
+  - step:
+      prompt: Review the diff and emit a verdict.
+      name: reviewer
+    input: $x
+    produces: out.json
+`,
+    });
+    const emitted = compile(yamlPath);
+    expect(emitted).toMatch(/runAgent\("reviewer",/);
+    expect(emitted).toMatch(/inlinePrompt: "Review the diff and emit a verdict\."/);
+  });
+
+  it('falls back to the step bind as the runAgent name when the inline agent is nameless', () => {
+    const yamlPath = setupFixture({
+      yaml: `
+pipeline: p
+cli: claude
+inputs: [x]
+flow:
+  - step:
+      prompt: Do the thing.
+    bind: myStep
+    input: $x
+    produces: out.json
+`,
+    });
+    const emitted = compile(yamlPath);
+    expect(emitted).toMatch(/runAgent\("myStep",/);
+    expect(emitted).toMatch(/inlinePrompt: "Do the thing\."/);
+  });
+
+  it('falls back to a flow-position inline-<i> token when nameless and bindless', () => {
+    // The inline step is the second top-level flow item (index 1), so its
+    // resolved label is `inline-1` — the positional fallback tracks the flow
+    // index, not the mutating fresh() counter.
+    const yamlPath = setupFixture({
+      agents: ['persona-pre'],
+      yaml: `
+pipeline: p
+cli: claude
+inputs: [x]
+flow:
+  - step: persona-pre
+    input: $x
+    produces: pre.md
+  - step:
+      prompt: Do the thing.
+    input: $x
+    produces: out.json
+`,
+    });
+    const emitted = compile(yamlPath);
+    expect(emitted).toMatch(/runAgent\("inline-1",/);
+    expect(emitted).toMatch(/inlinePrompt: "Do the thing\."/);
+  });
+
+  it('emits a persona-name step byte-identically — no inlinePrompt clause', () => {
+    // Parity guard: a persona step carries no inlinePrompt; its emit is the
+    // same shape as before the AgentRef retype.
+    const yamlPath = setupFixture({
+      agents: ['ac-writer'],
+      yaml: `
+pipeline: p
+cli: claude
+inputs: [x]
+flow:
+  - step: ac-writer
+    input: $x
+    produces: out.md
+`,
+    });
+    const emitted = compile(yamlPath);
+    expect(emitted).toMatch(/runAgent\("ac-writer",/);
+    expect(emitted).not.toMatch(/inlinePrompt:/);
+  });
+
+  it('compiles an inline step with no persona file on disk (existence check is skipped)', () => {
+    // validateAgentFilesExist only checks string (persona) steps; an inline
+    // agent has no file to find. No `agents:` are created, so a persona step
+    // named 'standalone' would fail compile — the inline form must not.
+    const yamlPath = setupFixture({
+      yaml: `
+pipeline: p
+cli: claude
+inputs: [x]
+flow:
+  - step:
+      prompt: Do the thing.
+      name: standalone
+    input: $x
+    produces: out.json
+`,
+    });
+    expect(() => compile(yamlPath)).not.toThrow();
+    const emitted = compile(yamlPath);
+    expect(emitted).toMatch(/runAgent\("standalone",/);
+  });
+
+  it('re-bakes the inline prompt in the aggregate parse-retry rewrite closure', () => {
+    // When an inline producer feeds an aggregate, the per-input rewrite
+    // closure must re-fire the producer via its inline spawn form (the baked
+    // prompt is the agent's identity) instead of degrading to a persona
+    // `--agent <label>` lookup with no file. The closure carries the resolved
+    // label as the runAgent name AND the baked inlinePrompt.
+    const yamlPath = setupFixture({
+      yaml: `
+pipeline: p
+cli: claude
+inputs: [x]
+flow:
+  - step:
+      prompt: Produce the artifact.
+      name: producer
+    input: $x
+    produces: out.json
+    bind: r
+  - aggregate:
+      inputs: { r: $r }
+      verdict_field: status
+`,
+    });
+    const emitted = compile(yamlPath);
+    // The closure re-fires the producer by its resolved label, threading
+    // correctivePrompt as the input and the producer's producesPath.
+    expect(emitted).toMatch(
+      /rewriteProducerFiles:[\s\S]+runAgent\("producer", correctivePrompt, "out\.json"/,
+    );
+    // The same closure bakes the inline prompt so the retry spawn is inline.
+    expect(emitted).toMatch(/rewriteProducerFiles:[\s\S]+inlinePrompt: "Produce the artifact\."/);
+  });
+
+  it('re-bakes the inline prompt when an on_fail retry re-emits the retry_from target', () => {
+    // The retry_from target is an inline producer; the step-gate retry
+    // callback re-emits it through emitRunAgentExpr, so the inline prompt is
+    // re-baked automatically rather than degrading to a persona lookup.
+    const yamlPath = setupFixture({
+      agents: ['reviewer'],
+      yaml: `
+pipeline: p
+cli: claude
+inputs: [x]
+flow:
+  - step:
+      prompt: Write the tests.
+      name: tdd
+    input: $x
+    produces: tests.json
+    bind: tests
+  - step: reviewer
+    input: $tests
+    produces: review.json
+    bind: review
+    on_fail:
+      verdict_field: status
+      retry_from: tests
+      revise_with:
+        prompt: Address the feedback.
+`,
+    });
+    const emitted = compile(yamlPath);
+    // Inside the retry callback, the retry_from target re-fires by its inline
+    // label and carries the baked prompt.
+    expect(emitted).toMatch(
+      /retry: async \(currentVerdict\) => \{[\s\S]+runAgent\("tdd",[\s\S]*?inlinePrompt: "Write the tests\."/,
+    );
+  });
+});

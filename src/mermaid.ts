@@ -8,6 +8,7 @@ import {
   isBranch,
   isAggregate,
   isForeach,
+  agentLabel,
 } from './types.js';
 
 /** Per-emit fresh-id factory. Returns `n1`, `n2`, ... — always a valid
@@ -70,10 +71,17 @@ function walkItem(
   fresh: () => string,
   indent: string,
   bindNodes: Map<string, string>,
+  index: number,
 ): Walked {
   if (isStep(item)) {
     const id = fresh();
-    lines.push(`${indent}${id}(["${escapeLabel(item.step)}"])`);
+    // Label the node by the resolved agent reference: a persona name is itself
+    // (byte-identical to before); an inline agent is its `name`, else the
+    // step's bind, else its flow-position `inline-<index>` token. The node id
+    // (`fresh()`) stays the Mermaid identifier; this is only the visible label.
+    lines.push(
+      `${indent}${id}(["${escapeLabel(agentLabel(item.step, item.bind ?? `inline-${index}`))}"])`,
+    );
     if (item.bind !== undefined) bindNodes.set(item.bind, id);
     if (item.on_fail !== undefined) {
       const target = bindNodes.get(item.on_fail.retry_from);
@@ -175,11 +183,12 @@ function walkItem(
     const inner = indent + '    ';
     const childHeads: string[] = [];
     const childTails: string[] = [];
-    for (const child of children) {
+    for (const [ci, child] of children.entries()) {
       // Each child walks as its own sequence-of-one; we collect its heads
       // (for predecessor fan-out) and tails (for successor fan-in). The
-      // children are siblings — no edges BETWEEN them.
-      const w = walkItem(child, lines, fresh, inner, bindNodes);
+      // children are siblings — no edges BETWEEN them. The child index is the
+      // positional fallback for a nameless, bindless inline step's label.
+      const w = walkItem(child, lines, fresh, inner, bindNodes, ci);
       childHeads.push(...w.heads);
       childTails.push(...w.tails);
     }
@@ -287,10 +296,10 @@ function emitSequence(
   bindNodes: Map<string, string>,
 ): Walked {
   if (items.length === 0) return { heads: [], tails: [] };
-  const first = walkItem(items[0], lines, fresh, indent, bindNodes);
+  const first = walkItem(items[0], lines, fresh, indent, bindNodes, 0);
   let prev = first;
   for (let i = 1; i < items.length; i++) {
-    const curr = walkItem(items[i], lines, fresh, indent, bindNodes);
+    const curr = walkItem(items[i], lines, fresh, indent, bindNodes, i);
     connectAll(prev.tails, curr.heads, lines, indent);
     prev = curr;
   }

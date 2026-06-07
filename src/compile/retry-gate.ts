@@ -10,6 +10,7 @@ import {
   isBranch,
   isAggregate,
   isForeach,
+  agentLabel,
 } from '../types.js';
 import { getBindName } from './flow-helpers.js';
 import { ProducerInfo } from './scope.js';
@@ -29,8 +30,8 @@ export function readStepRetryGate(item: StepItemT): StepRetryGate | undefined {
     verdictField: item.on_fail.verdict_field,
     approveWhen: item.on_fail.approve_when ?? 'pass',
     reviseWith: normalizeReviseWith(item.on_fail.revise_with),
-    label: `step '${item.step}'`,
-    gateAgentLabel: item.step,
+    label: `step '${agentLabel(item.step, item.bind ?? 'inline-agent')}'`,
+    gateAgentLabel: agentLabel(item.step, item.bind ?? 'inline-agent'),
   };
 }
 

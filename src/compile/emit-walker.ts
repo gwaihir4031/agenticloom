@@ -7,6 +7,8 @@ import {
   isBranch,
   isAggregate,
   isForeach,
+  isInlineAgent,
+  agentLabel,
 } from '../types.js';
 import { ensureTerminalBindForArm, val, resultNameFor, getBindName } from './flow-helpers.js';
 import {
@@ -114,14 +116,19 @@ export function emitPreCursorItem(
 ): string[] {
   if (isStep(item)) {
     if (item.bind === undefined) return [];
+    // Pre-cursor steps are always bind-bearing (bindless ones returned above),
+    // so the resolved label's fallback is the bind — the flow-position token is
+    // never reached here.
+    const resolvedLabel = agentLabel(item.step, item.bind);
     declare(
       item.bind,
       {
         kind: 'step',
         fileBound: item.produces !== undefined,
-        location: `step '${item.step}'`,
+        location: `step '${resolvedLabel}'`,
         fileField: 'produces',
-        agentName: item.step,
+        agentName: resolvedLabel,
+        inlinePrompt: isInlineAgent(item.step) ? item.step.prompt : undefined,
         producesPath: item.produces,
         extraArgs: item.extra_args,
         timeout: item.timeout,
@@ -183,14 +190,18 @@ export function emitPreCursorItem(
     for (const child of item.parallel) {
       if (isStep(child)) {
         if (child.bind === undefined) continue;
+        // Bind-bearing by the guard above, so the resolved label's fallback is
+        // the child's bind — the flow-position token is never reached here.
+        const childLabel = agentLabel(child.step, child.bind);
         declare(
           child.bind,
           {
             kind: 'step',
             fileBound: child.produces !== undefined,
-            location: `step '${child.step}' (hoisted from parallel)`,
+            location: `step '${childLabel}' (hoisted from parallel)`,
             fileField: 'produces',
-            agentName: child.step,
+            agentName: childLabel,
+            inlinePrompt: isInlineAgent(child.step) ? child.step.prompt : undefined,
             producesPath: child.produces,
             extraArgs: child.extra_args,
             timeout: child.timeout,
@@ -510,7 +521,15 @@ export function emit(
     }
     if (isStep(item)) {
       const v = item.bind ?? fresh();
-      const stepLabel = `step '${item.step}'`;
+      // Resolve the step's agent reference to a label once: a persona name is
+      // itself; an inline agent is its `name`, else the step's bind, else a
+      // flow-position `inline-<i>` token. The positional fallback is the item's
+      // flow index `i` (resume-stable — the same item lands at the same index
+      // on full and --resume-from compiles), never the mutating fresh()
+      // counter. Drives the runAgent name, the ProducerInfo label, and every
+      // diagnostic in this branch.
+      const resolvedLabel = agentLabel(item.step, item.bind ?? `inline-${i}`);
+      const stepLabel = `step '${resolvedLabel}'`;
       // Run consume-side checks for their side effects (declarations errors,
       // file-bound validation). String-building of the runAgent call itself
       // is delegated to `emitRunAgentExpr` (in emit-call.ts) so the on_fail
@@ -533,7 +552,8 @@ export function emit(
           fileBound: item.produces !== undefined,
           location: stepLabel,
           fileField: 'produces',
-          agentName: item.step,
+          agentName: resolvedLabel,
+          inlinePrompt: isInlineAgent(item.step) ? item.step.prompt : undefined,
           producesPath: item.produces,
           extraArgs: item.extra_args,
           timeout: item.timeout,
@@ -581,7 +601,7 @@ export function emit(
       const termInputPathsOverride =
         itemTerminalContext !== undefined ? itemTerminalContext.reviseInputPathsIdent : undefined;
       out.push(
-        `${pad}${decl} ${v} = ${emitRunAgentExpr(item, scope, { promptOverride: termPromptOverride, mode: 'fallback', fallbackInputPathsIdent: termInputPathsOverride })};`,
+        `${pad}${decl} ${v} = ${emitRunAgentExpr(item, scope, { promptOverride: termPromptOverride, mode: 'fallback', fallbackInputPathsIdent: termInputPathsOverride }, i)};`,
       );
 
       // Emit the retryGateZone() wrapper for this step-host gate. The
@@ -598,7 +618,7 @@ export function emit(
         // Final line re-invokes the gate's own step and returns the verdict
         // PATH (step-host contract). The retry callback is host-agnostic;
         // the differing return-type lives in this one host-specific line.
-        const gateReExec = [`return ${emitRunAgentExpr(item, scope)};`];
+        const gateReExec = [`return ${emitRunAgentExpr(item, scope, {}, i)};`];
         const retryBody = buildRetryBody(
           i,
           retryFromIdxLocal,
@@ -921,8 +941,16 @@ export function emit(
           // its default — mirrors `timeoutExpr` in the step-emit branch above.
           const closureTimeout =
             producerInfo.timeout !== undefined ? `, timeout: ${producerInfo.timeout}` : '';
+          // Re-bake an inline producer's prompt so the parse-retry re-fire uses
+          // the inline spawn form (the baked prompt is the agent's identity)
+          // instead of degrading to a persona `--agent <label>` lookup with no
+          // file. Empty for persona producers — byte-identical to before.
+          const closureInlinePrompt =
+            producerInfo.inlinePrompt !== undefined
+              ? `, inlinePrompt: ${JSON.stringify(producerInfo.inlinePrompt)}`
+              : '';
           rewriteEntries.push(
-            `${JSON.stringify(k)}: (correctivePrompt) => runAgent(${JSON.stringify(producerInfo.agentName)}, correctivePrompt, ${JSON.stringify(producerInfo.producesPath)}, { cli: CLI, agentDirs: AGENT_DIRS, extraArgs: ${closureExtraArgs}${closureTimeout} }).then(() => undefined)`,
+            `${JSON.stringify(k)}: (correctivePrompt) => runAgent(${JSON.stringify(producerInfo.agentName)}, correctivePrompt, ${JSON.stringify(producerInfo.producesPath)}, { cli: CLI, agentDirs: AGENT_DIRS, extraArgs: ${closureExtraArgs}${closureTimeout}${closureInlinePrompt} }).then(() => undefined)`,
           );
         }
       }

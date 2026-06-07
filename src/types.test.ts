@@ -1456,3 +1456,61 @@ describe('AgentRef read helpers — agentLabel', () => {
     expect(agentLabel({ prompt: 'p', name: '' }, 'fallback')).toBe('');
   });
 });
+
+// ============================================================================
+// StepItem.step retype — AgentRef accepted end-to-end through StepItem
+// ============================================================================
+//
+// `StepItem.step` is now an `AgentRef` (persona-name string OR inline-agent
+// object), not a bare `z.string()`. The InlineAgent/AgentRef blocks above pin
+// the union in isolation; these pin the union THROUGH `StepItem`, which is the
+// surface a pipeline author actually parses. The inline-object accept/reject
+// cases are the load-bearing ones — before the retype, `step: { prompt: ... }`
+// failed StepItem's `z.string()` arm outright.
+
+describe('StepItem.step accepts the AgentRef union', () => {
+  it('still accepts a persona-name string step after the retype', () => {
+    // Parity arm: the string branch of AgentRef must keep parsing exactly as
+    // the old `z.string()` did, so all-persona pipelines are unaffected.
+    expect(StepItem.safeParse({ step: 'code-reviewer' }).success).toBe(true);
+  });
+
+  it('accepts an inline-agent object step (prompt + name)', () => {
+    expect(
+      StepItem.safeParse({ step: { prompt: 'Review the diff.', name: 'reviewer' } }).success,
+    ).toBe(true);
+  });
+
+  it('accepts an inline-agent object step (prompt only)', () => {
+    expect(StepItem.safeParse({ step: { prompt: 'Review the diff.' } }).success).toBe(true);
+  });
+
+  it('rejects an inline-agent object step with no prompt', () => {
+    // The object arm is InlineAgent, which requires `prompt`. A prompt-less
+    // object satisfies neither the string arm nor the InlineAgent arm.
+    expect(StepItem.safeParse({ step: { name: 'reviewer' } }).success).toBe(false);
+  });
+
+  it('rejects an inline-agent object step with an empty prompt', () => {
+    expect(StepItem.safeParse({ step: { prompt: '' } }).success).toBe(false);
+  });
+
+  it('rejects an inline-agent object step with an unknown key (InlineAgent is strict)', () => {
+    // The strictObject inside the union still rejects unknown keys when the
+    // step is the inline form — the retype widened the field, not its rigor.
+    expect(StepItem.safeParse({ step: { prompt: 'p', persona: 'x' } }).success).toBe(false);
+  });
+
+  it('preserves the inline object on parse alongside the other step fields', () => {
+    // Downstream emit reads `item.step` as the object (isInlineAgent / the
+    // baked prompt), so the union must survive the parse without collapsing
+    // the inline form to a string. Co-occurring produces/bind must not disturb
+    // it.
+    const parsed = StepItem.parse({
+      step: { prompt: 'Produce the artifact.', name: 'producer' },
+      produces: 'out.json',
+      bind: 'r',
+    });
+    expect(parsed.step).toEqual({ prompt: 'Produce the artifact.', name: 'producer' });
+  });
+});

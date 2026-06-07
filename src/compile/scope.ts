@@ -97,8 +97,18 @@ export interface ProducerInfo {
   fileField: string;
   /** Upstream agent name for the input-context wrap. Used to tell the
    *  consumer who wrote the file it's about to read. For aggregates and
-   *  pipeline inputs no real agent exists — use a synthetic label. */
+   *  pipeline inputs no real agent exists — use a synthetic label. For a
+   *  `step:` producer this is the resolved agent label: a persona name is
+   *  itself; an inline agent is its `name`, else the step's bind, else a
+   *  flow-position token. */
   agentName: string;
+  /** Baked inline-agent prompt — set only when this producer's `step:` is the
+   *  inline (object) form. Threaded into the aggregate parse-retry rewrite
+   *  closure so an inline producer re-fires via its inline spawn form (the
+   *  baked prompt is the agent's identity) instead of degrading to a persona
+   *  `--agent <label>` lookup that has no file. Undefined for persona-name
+   *  producers and every non-step kind. */
+  inlinePrompt?: string;
   /** Set only when `kind === 'parallel'`. Names of the child binds declared
    *  inside the parallel block, used to make `$-ref` error messages
    *  actionable ("use $aBind, $bBind, ..." instead of a generic "no

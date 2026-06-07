@@ -624,3 +624,88 @@ flow:
     expect(out).toMatch(/n\d+ -\.->\|retry × 2\| unresolved_n\d+_nonexistent/);
   });
 });
+
+describe('emitMermaid — inline-agent step node label', () => {
+  // An inline `step:` (object form) labels its node by the resolved agent
+  // reference: name, else the step's bind, else a flow-position `inline-<index>`
+  // token. The node id stays a fresh `n*` Mermaid identifier; only the visible
+  // label changes.
+
+  it('labels an inline step by its name when set', () => {
+    const out = emitMermaid(
+      spec(`
+pipeline: p
+cli: claude
+inputs: [x]
+flow:
+  - step:
+      prompt: Review the diff.
+      name: my-reviewer
+    input: $x
+    produces: out.md
+`),
+    );
+    expect(out).toMatch(/n\d+\(\["my-reviewer"\]\)/);
+  });
+
+  it('falls back to the step bind when the inline agent has no name', () => {
+    const out = emitMermaid(
+      spec(`
+pipeline: p
+cli: claude
+inputs: [x]
+flow:
+  - step:
+      prompt: Review the diff.
+    bind: stepBind
+    input: $x
+    produces: out.md
+`),
+    );
+    expect(out).toMatch(/n\d+\(\["stepBind"\]\)/);
+  });
+
+  it('falls back to a flow-position inline-<index> token when nameless and bindless', () => {
+    // The inline step is the second top-level item (index 1), so the
+    // positional fallback is `inline-1` — proving the label uses the flow
+    // index, not a constant.
+    const out = emitMermaid(
+      spec(`
+pipeline: p
+cli: claude
+inputs: [x]
+flow:
+  - step: persona-a
+    input: $x
+    produces: a.md
+  - step:
+      prompt: Do the thing.
+    input: $x
+    produces: out.md
+`),
+    );
+    expect(out).toMatch(/n\d+\(\["inline-1"\]\)/);
+  });
+
+  it('uses the per-child index for a nameless, bindless inline parallel child', () => {
+    // Inside a parallel, each child is walked with its own positional index.
+    // The inline step is the second child (index 1), so its fallback label is
+    // `inline-1` — pinning that the parallel-child index is threaded, not the
+    // outer flow position.
+    const out = emitMermaid(
+      spec(`
+pipeline: p
+cli: claude
+inputs: []
+flow:
+  - parallel:
+      - step: persona-a
+        produces: a.md
+      - step:
+          prompt: Do the thing.
+        produces: b.md
+`),
+    );
+    expect(out).toMatch(/n\d+\(\["inline-1"\]\)/);
+  });
+});
