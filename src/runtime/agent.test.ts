@@ -54,11 +54,13 @@ vi.mock('readline', () => ({
   },
 }));
 
-// Mock fs — loom reads agent persona files at `<agentDirs[i]>/<name>.md`.
-// `promptFileBody = null` simulates "persona file missing on disk" (a
-// runtime contract violation that the runtime asserts against loudly).
-// `fakeFs` is the per-test path → content map used by runAgent's pre-spawn
-// inputPaths check, post-spawn producesPath existence check, and requireFile.
+// Mock fs. After --agent delegation, runAgent no longer reads persona files
+// (the CLI resolves them by walking up from the spawn cwd); the persona-path
+// branch below is retained as a regression guard — if a body-inline were ever
+// reintroduced, the mock would serve `promptFileBody` into the -p value and
+// the 'no persona-file body' test would catch it. `fakeFs` is the per-test
+// path → content map used by runAgent's pre-spawn inputPaths check, post-spawn
+// producesPath existence check, and requireFile.
 let promptFileBody: string | null = '---\nname: test-agent\n---\nSYS PROMPT BODY\n';
 let fakeFs: Record<string, string> = {};
 const looksLikePersonaPath = (p: string): boolean => /(?:^|\/)agents\/[^/]+\.md$/.test(p);
@@ -869,32 +871,106 @@ describe('runAgent', () => {
     expect(prompt).toContain(`Write your output to: ${nodePath.resolve('out.json')}`);
   });
 
-  it('strips frontmatter from persona file before prepending', async () => {
-    promptFileBody = '---\nname: test\n---\nPERSONA BODY';
+  it('persona spawn delegates via --agent <name> on claude (arg after --agent is the name)', async () => {
     spawnMock.mockImplementation(() => makeFakeRunAgentChild());
     const { runAgent } = await import('./agent.js');
-    await runAgent('a', 'user prompt', undefined, {
+    await runAgent('ac-writer', 'prompt', undefined, {
+      cli: 'claude',
+      agentDirs: ['.claude/agents/', '~/.claude/agents/'],
+      extraArgs: [],
+    });
+    const args = spawnMock.mock.calls[0][1] as string[];
+    expect(args).toContain('--agent');
+    expect(args[args.indexOf('--agent') + 1]).toBe('ac-writer');
+  });
+
+  it('persona spawn delegates via --agent <name> on copilot', async () => {
+    spawnMock.mockImplementation(() => makeFakeRunAgentChild());
+    const { runAgent } = await import('./agent.js');
+    await runAgent('ac-writer', 'prompt', undefined, {
+      cli: 'copilot',
+      agentDirs: ['.github/agents/', '~/.copilot/agents/'],
+      extraArgs: [],
+    });
+    const args = spawnMock.mock.calls[0][1] as string[];
+    expect(args).toContain('--agent');
+    expect(args[args.indexOf('--agent') + 1]).toBe('ac-writer');
+  });
+
+  it('persona spawn -p value is the task alone — no persona-file body inlined', async () => {
+    // --agent delegation hands persona resolution to the CLI, so runAgent no
+    // longer reads the file. The persona-path fs branch is intact, so the mock
+    // would still serve 'SYS PROMPT BODY' into the -p value if the code
+    // regressed to reading it — the absence assertion is therefore non-vacuous.
+    promptFileBody = '---\nname: test-agent\n---\nSYS PROMPT BODY\n';
+    spawnMock.mockImplementation(() => makeFakeRunAgentChild());
+    const { runAgent } = await import('./agent.js');
+    await runAgent('a', 'the user task', undefined, {
       cli: 'claude',
       agentDirs: ['.claude/agents/', '~/.claude/agents/'],
       extraArgs: [],
     });
     const args = spawnMock.mock.calls[0][1] as string[];
     const prompt = args[args.indexOf('-p') + 1];
-    expect(prompt).toContain('PERSONA BODY');
-    expect(prompt).not.toMatch(/^---/);
-    expect(prompt).toContain('---\n\nuser prompt');
+    expect(prompt).toBe('the user task');
+    expect(prompt).not.toContain('SYS PROMPT BODY');
   });
 
-  it('throws when persona file missing (contract violation)', async () => {
-    promptFileBody = null;
+  it('inline-prompt spawn omits --agent and prepends the baked prompt + separator', async () => {
+    spawnMock.mockImplementation(() => makeFakeRunAgentChild());
     const { runAgent } = await import('./agent.js');
-    await expect(
-      runAgent('a', 'prompt', undefined, {
-        cli: 'claude',
-        agentDirs: ['.claude/agents/', '~/.claude/agents/'],
-        extraArgs: [],
-      }),
-    ).rejects.toThrow(/persona file is missing|This should have been caught at compile time/);
+    await runAgent('inline-0', 'the user task', undefined, {
+      cli: 'claude',
+      agentDirs: ['.claude/agents/', '~/.claude/agents/'],
+      extraArgs: [],
+      inlinePrompt: 'INLINE SYSTEM PROMPT',
+    });
+    const args = spawnMock.mock.calls[0][1] as string[];
+    expect(args).not.toContain('--agent');
+    const prompt = args[args.indexOf('-p') + 1];
+    expect(prompt.startsWith('INLINE SYSTEM PROMPT\n\n---\n\n')).toBe(true);
+    expect(prompt).toContain('the user task');
+  });
+
+  it('inline-prompt spawn on copilot omits --agent and retains the base all-tools flags', async () => {
+    // The discriminator drives the copilot base argv too: no --agent is added,
+    // and copilot's existing --allow-all-tools/--no-color stay, so "all tools"
+    // is the resulting effect on the inline path.
+    spawnMock.mockImplementation(() => makeFakeRunAgentChild());
+    const { runAgent } = await import('./agent.js');
+    await runAgent('inline-1', 'the user task', undefined, {
+      cli: 'copilot',
+      agentDirs: ['.github/agents/', '~/.copilot/agents/'],
+      extraArgs: [],
+      inlinePrompt: 'INLINE SYSTEM PROMPT',
+    });
+    const args = spawnMock.mock.calls[0][1] as string[];
+    expect(args).not.toContain('--agent');
+    expect(args).toContain('--allow-all-tools');
+    expect(args).toContain('--no-color');
+    const prompt = args[args.indexOf('-p') + 1];
+    expect(prompt.startsWith('INLINE SYSTEM PROMPT\n\n---\n\n')).toBe(true);
+    expect(prompt).toContain('the user task');
+  });
+
+  it('inline-prompt spawn appends the role postscript after the inline assembly', async () => {
+    // The role postscript appends to the assembled prompt in BOTH spawn forms;
+    // on the inline path it must land AFTER the inlinePrompt + separator + task,
+    // not displace the inline assembly.
+    fakeFs['out.json'] = '{}';
+    spawnMock.mockImplementation(() => makeFakeRunAgentChild());
+    const { runAgent } = await import('./agent.js');
+    await runAgent('inline-2', 'do this', 'out.json', {
+      cli: 'claude',
+      agentDirs: ['.claude/agents/', '~/.claude/agents/'],
+      extraArgs: [],
+      inlinePrompt: 'INLINE SYSTEM PROMPT',
+    });
+    const args = spawnMock.mock.calls[0][1] as string[];
+    const prompt = args[args.indexOf('-p') + 1];
+    expect(prompt).toBe(
+      `INLINE SYSTEM PROMPT\n\n---\n\ndo this\n\nWrite your output to: ${nodePath.resolve('out.json')}\nOverwrite if the file already exists.`,
+    );
   });
 
   describe('inputPaths pre-spawn input check', () => {

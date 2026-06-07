@@ -103,15 +103,25 @@ export type AgentRole = 'step' | 'reviewer' | 'writer';
 export interface RunAgentOpts {
   cli: AgentCli;
   /** Layered persona-file lookup directories — project layer first, global
-   *  layer second. Each entry is a directory; the agent's persona file
-   *  resolves to the first existing `<dir>/<agent>.md` (with `~/` expanded
-   *  per dir at lookup time). Layer convention is owned by the compiler
-   *  (see `src/compile/index.ts:AGENT_DIR_DEFAULTS` for per-cli paths);
-   *  the runtime is a dumb iterator. Must be non-empty; each entry must
-   *  be absolute or
-   *  tilde-prefixed by the time the spawned child runs (`loom run`
-   *  asserts this via the trip-wire in cli.ts). */
+   *  layer second. Layer convention is owned by the compiler (see
+   *  `src/compile/index.ts:AGENT_DIR_DEFAULTS` for per-cli paths). Persona
+   *  resolution at spawn time is delegated to the CLI via `--agent` (the CLI
+   *  walks up from the spawn cwd to find the persona file), so the runtime no
+   *  longer reads this list itself; it remains in the options bag because the
+   *  compiler still emits it. Must be non-empty; each entry must be absolute
+   *  or tilde-prefixed by the time the spawned child runs (`loom run` asserts
+   *  this via the trip-wire in cli.ts). */
   agentDirs: string[];
+  /** When set, runAgent takes the inline (general-agent) spawn form: there is
+   *  no persona file to delegate to, so this baked prompt IS the agent's
+   *  identity. It is prepended to the task (the `prompt` arg) with a
+   *  blank-line/---/blank-line separator to form the `-p` value, and the spawn
+   *  passes NO `--agent` flag (the agent runs with all tools). Its PRESENCE is
+   *  the discriminator: undefined selects the persona form, where the CLI
+   *  resolves `<name>`'s persona file via `--agent` and the `-p` value is the
+   *  task alone. Compile bakes the YAML inline `prompt:` here as static text;
+   *  persona steps leave it undefined. */
+  inlinePrompt?: string;
   extraArgs: string[];
   role?: AgentRole;
   /** Per-call timeout in milliseconds. On expiry the child receives SIGTERM
@@ -237,6 +247,18 @@ const STDERR_TAIL_CAP = 8 * 1024;
  *  override, REPLACED not merged so per-step overrides can drop every
  *  default cleanly) + optional per-call timeout.
  *
+ *  Two spawn forms, discriminated by `opts.inlinePrompt`:
+ *  - Persona (inlinePrompt undefined): the CLI resolves `<name>`'s persona
+ *    file natively via `--agent <name>` (added to the argv) and applies its
+ *    declared `tools:`; the `-p` value is the task alone.
+ *  - Inline (inlinePrompt defined): there is no persona file, so the baked
+ *    prompt is the agent's identity — prepended to the task with a
+ *    blank-line/---/blank-line separator — and no `--agent` is passed, so the
+ *    agent runs with all tools.
+ *  In both forms `name` stays the display/log label, and the role postscript
+ *  (step/writer/reviewer) is appended to the assembled `-p` value when
+ *  `producesPath` is set.
+ *
  *  Claude path: spawns with `--output-format stream-json --verbose
  *  --include-partial-messages`; the line handler routes each JSONL event
  *  through `formatStreamEvent` for display and captures the final `result`
@@ -303,8 +325,13 @@ export async function runAgent(
     }
   }
   const role = opts.role ?? 'step';
-  const sys = loadAgentSystemPrompt(name, opts.agentDirs);
-  let fullPrompt = sys === '' ? prompt : `${sys}\n\n---\n\n${prompt}`;
+  // Persona vs inline fork (see RunAgentOpts.inlinePrompt). Persona: the CLI
+  // resolves <name>'s persona file natively via --agent (added to the argv
+  // below), so the -p value is the task alone. Inline: no persona file exists,
+  // so the baked prompt is the agent's identity, prepended to the task with the
+  // blank-line/---/blank-line separator.
+  let fullPrompt =
+    opts.inlinePrompt === undefined ? prompt : `${opts.inlinePrompt}\n\n---\n\n${prompt}`;
 
   // Absolutify the produces path against the runtime's cwd (the workspace dir
   // set up by `cli.ts` via `cwd: workspaceCwd`). The bind value returned below
@@ -330,8 +357,11 @@ export async function runAgent(
 
   // Per-CLI base argv. Claude gets stream-JSON args so we can render its
   // progress in real time; copilot has no equivalent flag set, so it streams
-  // raw stdout. extraArgs from per-step override (or pipeline default) flow
-  // through verbatim.
+  // raw stdout. Persona agents append `--agent <name>` so the CLI resolves the
+  // persona file and its tools natively; inline agents add nothing (their
+  // identity rides in the -p value above and they run with all tools).
+  // extraArgs from per-step override (or pipeline default) flow through verbatim.
+  const agentDelegation: string[] = opts.inlinePrompt === undefined ? ['--agent', name] : [];
   const base: Record<AgentCli, [string, string[]]> = {
     claude: [
       'claude',
@@ -344,9 +374,10 @@ export async function runAgent(
         'stream-json',
         '--verbose',
         '--include-partial-messages',
+        ...agentDelegation,
       ],
     ],
-    copilot: ['copilot', ['-p', fullPrompt, '--allow-all-tools', '--no-color']],
+    copilot: ['copilot', ['-p', fullPrompt, '--allow-all-tools', '--no-color', ...agentDelegation]],
   };
   const [bin, args] = base[opts.cli];
   const finalArgs = [...args, ...opts.extraArgs];
