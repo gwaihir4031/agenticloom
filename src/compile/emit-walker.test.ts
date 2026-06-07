@@ -271,6 +271,141 @@ flow:
   });
 });
 
+describe('emit shape — interactive human_gate persona probe (cli-aware leaf)', () => {
+  it('resolves the copilot .agent.md leaf for an interactive human_gate agent', () => {
+    // The inline human_gate persona probe (its own emit branch) must use the
+    // same cli-aware leaf as the flow-walking check: for copilot it resolves
+    // `.github/agents/<agent>.agent.md`. validateAgentFilesExist does not walk
+    // human_gate agents, so a human_gate-only flow exercises the inline probe
+    // specifically. With the persona at exactly that leaf, compile succeeds.
+    const yamlPath = setupFixture({
+      agents: ['gate-agent'],
+      cli: 'copilot',
+      yaml: `
+pipeline: copilot-gate-ok
+cli: copilot
+inputs: [x]
+flow:
+  - human_gate:
+      interactive: true
+      agent: gate-agent
+      input: $x
+      prompt: review
+`,
+    });
+    const emitted = compile(yamlPath);
+    expect(emitted).toMatch(/await humanGate\({[\s\S]*?agent: "gate-agent"/);
+  });
+
+  it('rejects an interactive copilot human_gate whose persona sits at the .md leaf', () => {
+    // A `<agent>.md` in `.github/agents/` is not the file copilot opens, so
+    // the inline probe must reject it and name the `.agent.md` path it wants.
+    mkdirSync('.github/agents', { recursive: true });
+    writeFileSync('.github/agents/gate-agent.md', '---\nname: gate-agent\n---\nbody\n');
+    const yamlPath = setupFixture({
+      yaml: `
+pipeline: copilot-gate-wrong-leaf
+cli: copilot
+inputs: [x]
+flow:
+  - human_gate:
+      interactive: true
+      agent: gate-agent
+      input: $x
+      prompt: review
+`,
+    });
+    expect(() => compile(yamlPath)).toThrow(
+      /human_gate interactive mode references agent 'gate-agent'[\s\S]*\.github\/agents\/gate-agent\.agent\.md/,
+    );
+  });
+
+  it('resolves the copilot .agent.md leaf for a human_gate nested in a branch arm', () => {
+    // The flow-walking validator does not probe human_gate agents, so a gate
+    // buried in a branch arm is checked only by the inline emit() probe. It
+    // resolves the copilot leaf only if `cli` was threaded into the branch
+    // arm's recursive emit() call — this pins that threading, not just the
+    // top-level probe the sibling tests cover.
+    const yamlPath = setupFixture({
+      agents: ['gate-agent'],
+      cli: 'copilot',
+      yaml: `
+pipeline: copilot-gate-in-branch
+cli: copilot
+inputs: [x]
+flow:
+  - branch:
+      when: 'true'
+      then:
+        - human_gate:
+            interactive: true
+            agent: gate-agent
+            input: $x
+            prompt: review
+`,
+    });
+    const emitted = compile(yamlPath);
+    expect(emitted).toMatch(/await humanGate\({[\s\S]*?agent: "gate-agent"/);
+  });
+
+  it('rejects a copilot human_gate nested in a branch arm whose persona sits at the .md leaf', () => {
+    // Same nested position, wrong leaf: the branch-arm inline probe must
+    // still demand the copilot `.agent.md` file, proving the threaded cli
+    // (not a hard-coded claude default) drives the nested check.
+    mkdirSync('.github/agents', { recursive: true });
+    writeFileSync('.github/agents/gate-agent.md', '---\nname: gate-agent\n---\nbody\n');
+    const yamlPath = setupFixture({
+      yaml: `
+pipeline: copilot-gate-in-branch-wrong-leaf
+cli: copilot
+inputs: [x]
+flow:
+  - branch:
+      when: 'true'
+      then:
+        - human_gate:
+            interactive: true
+            agent: gate-agent
+            input: $x
+            prompt: review
+`,
+    });
+    expect(() => compile(yamlPath)).toThrow(
+      /human_gate interactive mode references agent 'gate-agent'[\s\S]*\.github\/agents\/gate-agent\.agent\.md/,
+    );
+  });
+
+  it('resolves the copilot .agent.md leaf for a human_gate nested in a foreach body', () => {
+    // A foreach body is a separate recursive emit() call site from the branch
+    // arm the sibling tests pin. A gate inside it is checked only by the
+    // inline emit() probe, which sees the copilot leaf only if `cli` was
+    // forwarded into the foreach-body recursive emit() — a copilot persona at
+    // the .agent.md leaf resolving here proves that second site forwards the
+    // threaded cli rather than defaulting to claude.
+    const yamlPath = setupFixture({
+      agents: ['gate-agent'],
+      cli: 'copilot',
+      yaml: `
+pipeline: copilot-gate-in-foreach
+cli: copilot
+inputs: [plan]
+flow:
+  - foreach:
+      over: $plan
+      as: task
+      body:
+        - human_gate:
+            interactive: true
+            agent: gate-agent
+            input: $task
+            prompt: review
+`,
+    });
+    const emitted = compile(yamlPath);
+    expect(emitted).toMatch(/await humanGate\({[\s\S]*?agent: "gate-agent"/);
+  });
+});
+
 describe('emit shape — step timeout', () => {
   it('threads timeout into the options bag when set', () => {
     const yamlPath = setupFixture({
@@ -336,8 +471,14 @@ flow:
   });
 
   it('emits per-cli AGENT_DIRS for copilot pipelines', () => {
+    // cli: 'copilot' makes setupFixture write the persona to the copilot
+    // project layer at its cli-aware leaf — `.github/agents/a.agent.md`
+    // (GitHub Copilot CLI's documented location + `.agent.md` leaf). That
+    // is the exact file the compile-time existence check now probes, so
+    // compile succeeds and we can assert the emitted per-cli AGENT_DIRS.
     const yamlPath = setupFixture({
       agents: ['a'],
+      cli: 'copilot',
       yaml: `
 pipeline: copilot-prologue
 cli: copilot
@@ -348,14 +489,6 @@ flow:
     produces: out.md
 `,
     });
-    // copilot pipeline references the same agent name 'a' but resolves it
-    // against `.github/agents/` by convention (GitHub Copilot CLI's
-    // documented project-level location). setupFixture wrote the persona
-    // to `.claude/agents/a.md` — that doesn't satisfy the copilot layered
-    // probe, so we need to also drop the agent file in the copilot dir
-    // for compile to succeed.
-    mkdirSync('.github/agents', { recursive: true });
-    writeFileSync('.github/agents/a.md', '---\nname: a\n---\nbody\n');
     const emitted = compile(yamlPath);
     expect(emitted).toMatch(/const CLI = "copilot";/);
     expect(emitted).toMatch(

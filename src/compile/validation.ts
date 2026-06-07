@@ -10,6 +10,10 @@ import {
   isAggregate,
   isForeach,
 } from '../types.js';
+// Type-only import: `AgentCli` is a string union, so this adds no runtime
+// edge into the module graph — preserving the "no heavy deps from
+// runtime/agent.ts" rationale documented on expandHome / firstExisting below.
+import type { AgentCli } from '../runtime/agent.js';
 
 /** Expand a leading `~/` to the user's home directory. Duplicated from
  *  `runtime/agent.ts` intentionally — compile-time and runtime path resolution
@@ -47,6 +51,26 @@ export function firstExisting(
   return { found: null, attempted };
 }
 
+/** Per-cli persona-file leaf suffix. claude opens `<name>.md`; GitHub Copilot
+ *  CLI opens `<name>.agent.md`. The directory and the leaf are the two halves
+ *  of "the file the CLI will open", so the leaf is parameterized by cli the
+ *  same way the directory already is (see `compile/index.ts`'s
+ *  AGENT_DIR_DEFAULTS). The `satisfies Record<AgentCli, ...>` compiler-enforces
+ *  an entry per cli, so adding a future cli (`gemini`, `codex`, ...) trips a
+ *  type error here before `agentFileLeaf` can return an undefined suffix. */
+const AGENT_FILE_SUFFIX = {
+  claude: '.md',
+  copilot: '.agent.md',
+} as const satisfies Record<AgentCli, string>;
+
+/** The persona-file leaf name agent `name` lives at for `cli` — the basis of
+ *  the compile-time existence check, so a typo or missing persona file fails at
+ *  compile time against the exact filename the CLI will open (claude
+ *  `<name>.md`, copilot `<name>.agent.md`). */
+export function agentFileLeaf(cli: AgentCli, name: string): string {
+  return `${name}${AGENT_FILE_SUFFIX[cli]}`;
+}
+
 /** Walk the flow and collect every agent name referenced by a `step:` or
  *  by a `review_loop`'s string-form writer/reviewer. Verify each name has
  *  a persona file in at least one layer of `agentDirs`. Missing in every
@@ -59,6 +83,7 @@ export function firstExisting(
 export function validateAgentFilesExist(
   flow: FlowItem[],
   agentDirs: string[],
+  cli: AgentCli,
   pipelineLabel: string,
 ): void {
   const referenced = new Set<string>();
@@ -92,7 +117,7 @@ export function validateAgentFilesExist(
   for (const item of flow) walk(item);
 
   for (const name of referenced) {
-    const { found, attempted } = firstExisting(agentDirs, `${name}.md`);
+    const { found, attempted } = firstExisting(agentDirs, agentFileLeaf(cli, name));
     if (found === null) {
       throw new Error(
         `Compile error: ${pipelineLabel} references agent '${name}' but no persona file exists at either layer:\n` +

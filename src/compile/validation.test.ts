@@ -1,5 +1,9 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { mkdirSync, writeFileSync } from 'fs';
+import { homedir } from 'os';
+import * as path from 'path';
 import { compile } from './index.js';
+import { agentFileLeaf } from './validation.js';
 import { setupCompileTestEnv, setupFixture } from './test-helpers.js';
 
 let teardown: () => void;
@@ -10,6 +14,18 @@ beforeEach(() => {
 
 afterEach(() => {
   teardown();
+});
+
+describe('agentFileLeaf', () => {
+  // The persona-file leaf must be the exact filename each CLI opens, so the
+  // compile-time existence check probes for the persona at that leaf.
+  it('returns the bare .md leaf for a claude agent', () => {
+    expect(agentFileLeaf('claude', 'reviewer')).toBe('reviewer.md');
+  });
+
+  it('returns the .agent.md leaf for a copilot agent', () => {
+    expect(agentFileLeaf('copilot', 'reviewer')).toBe('reviewer.agent.md');
+  });
 });
 
 describe('validateAgentFilesExist (via compile)', () => {
@@ -147,6 +163,144 @@ flow:
 `,
     });
     expect(() => compile(yamlPath)).toThrow(/gate-agent/);
+  });
+
+  it('validates a copilot pipeline against the .github/agents/<name>.agent.md leaf', () => {
+    // The existence check must validate the SAME file the CLI opens. GitHub
+    // Copilot CLI reads `<name>.agent.md` under `.github/agents/`, so a correct
+    // copilot persona at that leaf must pass. setupFixture(cli: 'copilot')
+    // writes exactly that file.
+    const yamlPath = setupFixture({
+      agents: ['reviewer'],
+      cli: 'copilot',
+      yaml: `
+pipeline: copilot-ok
+cli: copilot
+inputs: [x]
+flow:
+  - step: reviewer
+    input: $x
+    produces: out.md
+`,
+    });
+    expect(() => compile(yamlPath)).not.toThrow();
+  });
+
+  it('rejects a copilot pipeline naming the .agent.md path at both layers when absent', () => {
+    // No persona file created. The thrown error must name the copilot leaf
+    // (`<name>.agent.md`) at both the project (.github/agents) and global
+    // (~/.copilot/agents) layers — the exact files the copilot CLI would open.
+    const yamlPath = setupFixture({
+      yaml: `
+pipeline: copilot-missing
+cli: copilot
+inputs: [x]
+flow:
+  - step: reviewer
+    input: $x
+    produces: out.md
+`,
+    });
+    expect(() => compile(yamlPath)).toThrow(
+      /references agent 'reviewer'.*no persona file exists at either layer.*\.github\/agents\/reviewer\.agent\.md/s,
+    );
+    // Global layer too: `~/.copilot/agents/` (the `~/` is expanded to the
+    // sandbox HOME by the layered probe, so match the expanded tail).
+    expect(() => compile(yamlPath)).toThrow(/\.copilot\/agents\/reviewer\.agent\.md/);
+  });
+
+  it('rejects a copilot pipeline whose persona sits at the .md leaf (copilot opens .agent.md)', () => {
+    // A `<name>.md` in `.github/agents/` is not the file the copilot CLI
+    // opens, so it must NOT satisfy the check — this is the crux of the
+    // cli-aware leaf. Write the wrong leaf and assert compile still fails,
+    // naming the `.agent.md` path it actually requires.
+    mkdirSync('.github/agents', { recursive: true });
+    writeFileSync('.github/agents/reviewer.md', '---\nname: reviewer\n---\nbody\n');
+    const yamlPath = setupFixture({
+      yaml: `
+pipeline: copilot-wrong-leaf
+cli: copilot
+inputs: [x]
+flow:
+  - step: reviewer
+    input: $x
+    produces: out.md
+`,
+    });
+    expect(() => compile(yamlPath)).toThrow(/\.github\/agents\/reviewer\.agent\.md/);
+  });
+
+  it('validates a copilot review_loop writer and string reviewer against the .agent.md leaf', () => {
+    // The walker collects review_loop writer/reviewer names through a
+    // different arm than the plain-step case, so confirm those references
+    // also resolve the cli-aware copilot leaf. Both personas sit at
+    // `.github/agents/<name>.agent.md`, so compile must succeed.
+    const yamlPath = setupFixture({
+      agents: ['writer', 'reviewer'],
+      cli: 'copilot',
+      yaml: `
+pipeline: copilot-review-loop
+cli: copilot
+inputs: [x]
+flow:
+  - review_loop:
+      writer: writer
+      reviewer: reviewer
+      input: $x
+      writer_produces: draft.md
+      reviewer_produces: review.json
+      verdict_field: status
+`,
+    });
+    expect(() => compile(yamlPath)).not.toThrow();
+  });
+
+  it('rejects a copilot review_loop whose reviewer persona is missing, naming the .agent.md leaf', () => {
+    // Only the writer exists; the reviewer reference must fail the cli-aware
+    // probe and name the copilot leaf it requires.
+    const yamlPath = setupFixture({
+      agents: ['writer'],
+      cli: 'copilot',
+      yaml: `
+pipeline: copilot-review-loop-missing
+cli: copilot
+inputs: [x]
+flow:
+  - review_loop:
+      writer: writer
+      reviewer: reviewer
+      input: $x
+      writer_produces: draft.md
+      reviewer_produces: review.json
+      verdict_field: status
+`,
+    });
+    expect(() => compile(yamlPath)).toThrow(
+      /references agent 'reviewer'.*\.github\/agents\/reviewer\.agent\.md/s,
+    );
+  });
+
+  it('resolves a copilot persona present only in the global ~/.copilot/agents layer', () => {
+    // The positive copilot cases above seed only the project layer
+    // (.github/agents). Seed the persona at the GLOBAL copilot leaf alone to
+    // prove the cli-aware `.agent.md` leaf is applied at every probe layer,
+    // not just the project dir. HOME is sandboxed to the per-test tmp dir by
+    // setupCompileTestEnv, so `~/.copilot/agents/` expands there.
+    const globalDir = path.join(homedir(), '.copilot', 'agents');
+    mkdirSync(globalDir, { recursive: true });
+    writeFileSync(path.join(globalDir, 'reviewer.agent.md'), '---\nname: reviewer\n---\nbody\n');
+    const yamlPath = setupFixture({
+      yaml: `
+pipeline: copilot-global-layer
+cli: copilot
+inputs: [x]
+flow:
+  - step: reviewer
+    input: $x
+    produces: out.md
+`,
+    });
+    expect(() => compile(yamlPath)).not.toThrow();
   });
 });
 

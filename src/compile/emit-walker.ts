@@ -9,7 +9,16 @@ import {
   isForeach,
 } from '../types.js';
 import { ensureTerminalBindForArm, val, resultNameFor, getBindName } from './flow-helpers.js';
-import { validateReviewerSubflow, validatePath, firstExisting } from './validation.js';
+import {
+  validateReviewerSubflow,
+  validatePath,
+  firstExisting,
+  agentFileLeaf,
+} from './validation.js';
+// Type-only: `AgentCli` is a string union, erased at emit; keeps emit-walker's
+// module graph free of runtime/agent.ts's heavy deps (same posture as
+// validation.ts, whose helpers this file already shares).
+import type { AgentCli } from '../runtime/agent.js';
 import { ProducerInfo, declare, registerPath, mergeChildIntoParent } from './scope.js';
 import { inputExprFor, checkConsume, collectReviewerPaths, substituteBindRefs } from './inputs.js';
 import {
@@ -374,6 +383,7 @@ export function emit(
   scope: Map<string, ProducerInfo>,
   fresh: () => string,
   agentDirs: string[],
+  cli: AgentCli,
   nextScopeId: () => number,
   currentScopeId: number,
   pathScope?: Map<string, string>,
@@ -708,6 +718,7 @@ export function emit(
           subScope,
           fresh,
           agentDirs,
+          cli,
           nextScopeId,
           subflowScopeId,
           subPathScope,
@@ -794,8 +805,9 @@ export function emit(
         // least one layer of agentDirs. Same layered probe as the
         // flow-walking check (validateAgentFilesExist) but inlined here
         // because human_gate has its own emit branch and the agent name
-        // is read from h.agent.
-        const { found, attempted } = firstExisting(agentDirs, `${agent}.md`);
+        // is read from h.agent. Shares the same cli-aware leaf so both
+        // sites validate the exact filename the CLI will open.
+        const { found, attempted } = firstExisting(agentDirs, agentFileLeaf(cli, agent));
         if (found === null) {
           throw new Error(
             `Compile error: human_gate interactive mode references agent '${agent}' ` +
@@ -1039,6 +1051,7 @@ export function emit(
             childScope,
             fresh,
             agentDirs,
+            cli,
             nextScopeId,
             childScopeId,
             childPathScope,
@@ -1146,6 +1159,7 @@ export function emit(
             new Map(scope),
             fresh,
             agentDirs,
+            cli,
             nextScopeId,
             thenScopeId,
             thenScope,
@@ -1162,6 +1176,7 @@ export function emit(
               new Map(scope),
               fresh,
               agentDirs,
+              cli,
               nextScopeId,
               elseScopeId!,
               elseScope,
@@ -1273,6 +1288,7 @@ export function emit(
             new Map(scope),
             fresh,
             agentDirs,
+            cli,
             nextScopeId,
             thenScopeId,
             thenScope,
@@ -1303,6 +1319,7 @@ export function emit(
               new Map(scope),
               fresh,
               agentDirs,
+              cli,
               nextScopeId,
               elseScopeId!,
               elseScope,
@@ -1456,6 +1473,7 @@ export function emit(
         bodyScope,
         fresh,
         agentDirs,
+        cli,
         nextScopeId,
         bodyScopeId,
         bodyPathScope,
