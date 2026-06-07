@@ -1889,10 +1889,10 @@ describe('sweepOrphanTmpDirs', () => {
 
 describe('absolutifyAgentDirsInEmit', () => {
   // The CLI rewrites the emitted `const AGENT_DIRS = [...]` line so the
-  // project layer (index 0) is absolute. The runtime resolves entries
-  // against the child's cwd, and the child runs from `loom/runs/<id>/`
-  // where no `.claude/` directory exists. The global layer (tilde-prefixed)
-  // is expanded lazily by the runtime's expandHome.
+  // project layer (index 0) is absolute, keeping the emitted constant a
+  // correct reference after the child chdir's into the workspace dir. The
+  // global layer stays tilde-prefixed and is left unchanged (home-anchored,
+  // portable across machines).
   it('absolutifies the project layer (index 0) against invocation cwd', async () => {
     const { absolutifyAgentDirsInEmit } = await import('./cli.js');
     const emit = [
@@ -1923,7 +1923,7 @@ describe('absolutifyAgentDirsInEmit', () => {
     expect(absolutifyAgentDirsInEmit(emit, '/some/cwd')).toBe(emit);
   });
 
-  it('preserves a ~/-prefixed project layer unchanged (runtime handles via expandHome)', async () => {
+  it('preserves a ~/-prefixed project layer unchanged (already home-anchored)', async () => {
     const { absolutifyAgentDirsInEmit } = await import('./cli.js');
     const emit = 'const AGENT_DIRS = ["~/.claude/agents/","~/.claude/agents/"];';
     expect(absolutifyAgentDirsInEmit(emit, '/some/cwd')).toBe(emit);

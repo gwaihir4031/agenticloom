@@ -1,6 +1,5 @@
 import { spawn } from 'child_process';
-import { existsSync, readFileSync } from 'fs';
-import { homedir } from 'os';
+import { existsSync } from 'fs';
 import * as path from 'path';
 import * as readline from 'readline';
 import { RollingWindow } from '../RollingWindow.js';
@@ -21,76 +20,6 @@ export class HaltPipelineError extends Error {
     super(message);
     this.name = 'HaltPipelineError';
   }
-}
-
-/** Expand a leading `~/` to the user's home directory. Used by layered
- *  agent resolution and any other path that may be tilde-prefixed.
- *  Pass-through for already-absolute paths and non-tilde-prefixed input. */
-function expandHome(p: string): string {
-  if (p === '~') return homedir();
-  if (p.startsWith('~/')) return path.join(homedir(), p.slice(2));
-  return p;
-}
-
-/** Probe a layered list of directories for `<dir>/<leaf>`. Returns the
- *  first existing file path (with `~/` expanded). The `attempted` list
- *  contains every path probed up to and including the match (so on a
- *  successful hit the list has 1-to-N entries, not the full N); on
- *  miss it contains every dir in the input. Callers use `attempted` to
- *  build layer-aware error messages.
- *
- *  Not exported; `loadAgentSystemPrompt` is the only consumer in
- *  agent.ts. The compile-side `validateAgentFilesExist` defines its
- *  own local copy (see `src/compile/validation.ts`) — same pattern as `expandHome`,
- *  which is also duplicated to avoid a cross-module import that would
- *  pull runtime's heavy deps into the compile module. */
-function firstExisting(
-  dirs: string[],
-  leaf: string,
-): { found: string | null; attempted: string[] } {
-  const attempted: string[] = [];
-  for (const dir of dirs) {
-    const candidate = expandHome(path.posix.join(dir, leaf));
-    attempted.push(candidate);
-    if (existsSync(candidate)) return { found: candidate, attempted };
-  }
-  return { found: null, attempted };
-}
-
-/** Load and frontmatter-strip the agent's persona file from the first
- *  layer that contains it. `agentDirs` is the layered list (project
- *  first, global second); the runtime iterates in order and returns the
- *  body of the first match (empty string when the matched file is
- *  frontmatter-only — the bare-cli agent convention). Loud-fail listing
- *  all attempted paths when none exists — compile-time validation
- *  should have caught this, so a runtime miss is a contract violation
- *  (usually a stale `dist/`; try `npm run build`). */
-export function loadAgentSystemPrompt(agentName: string, agentDirs: string[]): string {
-  const { found, attempted } = firstExisting(agentDirs, `${agentName}.md`);
-  if (found === null) {
-    throw new Error(
-      `agent '${agentName}' persona file is missing at any of:\n` +
-        attempted.map((p) => `  ${p}`).join('\n') +
-        '\n' +
-        `This should have been caught at compile time — the runtime contract is broken. ` +
-        `If running loom from source, try \`npm run build\` to refresh dist/.`,
-    );
-  }
-  let sys: string;
-  try {
-    sys = readFileSync(found, 'utf-8');
-  } catch (e: any) {
-    // Wrap with layer context so a permission/IO error names the matched
-    // layer's path explicitly (with two layers, the bare Node error
-    // string would leave the user guessing which layer matched).
-    throw new Error(`agent '${agentName}' matched at ${found} but read failed: ${e?.message ?? e}`);
-  }
-  // Strip Claude Code subagent YAML frontmatter — metadata, not prompt
-  // content, and its leading '---' would make `claude -p` treat the
-  // whole arg as a CLI flag.
-  const fm = sys.match(/^---\r?\n[\s\S]*?\r?\n---\r?\n/);
-  if (fm) sys = sys.slice(fm[0].length);
-  return sys.trim();
 }
 
 export type AgentCli = 'claude' | 'copilot';

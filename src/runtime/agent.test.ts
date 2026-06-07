@@ -1978,3 +1978,26 @@ describe('HaltPipelineError', () => {
     expect(err.message).toBe('msg');
   });
 });
+
+describe('persona-body reader removal', () => {
+  // Persona resolution moved onto the CLI's `--agent` delegation, so the runtime
+  // no longer reads persona files itself. The persona-body reader the runtime
+  // once exported (loadAgentSystemPrompt, backed by the private firstExisting/
+  // expandHome helpers) is dead code and must be gone from agent.ts's exports.
+  it('no longer exports loadAgentSystemPrompt from runtime/agent', async () => {
+    const mod = await import('./agent.js');
+    // Re-adding this export would re-couple the runtime to AGENT_DIRS persona
+    // reading — the exact coupling this removal sheds.
+    expect('loadAgentSystemPrompt' in mod).toBe(false);
+  });
+
+  it('keeps the surviving agent.ts exports intact (surgical removal)', async () => {
+    const mod = await import('./agent.js');
+    // Anchor for the absence assertion above: these prove the agent.js namespace
+    // genuinely loaded, so the `in` check cannot pass vacuously against a failed
+    // or empty import. They also guard that only the dead reader was removed.
+    expect('runAgent' in mod).toBe(true);
+    expect('HaltPipelineError' in mod).toBe(true);
+    expect('requireFile' in mod).toBe(true);
+  });
+});
