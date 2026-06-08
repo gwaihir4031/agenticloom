@@ -305,20 +305,41 @@ flow:
     produces: ACS.md
 ```
 
-Every agent name referenced in `flow:` must have a persona file
-discoverable via the layered lookup described below — missing files are
-caught at compile time. A bare-cli agent (no persona body) uses a
-frontmatter-only `.md` file.
+**Agent references: persona name or inline agent.** Anywhere an agent is
+named — `step:`, `review_loop.writer`, `review_loop.reviewer` — the value
+is either a persona name or an inline agent:
+
+- **A persona name** (string) — loom delegates to the CLI's native
+  `--agent <name>`, so the CLI loads the agent file and **enforces its
+  `tools:`**; loom no longer inlines the persona body. The persona file
+  must be discoverable via the layered lookup below — missing files are
+  caught at compile time (a bare-cli agent with no body still works as a
+  frontmatter-only file). On claude the persona's `tools:` bind even under
+  `--dangerously-skip-permissions` (real least privilege). On copilot the
+  same `--agent` delegation applies, though copilot's CLI-side enforcement
+  of agent `tools:` is version-sensitive and not yet in effect in current
+  releases — loom delegates and adds no workaround. The agent-file leaf is
+  cli-aware: `.claude/agents/<name>.md` for claude,
+  `.github/agents/<name>.agent.md` for copilot.
+- **An inline agent** (`{ prompt, name? }`) — a one-off general agent with
+  no persona file, spawned with **all tools**. `prompt:` is the task
+  (required; static text — no `$ref` interpolation, so per-invocation data
+  flows via `input:` / `inputs:` as before). `name?` is an optional label
+  for logs and diagrams.
+
+A general `human_gate` agent is expressed by **omitting `agent:`** on an
+interactive gate — the gate's already-required `prompt:` is the task, run
+with all tools. See `PRIMITIVES.md` for the full agent-reference grammar.
 
 **Layered agent discovery.** The agent's persona directory is driven by
 the pipeline's `cli:` field. For each agent name, loom probes the
 project layer first, then the user-global layer; project wins on
 collision:
 
-| Pipeline `cli:` | Project layer                    | Global layer                  |
-| --------------- | -------------------------------- | ----------------------------- |
-| `claude`        | `<cwd>/.claude/agents/<name>.md` | `~/.claude/agents/<name>.md`  |
-| `copilot`       | `<cwd>/.github/agents/<name>.md` | `~/.copilot/agents/<name>.md` |
+| Pipeline `cli:` | Project layer                          | Global layer                        |
+| --------------- | -------------------------------------- | ----------------------------------- |
+| `claude`        | `<cwd>/.claude/agents/<name>.md`       | `~/.claude/agents/<name>.md`        |
+| `copilot`       | `<cwd>/.github/agents/<name>.agent.md` | `~/.copilot/agents/<name>.agent.md` |
 
 Pipelines are discovered the same way regardless of `cli:`:
 `loom run <name>` looks in `<cwd>/loom/pipelines/<name>.yaml` first,
