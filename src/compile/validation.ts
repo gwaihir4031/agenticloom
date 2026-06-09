@@ -10,6 +10,7 @@ import {
   isBranch,
   isAggregate,
   isForeach,
+  isInlineAgent,
 } from '../types.js';
 // Type-only import: `AgentCli` is a string union, so this adds no runtime
 // edge into the module graph — preserving the "no heavy deps from
@@ -183,15 +184,15 @@ export function validateAgentFilesExist(
     if (isStep(item)) {
       // Only persona-name steps have a file to check; inline agents (object
       // form) carry their prompt inline and reference no persona file.
-      if (typeof item.step === 'string') referenced.add(item.step);
+      if (!isInlineAgent(item.step)) referenced.add(item.step);
     } else if (isReviewLoop(item)) {
       const r = item.review_loop;
       // Only persona-name writers/reviewers reference a file; inline agents
       // (object form) carry their prompt inline and reference no persona file.
-      if (typeof r.writer === 'string') referenced.add(r.writer);
+      if (!isInlineAgent(r.writer)) referenced.add(r.writer);
       if (Array.isArray(r.reviewer)) {
         for (const child of r.reviewer) walk(child);
-      } else if (typeof r.reviewer === 'string') {
+      } else if (!isInlineAgent(r.reviewer)) {
         referenced.add(r.reviewer);
       }
       // An inline-object reviewer has no persona file — skip it.
