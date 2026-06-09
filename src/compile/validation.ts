@@ -13,31 +13,29 @@ import {
   isInlineAgent,
 } from '../types.js';
 // Type-only import: `AgentCli` is a string union, so this adds no runtime
-// edge into the module graph — preserving the "no heavy deps from
-// runtime/agent.ts" rationale documented on expandHome / firstExisting below.
+// edge into the module graph — compile/ stays free of runtime/agent.ts's
+// heavy deps (child_process, readline, RollingWindow).
 import type { AgentCli } from '../runtime/agent.js';
 
-/** Expand a leading `~/` to the user's home directory. Duplicated from
- *  `runtime/agent.ts` intentionally — compile-time and runtime path resolution
- *  must apply identical `~/` expansion semantics so a tilde-prefixed
- *  layer (e.g. `~/.claude/agents/`) resolves consistently across both
- *  validation and runtime lookup. The duplication rationale (avoiding
- *  `runtime/agent.ts`'s heavy deps in compile/'s module graph) is preserved
- *  by keeping these inside compile/. */
+/** Expand a leading `~/` to the user's home directory, so a tilde-prefixed
+ *  layer (e.g. `~/.claude/agents/`) resolves to a real path. This is the
+ *  sole owner of `~` expansion: the runtime no longer resolves persona
+ *  files at all (the CLI does, via `--agent`), so only the compile-time
+ *  probes expand tildes. */
 function expandHome(p: string): string {
   if (p === '~') return homedir();
   if (p.startsWith('~/')) return path.join(homedir(), p.slice(2));
   return p;
 }
 
-/** Local copy of `runtime/agent.ts`'s `firstExisting` helper. Duplicated rather
- *  than imported to keep compile/'s module graph free of `runtime/agent.ts`'s
- *  heavy deps (child_process, readline, RollingWindow). Same pattern as
- *  `expandHome` above. See `src/runtime/agent.ts:firstExisting` for the
- *  contract and field-by-field documentation. Module-private: external
- *  callers (notably `emit-walker.ts`'s inline human_gate persona probe) go
- *  through `validatePersonaFile`, which layers the claude frontmatter check
- *  on top of the existence probe so no caller can get one without the other. */
+/** Probe `dirs` in order for the first directory containing `leaf`; returns
+ *  the found path (or null) plus every attempted candidate so error messages
+ *  can name the exact paths that were checked. Sole owner of the layered
+ *  probe — the runtime delegates persona resolution to the CLI and keeps no
+ *  copy. Module-private: external callers (notably `emit-walker.ts`'s
+ *  human_gate persona probe) go through `validatePersonaFile`, which layers
+ *  the claude frontmatter check on top of the existence probe so no caller
+ *  can get one without the other. */
 function firstExisting(
   dirs: string[],
   leaf: string,
