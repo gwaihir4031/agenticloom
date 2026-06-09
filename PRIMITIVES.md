@@ -65,10 +65,13 @@ postscript (the I/O contract). The file leaf is cli-aware:
 | `copilot`       | `<name>.agent.md` | `.github/agents/code-reviewer.agent.md` |
 
 Compile validates every referenced persona file: it must exist at the
-cli-aware leaf, and on claude its frontmatter `name:` must equal the
-reference — claude registers agents by frontmatter name, not filename, so a
-missing or mismatched `name:` would make `--agent` silently run
-persona-less. copilot personas are checked for file existence only.
+cli-aware leaf, and on claude some layer's frontmatter `name:` must equal
+the reference — claude registers both layers and resolves `--agent` by
+frontmatter name, not filename, so a project file whose `name:` mismatches
+is a different agent (a matching global file still satisfies the
+reference), and compile fails only when no layer's `name:` matches, which
+would make `--agent` silently run persona-less. copilot personas are
+checked for file existence only.
 
 Discovery asymmetry to know about: loom's compile check probes exactly two
 layers (`<cwd>/.claude/agents/` and `~/.claude/agents/`), while claude

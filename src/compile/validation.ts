@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from 'fs';
+import { existsSync, readFileSync, realpathSync } from 'fs';
 import { homedir } from 'os';
 import * as path from 'path';
 import { parse as parseYaml } from 'yaml';
@@ -28,21 +28,28 @@ function expandHome(p: string): string {
   return p;
 }
 
+/** The candidate persona path for `leaf` in layer `dir` — the exact path the
+ *  existence/frontmatter probes examine and the path error messages display
+ *  (the project layer stays relative, the global layer's `~/` is expanded). */
+function layerCandidate(dir: string, leaf: string): string {
+  return expandHome(path.posix.join(dir, leaf));
+}
+
 /** Probe `dirs` in order for the first directory containing `leaf`; returns
  *  the found path (or null) plus every attempted candidate so error messages
- *  can name the exact paths that were checked. Sole owner of the layered
- *  probe — the runtime delegates persona resolution to the CLI and keeps no
- *  copy. Module-private: external callers (notably `emit-walker.ts`'s
- *  human_gate persona probe) go through `validatePersonaFile`, which layers
- *  the claude frontmatter check on top of the existence probe so no caller
- *  can get one without the other. */
+ *  can name the exact paths that were checked. This existence-only probe is
+ *  the copilot resolution arm; claude resolution instead walks every layer
+ *  by frontmatter name (`resolveClaudePersonaByName`). The runtime delegates
+ *  persona resolution to the CLI and keeps no copy. Module-private: external
+ *  callers (notably `emit-walker.ts`'s human_gate persona probe) go through
+ *  `validatePersonaFile`, so no caller can bypass the per-cli semantics. */
 function firstExisting(
   dirs: string[],
   leaf: string,
 ): { found: string | null; attempted: string[] } {
   const attempted: string[] = [];
   for (const dir of dirs) {
-    const candidate = expandHome(path.posix.join(dir, leaf));
+    const candidate = layerCandidate(dir, leaf);
     attempted.push(candidate);
     if (existsSync(candidate)) return { found: candidate, attempted };
   }
@@ -121,78 +128,191 @@ function personaFrontmatterName(filePath: string): {
   }
 }
 
-/** Resolve agent `name`'s persona file across the layered `agentDirs` and —
- *  for claude — verify its frontmatter `name:` matches the reference. Returns
- *  the resolved path; throws a compile error otherwise. Shared by the
+/** The no-file-at-any-layer compile error, shared by both cli arms: zero
+ *  layers had a file at the cli-aware leaf, so name every attempted path. */
+function missingPersonaError(contextLabel: string, name: string, attempted: string[]): Error {
+  return new Error(
+    `Compile error: ${contextLabel} references agent '${name}' but no persona file exists at either layer:\n` +
+      attempted.map((p) => `  ${p}`).join('\n') +
+      '\n' +
+      `Create the file at either path (frontmatter only is fine for a bare-cli agent), or fix the agent name.`,
+  );
+}
+
+/** Why an existing candidate file failed to satisfy a claude reference.
+ *  `reason` is the path-suffixed fragment ("declares frontmatter name: 'x'
+ *  but the pipeline references 'y'", "has no 'name:' frontmatter", "could
+ *  not be read: <err>") shared by the single-candidate errors and the
+ *  aggregated multi-layer error, so both render identical per-file wording. */
+type PersonaRejection = {
+  path: string;
+  kind: 'unreadable' | 'no-name' | 'name-mismatch';
+  reason: string;
+};
+
+/** Render the exactly-one-failing-file compile error in the single-file
+ *  wording (pinned by tests and unchanged from when claude's check examined
+ *  only the first existing layer): each kind frames `reason` with its own
+ *  fix-it guidance. */
+function singleLayerRejectionError(r: PersonaRejection, name: string, contextLabel: string): Error {
+  switch (r.kind) {
+    case 'unreadable':
+      return new Error(
+        `Compile error: ${contextLabel} references agent '${name}' but its persona file at ` +
+          `${r.path} ${r.reason}`,
+      );
+    case 'no-name':
+      return new Error(
+        `Compile error: ${contextLabel} references agent '${name}' but persona file ${r.path} ` +
+          `${r.reason} — claude registers agents by frontmatter name, ` +
+          `so '--agent ${name}' would not load this file and the spawn would run persona-less. ` +
+          `Add frontmatter at the top of the file:\n` +
+          `  ---\n  name: ${name}\n  ---`,
+      );
+    case 'name-mismatch':
+      return new Error(
+        `Compile error: ${contextLabel}: persona file ${r.path} ${r.reason} — ` +
+          `claude resolves --agent by frontmatter name, ` +
+          `so this spawn would silently run persona-less. Align the frontmatter name with the ` +
+          `reference (or rename the reference).`,
+      );
+  }
+}
+
+/** The claude arm of `validatePersonaFile`: resolve `--agent <name>` the way
+ *  claude itself does — claude registers the agent files of BOTH layers and
+ *  matches by frontmatter `name:`, not filename — and return the first layer
+ *  (project-most, mirroring claude's project-over-global precedence) whose
+ *  file satisfies the reference. A layer whose file exists but does not
+ *  satisfy it (no frontmatter name / mismatched name / unreadable) is
+ *  recorded and SKIPPED, exactly as claude skips it: a project `reviewer.md`
+ *  declaring `name: other` is a different agent, not a broken reference, and
+ *  a global `reviewer.md` declaring `name: reviewer` still resolves the
+ *  spawn. Throws only when NO layer satisfies, naming every examined file
+ *  and why it was rejected. */
+function resolveClaudePersonaByName(
+  agentDirs: string[],
+  leaf: string,
+  name: string,
+  contextLabel: string,
+): string {
+  const attempted: string[] = [];
+  const examined = new Set<string>();
+  const rejections: PersonaRejection[] = [];
+  for (const dir of agentDirs) {
+    const candidate = layerCandidate(dir, leaf);
+    attempted.push(candidate);
+    if (!existsSync(candidate)) continue;
+    // Two layer spellings can denote the same file — running loom from $HOME
+    // collapses `.claude/agents/` and `~/.claude/agents/` into one directory.
+    // That is ONE candidate, not two: dedupe by realpath (not string
+    // comparison — on darwin a cwd under `/private/var` and a $HOME under
+    // `/var` alias the same file) so a single file's failure is reported
+    // once, in the single-file wording.
+    let realPath: string;
+    try {
+      realPath = realpathSync(candidate);
+    } catch (e) {
+      // existsSync passed but realpath failed (file vanished, parent
+      // permission, ...) — record with compile-error framing rather than
+      // letting the raw fs error escape.
+      rejections.push({
+        path: candidate,
+        kind: 'unreadable',
+        reason: `could not be read: ${e instanceof Error ? e.message : String(e)}`,
+      });
+      continue;
+    }
+    if (examined.has(realPath)) continue;
+    examined.add(realPath);
+    const { name: fmName, parseProblem, readProblem } = personaFrontmatterName(candidate);
+    if (readProblem !== undefined) {
+      // existsSync passed but the read failed — e.g. a directory named
+      // `<name>.md`, or a permission error. Without this guard the raw fs
+      // error (EISDIR/EACCES) would escape with no compile-error framing.
+      rejections.push({
+        path: candidate,
+        kind: 'unreadable',
+        reason: `could not be read: ${readProblem}`,
+      });
+      continue;
+    }
+    if (fmName === undefined) {
+      const parseNote =
+        parseProblem === undefined ? '' : ` (frontmatter YAML failed to parse: ${parseProblem})`;
+      rejections.push({
+        path: candidate,
+        kind: 'no-name',
+        reason: `has no 'name:' frontmatter${parseNote}`,
+      });
+      continue;
+    }
+    if (fmName !== name) {
+      rejections.push({
+        path: candidate,
+        kind: 'name-mismatch',
+        reason: `declares frontmatter name: '${fmName}' but the pipeline references '${name}'`,
+      });
+      continue;
+    }
+    return candidate;
+  }
+  if (rejections.length === 0) throw missingPersonaError(contextLabel, name, attempted);
+  if (rejections.length === 1) throw singleLayerRejectionError(rejections[0], name, contextLabel);
+  throw new Error(
+    `Compile error: ${contextLabel} references agent '${name}' but no layer's persona file satisfies it — ` +
+      `claude registers agents by frontmatter name, so '--agent ${name}' would not load any of these ` +
+      `files and the spawn would silently run persona-less:\n` +
+      rejections.map((r) => `  ${r.path} ${r.reason}`).join('\n') +
+      '\n' +
+      `Align one file's frontmatter name with the reference (or rename the reference); ` +
+      `if a file has no frontmatter, add it at the top:\n` +
+      `  ---\n  name: ${name}\n  ---`,
+  );
+}
+
+/** Resolve agent `name`'s persona file across the layered `agentDirs` and
+ *  return the resolved path; throws a compile error otherwise. Shared by the
  *  flow-walking check (`validateAgentFilesExist`) and emit-walker's inline
  *  human_gate persona probe so both sites enforce identical resolution
  *  semantics; `contextLabel` carries each site's error prefix
  *  (`pipeline '<name>'` / `human_gate interactive mode`).
  *
- *  The claude frontmatter check exists because claude registers agents by the
- *  frontmatter `name:` field, NOT the filename — a `reviewer.md` whose
- *  frontmatter says `name: other` (or has no frontmatter at all, as files
- *  written for the pre-delegation runtime may not) is invisible to
- *  `--agent reviewer`, and claude exits 0 and runs persona-less. The runtime
- *  init-roster guard (runtime/agent.ts) catches that at spawn; this catches
- *  it at compile time with a fix-it message. copilot stays existence-only:
- *  its resolution semantics are less verified, and it already fails loud at
- *  runtime on an unresolved `--agent`. */
+ *  Per-cli resolution semantics:
+ *  - claude: BY NAME ACROSS LAYERS, mirroring how claude itself registers
+ *    agents from both layers and resolves `--agent` by the frontmatter
+ *    `name:` field, NOT the filename. The first layer whose file's
+ *    frontmatter name equals the reference wins and ITS path is returned; a
+ *    layer that exists but doesn't satisfy is skipped, so e.g. a project
+ *    `reviewer.md` declaring `name: other` doesn't shadow a global
+ *    `reviewer.md` declaring `name: reviewer`. Only when no layer satisfies
+ *    does compile fail — without the check claude would exit 0 and run
+ *    persona-less. The runtime init-roster guard (runtime/agent.ts) catches
+ *    that at spawn; this catches it at compile time with a fix-it message.
+ *  - copilot: existence-only, first existing leaf wins. Its resolution
+ *    semantics are less verified, and it already fails loud at runtime on an
+ *    unresolved `--agent`. */
 export function validatePersonaFile(
   agentDirs: string[],
   cli: AgentCli,
   name: string,
   contextLabel: string,
 ): string {
-  const { found, attempted } = firstExisting(agentDirs, agentFileLeaf(cli, name));
-  if (found === null) {
-    throw new Error(
-      `Compile error: ${contextLabel} references agent '${name}' but no persona file exists at either layer:\n` +
-        attempted.map((p) => `  ${p}`).join('\n') +
-        '\n' +
-        `Create the file at either path (frontmatter only is fine for a bare-cli agent), or fix the agent name.`,
-    );
-  }
+  const leaf = agentFileLeaf(cli, name);
   if (cli === 'claude') {
-    const { name: fmName, parseProblem, readProblem } = personaFrontmatterName(found);
-    if (readProblem !== undefined) {
-      // existsSync passed but the read failed — e.g. a directory named
-      // `<name>.md`, or a permission error. Without this guard the raw fs
-      // error (EISDIR/EACCES) would escape with no compile-error framing.
-      throw new Error(
-        `Compile error: ${contextLabel} references agent '${name}' but its persona file at ` +
-          `${found} could not be read: ${readProblem}`,
-      );
-    }
-    if (fmName === undefined) {
-      const parseNote =
-        parseProblem === undefined ? '' : ` (frontmatter YAML failed to parse: ${parseProblem})`;
-      throw new Error(
-        `Compile error: ${contextLabel} references agent '${name}' but persona file ${found} ` +
-          `has no 'name:' frontmatter${parseNote} — claude registers agents by frontmatter name, ` +
-          `so '--agent ${name}' would not load this file and the spawn would run persona-less. ` +
-          `Add frontmatter at the top of the file:\n` +
-          `  ---\n  name: ${name}\n  ---`,
-      );
-    }
-    if (fmName !== name) {
-      throw new Error(
-        `Compile error: ${contextLabel}: persona file ${found} declares frontmatter name: '${fmName}' ` +
-          `but the pipeline references '${name}' — claude resolves --agent by frontmatter name, ` +
-          `so this spawn would silently run persona-less. Align the frontmatter name with the ` +
-          `reference (or rename the reference).`,
-      );
-    }
+    return resolveClaudePersonaByName(agentDirs, leaf, name, contextLabel);
   }
+  const { found, attempted } = firstExisting(agentDirs, leaf);
+  if (found === null) throw missingPersonaError(contextLabel, name, attempted);
   return found;
 }
 
 /** Walk the flow and collect every agent name referenced by a `step:` or
  *  by a `review_loop`'s string-form writer/reviewer. Verify each via
  *  `validatePersonaFile`: a persona file must exist in at least one layer of
- *  `agentDirs`, and (claude only) its frontmatter `name:` must match the
- *  reference. Missing in every layer → compile error naming every attempted
- *  path. Pushes the "persona file exists and is loadable" check up from
+ *  `agentDirs`, and (claude only) some layer's file must declare a
+ *  frontmatter `name:` matching the reference. Missing in every layer →
+ *  compile error naming every attempted path. Pushes the "persona file exists and is loadable" check up from
  *  runtime to compile time, so a typo or missing file fails before the
  *  pipeline starts running rather than mid-flight.
  *

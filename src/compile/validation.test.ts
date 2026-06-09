@@ -3,7 +3,7 @@ import { mkdirSync, writeFileSync } from 'fs';
 import { homedir } from 'os';
 import * as path from 'path';
 import { compile } from './index.js';
-import { agentFileLeaf } from './validation.js';
+import { agentFileLeaf, validatePersonaFile } from './validation.js';
 import { setupCompileTestEnv, setupFixture } from './test-helpers.js';
 
 let teardown: () => void;
@@ -417,6 +417,99 @@ flow:
     expect(() => compile(yamlPath)).toThrow(
       /Compile error: .*references agent 'reviewer' but its persona file at \.claude\/agents\/reviewer\.md could not be read: /,
     );
+  });
+
+  describe('layered by-name resolution', () => {
+    /** setupCompileTestEnv points cwd and $HOME at the SAME tmp dir, which
+     *  collapses claude's project (`.claude/agents/`) and global
+     *  (`~/.claude/agents/`) layers into one directory — fine for the
+     *  single-layer tests above, useless for layered ones. chdir into a
+     *  `project/` subdir so the two layers are distinct directories, as in a
+     *  real checkout (teardown's chdir + rmSync still cleans up: the subdir
+     *  lives inside the sandbox tmp dir). Creates both agents dirs and
+     *  returns the global one for seeding. */
+    function splitProjectLayerFromGlobal(): string {
+      const projectRoot = path.join(process.cwd(), 'project');
+      mkdirSync(path.join(projectRoot, '.claude', 'agents'), { recursive: true });
+      process.chdir(projectRoot);
+      const globalAgents = path.join(homedir(), '.claude', 'agents');
+      mkdirSync(globalAgents, { recursive: true });
+      return globalAgents;
+    }
+
+    it('resolves past a mismatched project-layer name to a matching global-layer persona', () => {
+      // The regression case: claude registers agents from BOTH layers and
+      // resolves --agent by frontmatter name, so a project reviewer.md
+      // declaring `name: other-name` is a DIFFERENT agent, not a broken
+      // reference — `--agent reviewer` loads the global file and the run
+      // works. Compile must mirror that and pass.
+      const globalAgents = splitProjectLayerFromGlobal();
+      writeFileSync('.claude/agents/reviewer.md', '---\nname: other-name\n---\nbody\n');
+      writeFileSync(path.join(globalAgents, 'reviewer.md'), '---\nname: reviewer\n---\nbody\n');
+      const yamlPath = setupFixture({ yaml: yamlReferencing('reviewer') });
+      expect(() => compile(yamlPath)).not.toThrow();
+    });
+
+    it('returns the satisfying layer path, not the first existing layer', () => {
+      // Direct contract check (the resolved path is invisible through
+      // compile()): the path handed back is the file claude will actually
+      // load, so a skipped project file must not be returned. The dirs
+      // mirror compile's claude AGENT_DIR_DEFAULTS layers.
+      const globalAgents = splitProjectLayerFromGlobal();
+      writeFileSync('.claude/agents/reviewer.md', '---\nname: other-name\n---\nbody\n');
+      const globalPath = path.join(globalAgents, 'reviewer.md');
+      writeFileSync(globalPath, '---\nname: reviewer\n---\nbody\n');
+      const resolved = validatePersonaFile(
+        ['.claude/agents/', '~/.claude/agents/'],
+        'claude',
+        'reviewer',
+        'pipeline test',
+      );
+      expect(resolved).toBe(globalPath);
+    });
+
+    it('accepts a matching project layer without consulting the global layer', () => {
+      // Project-first precedence: the satisfying project file resolves the
+      // reference on its own, so a global file that would fail the check
+      // (mismatched name) must not be able to break compile.
+      const globalAgents = splitProjectLayerFromGlobal();
+      writeFileSync('.claude/agents/reviewer.md', '---\nname: reviewer\n---\nbody\n');
+      writeFileSync(path.join(globalAgents, 'reviewer.md'), '---\nname: wrong-name\n---\nbody\n');
+      const yamlPath = setupFixture({ yaml: yamlReferencing('reviewer') });
+      expect(() => compile(yamlPath)).not.toThrow();
+    });
+
+    it('throws one error naming every examined layer when no layer satisfies the reference', () => {
+      const globalAgents = splitProjectLayerFromGlobal();
+      // Two different rejection reasons, so the aggregated error must carry
+      // each path's own: the project file mismatches, the global file has
+      // no frontmatter at all.
+      writeFileSync('.claude/agents/reviewer.md', '---\nname: other-name\n---\nbody\n');
+      writeFileSync(path.join(globalAgents, 'reviewer.md'), 'You are a meticulous reviewer.\n');
+      const yamlPath = setupFixture({ yaml: yamlReferencing('reviewer') });
+      let message = '';
+      try {
+        compile(yamlPath);
+      } catch (e) {
+        message = e instanceof Error ? e.message : String(e);
+      }
+      // ONE thrown error covers everything asserted below.
+      expect(message).toMatch(
+        /Compile error: pipeline 'fm-check' references agent 'reviewer' but no layer's persona file satisfies it/,
+      );
+      // The project line (relative spelling, listed first in layer order)
+      // with the mismatch reason...
+      expect(message).toMatch(
+        /\n {2}\.claude\/agents\/reviewer\.md declares frontmatter name: 'other-name' but the pipeline references 'reviewer'\n/,
+      );
+      // ...the global line (absolute, ~-expanded spelling) with the
+      // no-frontmatter reason...
+      expect(message).toMatch(
+        /\n {2}\/[^\n]*\.claude\/agents\/reviewer\.md has no 'name:' frontmatter\n/,
+      );
+      // ...and the fix-it tail.
+      expect(message).toMatch(/add it at the top:\n {2}---\n {2}name: reviewer\n {2}---/);
+    });
   });
 
   it('accepts a copilot persona without frontmatter (existence-only check)', () => {
