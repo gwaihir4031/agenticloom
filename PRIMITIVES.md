@@ -122,16 +122,16 @@ A persona gate (`agent:` present) delegates via `--agent` on both CLIs.
 
 Spawn one agent once.
 
-| Field        | Req? | Type                        | Notes                                                                                                                                         |
-| ------------ | ---- | --------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
-| `step`       | yes  | `AgentRef`                  | Persona name (string) OR inline `{ prompt, name }` agent. See "Agent references" above. A persona resolves via project then global discovery. |
-| `input`      | no   | `ValueExpr`                 | Mutually exclusive with `inputs`.                                                                                                             |
-| `inputs`     | no   | `Record<string, ValueExpr>` | Mutually exclusive with `input`. Multiple labeled inputs.                                                                                     |
-| `bind`       | no   | `BindName`                  | Binds the step's `produces:` path (or its raw output if no `produces`) for downstream `$ref` use.                                             |
-| `produces`   | no   | `string` (non-empty)        | Output file path the agent writes. Required when `on_fail` is set.                                                                            |
-| `extra_args` | no   | `string[]`                  | Per-step CLI args. REPLACES `default_extra_args` (does not concat). `extra_args: []` is an explicit opt-OUT (no `--model`).                   |
-| `timeout`    | no   | `number` (positive int)     | Milliseconds. Kills the child with SIGTERM on expiry. Default 1,800,000 (30 min) applied by `runAgent` when unset.                            |
-| `on_fail`    | no   | `OnFail`                    | Makes this step a retry-zone gate. See OnFail below. Requires `produces:`.                                                                    |
+| Field        | Req? | Type                        | Notes                                                                                                                                                                               |
+| ------------ | ---- | --------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `step`       | yes  | `AgentRef`                  | Persona name (string) OR inline `{ prompt, name }` agent. See "Agent references" above. A persona resolves via project then global discovery.                                       |
+| `input`      | no   | `ValueExpr`                 | Mutually exclusive with `inputs`.                                                                                                                                                   |
+| `inputs`     | no   | `Record<string, ValueExpr>` | Mutually exclusive with `input`. Multiple labeled inputs.                                                                                                                           |
+| `bind`       | no   | `BindName`                  | Binds the step's `produces:` path (or its raw output if no `produces`) for downstream `$ref` use.                                                                                   |
+| `produces`   | no   | `string` (non-empty)        | Output file path the agent writes. Required when `on_fail` is set.                                                                                                                  |
+| `extra_args` | no   | `string[]`                  | Per-step CLI args. REPLACES `default_extra_args` (does not concat). `extra_args: []` is an explicit opt-OUT (no `--model`). May not contain `--agent` (loom owns agent delegation). |
+| `timeout`    | no   | `number` (positive int)     | Milliseconds. Kills the child with SIGTERM on expiry. Default 1,800,000 (30 min) applied by `runAgent` when unset.                                                                  |
+| `on_fail`    | no   | `OnFail`                    | Makes this step a retry-zone gate. See OnFail below. Requires `produces:`.                                                                                                          |
 
 **Cross-field rules**
 
@@ -276,7 +276,7 @@ confirm fires on REPL exit).
 | `agent`       | conditional | `string`    | Optional under `interactive: true`. Present → persona gate (delegated via `--agent`). Omitted → general gate (all tools; the gate `prompt:` is the task). Forbidden when `interactive` absent. |
 | `input`       | conditional | `ValueExpr` | Required iff `interactive: true`. Forbidden otherwise.                                                                                                                                         |
 | `prompt`      | conditional | `string`    | Required iff `interactive: true`. Forbidden otherwise. The agent's initial message.                                                                                                            |
-| `extra_args`  | conditional | `string[]`  | Only valid when `interactive: true`. REPLACES `default_extra_args`. `extra_args: []` is an explicit opt-OUT (no `--model`).                                                                    |
+| `extra_args`  | conditional | `string[]`  | Only valid when `interactive: true`. REPLACES `default_extra_args`. `extra_args: []` is an explicit opt-OUT (no `--model`). May not contain `--agent`.                                         |
 
 **Cross-field rules**
 
@@ -652,13 +652,13 @@ must be present. `{}` is rejected.
 
 The YAML document root.
 
-| Field                | Req? | Type                    | Notes                                                                                     |
-| -------------------- | ---- | ----------------------- | ----------------------------------------------------------------------------------------- |
-| `pipeline`           | yes  | `string`                | Pipeline name (used in run IDs, mermaid diagrams, error messages).                        |
-| `cli`                | yes  | `'claude' \| 'copilot'` | Which CLI loom spawns for each agent.                                                     |
-| `default_extra_args` | no   | `string[]`              | Default CLI args for every spawn. Per-step `extra_args:` REPLACES this (does not concat). |
-| `inputs`             | no   | `BindName[]`            | Defaults to `[]`. CLI-supplied input binds (positional args to `loom run`).               |
-| `flow`               | yes  | `FlowItem[]`            | The sequence of primitives to execute.                                                    |
+| Field                | Req? | Type                    | Notes                                                                                                                                             |
+| -------------------- | ---- | ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pipeline`           | yes  | `string`                | Pipeline name (used in run IDs, mermaid diagrams, error messages).                                                                                |
+| `cli`                | yes  | `'claude' \| 'copilot'` | Which CLI loom spawns for each agent.                                                                                                             |
+| `default_extra_args` | no   | `string[]`              | Default CLI args for every spawn. Per-step `extra_args:` REPLACES this (does not concat). May not contain `--agent` (loom owns agent delegation). |
+| `inputs`             | no   | `BindName[]`            | Defaults to `[]`. CLI-supplied input binds (positional args to `loom run`).                                                                       |
+| `flow`               | yes  | `FlowItem[]`            | The sequence of primitives to execute.                                                                                                            |
 
 **Example**
 

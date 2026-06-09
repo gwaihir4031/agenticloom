@@ -60,6 +60,19 @@ describe('Pipeline schema', () => {
     ).toBe(true);
   });
 
+  it("rejects '--agent' in default_extra_args (loom owns agent delegation)", () => {
+    // extra args land AFTER loom's own `--agent <name>` in the spawn argv, so
+    // a user --agent would silently win and replace every step's persona.
+    const result = Pipeline.safeParse({
+      ...validMinimal,
+      default_extra_args: ['--agent', 'helper'],
+    });
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error.issues[0].message).toMatch(/must not contain '--agent'/);
+    }
+  });
+
   it('defaults inputs to []', () => {
     const { inputs, ...withoutInputs } = validMinimal;
     const result = Pipeline.parse(withoutInputs);
@@ -134,6 +147,13 @@ describe('StepItem schema', () => {
 
   it('accepts optional extra_args', () => {
     expect(StepItem.safeParse({ step: 'a', extra_args: ['--model', 'haiku'] }).success).toBe(true);
+  });
+
+  it("rejects '--agent' in extra_args, in both flag forms", () => {
+    expect(StepItem.safeParse({ step: 'a', extra_args: ['--agent', 'helper'] }).success).toBe(
+      false,
+    );
+    expect(StepItem.safeParse({ step: 'a', extra_args: ['--agent=helper'] }).success).toBe(false);
   });
 
   it('rejects unknown keys (strict mode)', () => {
@@ -454,6 +474,18 @@ describe('HumanGateItem schema', () => {
       },
     };
     expect(HumanGateItem.safeParse(valid).success).toBe(true);
+  });
+
+  it("rejects '--agent' in a gate's extra_args", () => {
+    const result = HumanGateItem.safeParse({
+      human_gate: {
+        interactive: true,
+        input: '$x',
+        prompt: 'iterate',
+        extra_args: ['--agent', 'helper'],
+      },
+    });
+    expect(result.success).toBe(false);
   });
 
   it('rejects extra_args in plain mode (without interactive)', () => {

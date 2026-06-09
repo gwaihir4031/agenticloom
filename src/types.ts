@@ -60,6 +60,21 @@ export const OnFail = z.strictObject({
   revise_with: ReviseWith,
 });
 
+/** Shared schema for `default_extra_args:` / `extra_args:`. Rejects a
+ *  smuggled `--agent`: loom owns agent delegation, and extra args are
+ *  appended AFTER loom's own `--agent <name>` in the spawn argv, so a user
+ *  `--agent` would silently win (last flag wins) and replace the
+ *  compile-validated persona — or give an inline agent a persona it must
+ *  not have. */
+const ExtraArgs = z
+  .array(z.string())
+  .refine((a) => !a.some((s) => s === '--agent' || s.startsWith('--agent=')), {
+    error:
+      "extra_args: must not contain '--agent' — loom owns agent delegation " +
+      '(the persona comes from step:/writer:/reviewer:/agent:); a trailing --agent ' +
+      'would silently replace the compile-validated persona.',
+  });
+
 /** A general (inline) agent: no persona file, all tools. `prompt` is the agent's
  *  task — required and static (no `$ref` interpolation; data flows via `input:` /
  *  `inputs:`). `name` is required — the agent's identity in logs, window titles,
@@ -266,7 +281,7 @@ export const StepItemBody = z.strictObject({
   // args, including no `--model` flag, falling back to the cli's
   // built-in default model. To use the pipeline default unchanged, omit
   // the field entirely.
-  extra_args: z.array(z.string()).optional(),
+  extra_args: ExtraArgs.optional(),
   // Per-step timeout in milliseconds. When set, the runtime arms a
   // setTimeout that kills the child with SIGTERM and rejects with
   // `agent '<name>' timed out after <ms>ms` if it fires. Default 30 min
@@ -373,7 +388,7 @@ export const HumanGateItemBody = z.strictObject({
       // is an explicit opt-OUT — the gate's argv has zero extra flags
       // including no `--model`, so the cli uses its built-in default model.
       // To use the pipeline default unchanged, omit the field entirely.
-      extra_args: z.array(z.string()).optional(),
+      extra_args: ExtraArgs.optional(),
     })
     .refine(
       (v) => {
@@ -514,7 +529,7 @@ export const FlowItemSchema: z.ZodType<FlowItem> = z.lazy(() =>
 export const Pipeline = z.strictObject({
   pipeline: z.string(),
   cli: z.enum(['claude', 'copilot']),
-  default_extra_args: z.array(z.string()).optional(),
+  default_extra_args: ExtraArgs.optional(),
   inputs: z.array(BindName).default([]),
   flow: z.array(FlowItemSchema),
 });
