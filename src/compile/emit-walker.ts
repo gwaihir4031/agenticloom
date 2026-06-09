@@ -380,13 +380,21 @@ export function emitPreCursorItem(
   return [];
 }
 
+/** Per-compile constants threaded through the emit recursion as one value.
+ *  Everything here is invariant across the whole walk — recursion never
+ *  varies it — so new pipeline-level constants join this object instead of
+ *  growing every recursive call site by another positional param. */
+export interface EmitCtx {
+  readonly agentDirs: string[];
+  readonly cli: AgentCli;
+}
+
 export function emit(
   items: FlowItem[],
   pad: string,
   scope: Map<string, ProducerInfo>,
   fresh: () => string,
-  agentDirs: string[],
-  cli: AgentCli,
+  ctx: EmitCtx,
   nextScopeId: () => number,
   currentScopeId: number,
   pathScope?: Map<string, string>,
@@ -759,8 +767,7 @@ export function emit(
           pad + '    ',
           subScope,
           fresh,
-          agentDirs,
-          cli,
+          ctx,
           nextScopeId,
           subflowScopeId,
           subPathScope,
@@ -850,7 +857,7 @@ export function emit(
           // claude's frontmatter-name check, so a gate persona that claude
           // would not register fails at compile time too. A general gate
           // (agent omitted) spawns no persona, so there is nothing to probe.
-          validatePersonaFile(agentDirs, cli, agent, 'human_gate interactive mode');
+          validatePersonaFile(ctx.agentDirs, ctx.cli, agent, 'human_gate interactive mode');
         }
         checkConsume(input, `${gateLabel}.input`, scope);
         // `input:` resolves to the artifact PATH (a string identifier referring
@@ -1096,8 +1103,7 @@ export function emit(
             pad + '    ',
             childScope,
             fresh,
-            agentDirs,
-            cli,
+            ctx,
             nextScopeId,
             childScopeId,
             childPathScope,
@@ -1204,8 +1210,7 @@ export function emit(
             pad + '  ',
             new Map(scope),
             fresh,
-            agentDirs,
-            cli,
+            ctx,
             nextScopeId,
             thenScopeId,
             thenScope,
@@ -1221,8 +1226,7 @@ export function emit(
               pad + '  ',
               new Map(scope),
               fresh,
-              agentDirs,
-              cli,
+              ctx,
               nextScopeId,
               elseScopeId!,
               elseScope,
@@ -1333,8 +1337,7 @@ export function emit(
             pad + '  ',
             new Map(scope),
             fresh,
-            agentDirs,
-            cli,
+            ctx,
             nextScopeId,
             thenScopeId,
             thenScope,
@@ -1364,8 +1367,7 @@ export function emit(
               pad + '  ',
               new Map(scope),
               fresh,
-              agentDirs,
-              cli,
+              ctx,
               nextScopeId,
               elseScopeId!,
               elseScope,
@@ -1518,8 +1520,7 @@ export function emit(
         pad + '  ',
         bodyScope,
         fresh,
-        agentDirs,
-        cli,
+        ctx,
         nextScopeId,
         bodyScopeId,
         bodyPathScope,
