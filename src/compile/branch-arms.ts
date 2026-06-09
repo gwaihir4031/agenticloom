@@ -60,7 +60,7 @@ export function classifyArmTerminal(
       // than emitting a `return undefined` that masks the bug.
       if (last.bind === undefined) {
         throw new Error(
-          `Internal compile error: classifyArmTerminal saw a terminal step '${agentLabel(last.step, 'inline-agent')}' ` +
+          `Internal compile error: classifyArmTerminal saw a terminal step '${agentLabel(last.step)}' ` +
             `with produces: but no bind. The arm emit should have synthesized a fresh bind ` +
             `before classifying.`,
         );
@@ -69,7 +69,7 @@ export function classifyArmTerminal(
     }
     return {
       fileBound: false,
-      itemLabel: `step '${agentLabel(last.step, last.bind ?? 'inline-agent')}'`,
+      itemLabel: `step '${agentLabel(last.step)}'`,
     };
   }
 

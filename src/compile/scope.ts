@@ -99,8 +99,7 @@ export interface ProducerInfo {
    *  consumer who wrote the file it's about to read. For aggregates and
    *  pipeline inputs no real agent exists — use a synthetic label. For a
    *  `step:` producer this is the resolved agent label: a persona name is
-   *  itself; an inline agent is its `name`, else the step's bind, else a
-   *  flow-position token. */
+   *  itself; an inline agent is its required `name`. */
   agentName: string;
   /** Baked inline-agent prompt — set only when this producer's `step:` is the
    *  inline (object) form. Threaded into the aggregate parse-retry rewrite

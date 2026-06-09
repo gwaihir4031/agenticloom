@@ -119,7 +119,6 @@ export function emitRunAgentExpr(
   it: StepItemT,
   scope: Map<string, ProducerInfo>,
   overrides: RunAgentEmitOverrides = {},
-  flowIndex?: number,
 ): string {
   const { promptOverride } = overrides;
   const normalInputExpr = it.inputs
@@ -165,16 +164,13 @@ export function emitRunAgentExpr(
     inputPathsClause = inputPaths.length > 0 ? `, inputPaths: [${inputPaths.join(', ')}]` : '';
   }
   // Resolve the agent reference to its runAgent name. A persona name emits
-  // byte-identically to today (JSON.stringify of the string). An inline agent
-  // emits its label — name, else the step's bind, else a flow-position
-  // `inline-<i>` token — and ALWAYS carries `inlinePrompt:` in opts: the baked
-  // prompt is the agent's identity, independent of any promptOverride (which
-  // only swaps the INPUT arg). Routing every re-emit (on_fail retry via
-  // buildRetryBody, parallel-child re-fire via emitParallelRetry) through here
-  // re-bakes the inline prompt automatically. Those re-emit paths only handle
-  // bind-bearing members, so `it.bind` is the fallback there and `flowIndex`
-  // is consulted only for a bindless inline step on the main pass.
-  const agentArg = JSON.stringify(agentLabel(it.step, it.bind ?? `inline-${flowIndex}`));
+  // byte-identically to a plain string (JSON.stringify of the string). An
+  // inline agent emits its required `name` and ALWAYS carries `inlinePrompt:`
+  // in opts: the baked prompt is the agent's identity, independent of any
+  // promptOverride (which only swaps the INPUT arg). Routing every re-emit
+  // (on_fail retry via buildRetryBody, parallel-child re-fire via
+  // emitParallelRetry) through here re-bakes the inline prompt automatically.
+  const agentArg = JSON.stringify(agentLabel(it.step));
   const inlinePromptClause = isInlineAgent(it.step)
     ? `, inlinePrompt: ${JSON.stringify(it.step.prompt)}`
     : '';

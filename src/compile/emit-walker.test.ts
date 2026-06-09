@@ -4745,9 +4745,8 @@ flow:
 });
 
 describe('emit shape — inline-agent step', () => {
-  // An inline `step:` (object form) resolves to a label — name, else the
-  // step's bind, else a flow-position `inline-<i>` token — used as the
-  // runAgent name, and ALWAYS bakes its prompt into the opts bag as
+  // An inline `step:` (object form) resolves to its required `name` — used as
+  // the runAgent name — and ALWAYS bakes its prompt into the opts bag as
   // `inlinePrompt:`. Persona-name steps emit byte-identically (no inlinePrompt).
 
   it('uses the inline name as the runAgent name and bakes inlinePrompt', () => {
@@ -4770,7 +4769,9 @@ flow:
     expect(emitted).toMatch(/inlinePrompt: "Review the diff and emit a verdict\."/);
   });
 
-  it('falls back to the step bind as the runAgent name when the inline agent is nameless', () => {
+  it('uses the inline name as the runAgent name even when a bind is set', () => {
+    // The bind is the emit-internal variable name; the label is always the
+    // inline agent's required `name`.
     const yamlPath = setupFixture({
       yaml: `
 pipeline: p
@@ -4779,20 +4780,20 @@ inputs: [x]
 flow:
   - step:
       prompt: Do the thing.
+      name: doer
     bind: myStep
     input: $x
     produces: out.json
 `,
     });
     const emitted = compile(yamlPath);
-    expect(emitted).toMatch(/runAgent\("myStep",/);
+    expect(emitted).toMatch(/const myStep = await runAgent\("doer",/);
     expect(emitted).toMatch(/inlinePrompt: "Do the thing\."/);
   });
 
-  it('falls back to a flow-position inline-<i> token when nameless and bindless', () => {
-    // The inline step is the second top-level flow item (index 1), so its
-    // resolved label is `inline-1` — the positional fallback tracks the flow
-    // index, not the mutating fresh() counter.
+  it('uses the inline name as the runAgent name for a bindless step', () => {
+    // A bindless step gets a synthesized `_N` variable from fresh(); the
+    // label stays the inline agent's required `name`, never the variable.
     const yamlPath = setupFixture({
       agents: ['persona-pre'],
       yaml: `
@@ -4805,13 +4806,42 @@ flow:
     produces: pre.md
   - step:
       prompt: Do the thing.
+      name: doer
     input: $x
     produces: out.json
 `,
     });
     const emitted = compile(yamlPath);
-    expect(emitted).toMatch(/runAgent\("inline-1",/);
+    expect(emitted).toMatch(/runAgent\("doer",/);
     expect(emitted).toMatch(/inlinePrompt: "Do the thing\."/);
+  });
+
+  it('uses the inline name as the runAgent name inside a parallel block', () => {
+    // A bindless parallel child gets a synthesized `_N` destructuring name
+    // from resultNameFor; that emit-internal variable must never leak into
+    // the runAgent name — the label is exactly the inline agent's `name`.
+    const yamlPath = setupFixture({
+      agents: ['persona-a'],
+      yaml: `
+pipeline: p
+cli: claude
+inputs: [x]
+flow:
+  - parallel:
+      - step: persona-a
+        input: $x
+        produces: a.md
+      - step:
+          prompt: Scan for issues.
+          name: par-scanner
+        input: $x
+        produces: scan.json
+`,
+    });
+    const emitted = compile(yamlPath);
+    expect(emitted).toMatch(/runAgent\("par-scanner",/);
+    expect(emitted).not.toMatch(/runAgent\("_\d+",/);
+    expect(emitted).toMatch(/inlinePrompt: "Scan for issues\."/);
   });
 
   it('emits a persona-name step byte-identically — no inlinePrompt clause', () => {
@@ -4927,12 +4957,10 @@ flow:
 });
 
 describe('emit shape — inline-agent review_loop writer/reviewer', () => {
-  // An inline `writer:` or single `reviewer:` (object form) resolves to a label
-  // — name, else (writer only) the loop bind, else a flow-position token — used
-  // as the reviewLoop `writer:` / `reviewer:` string, plus a baked
-  // `writerInlinePrompt:` / `reviewerInlinePrompt:`. The reviewer's positional
-  // fallback is `inline-<i>-reviewer`, distinct from the writer's `inline-<i>`.
-  // Persona writer+reviewer emit byte-identically (no inline-prompt fields).
+  // An inline `writer:` or single `reviewer:` (object form) resolves to its
+  // required `name` — used as the reviewLoop `writer:` / `reviewer:` string —
+  // plus a baked `writerInlinePrompt:` / `reviewerInlinePrompt:`. Persona
+  // writer+reviewer emit byte-identically (no inline-prompt fields).
 
   it('bakes an inline named writer as writer label + writerInlinePrompt (persona reviewer)', () => {
     const yamlPath = setupFixture({
@@ -4961,7 +4989,9 @@ flow:
     expect(emitted).not.toMatch(/reviewerInlinePrompt:/);
   });
 
-  it('falls back to the loop bind as the writer label when the inline writer is nameless', () => {
+  it('uses the inline writer name as the writer label even when the loop has a bind', () => {
+    // The loop bind is the emit-internal variable; the writer label is always
+    // the inline agent's required `name`.
     const yamlPath = setupFixture({
       agents: ['r'],
       yaml: `
@@ -4972,6 +5002,7 @@ flow:
   - review_loop:
       writer:
         prompt: Draft the spec.
+        name: drafter
       reviewer: r
       input: $x
       bind: spec
@@ -4981,33 +5012,7 @@ flow:
 `,
     });
     const emitted = compile(yamlPath);
-    expect(emitted).toMatch(/writer: "spec",/);
-    expect(emitted).toMatch(/writerInlinePrompt: "Draft the spec\.",/);
-  });
-
-  it('falls back to a flow-position inline-<i> token when the inline writer is nameless and bindless', () => {
-    // The review_loop is the only top-level item (index 0), so the writer's
-    // positional fallback is `inline-0` — the flow index, not the mutating
-    // fresh() counter.
-    const yamlPath = setupFixture({
-      agents: ['r'],
-      yaml: `
-pipeline: p
-cli: claude
-inputs: [x]
-flow:
-  - review_loop:
-      writer:
-        prompt: Draft the spec.
-      reviewer: r
-      input: $x
-      writer_produces: out.md
-      reviewer_produces: review.json
-      verdict_field: status
-`,
-    });
-    const emitted = compile(yamlPath);
-    expect(emitted).toMatch(/writer: "inline-0",/);
+    expect(emitted).toMatch(/writer: "drafter",/);
     expect(emitted).toMatch(/writerInlinePrompt: "Draft the spec\.",/);
   });
 
@@ -5036,32 +5041,6 @@ flow:
     // The persona writer carries no inline prompt.
     expect(emitted).toMatch(/writer: "w",/);
     expect(emitted).not.toMatch(/writerInlinePrompt:/);
-  });
-
-  it('falls back to inline-<i>-reviewer for a nameless inline single reviewer', () => {
-    // The reviewer's positional fallback (`inline-0-reviewer`) is distinct from
-    // the writer's (`inline-<i>`) so a nameless writer and a nameless reviewer
-    // in the same loop never collide on a label.
-    const yamlPath = setupFixture({
-      agents: ['w'],
-      yaml: `
-pipeline: p
-cli: claude
-inputs: [x]
-flow:
-  - review_loop:
-      writer: w
-      reviewer:
-        prompt: Audit the draft.
-      input: $x
-      writer_produces: out.md
-      reviewer_produces: review.json
-      verdict_field: status
-`,
-    });
-    const emitted = compile(yamlPath);
-    expect(emitted).toMatch(/reviewer: "inline-0-reviewer",/);
-    expect(emitted).toMatch(/reviewerInlinePrompt: "Audit the draft\.",/);
   });
 
   it('bakes both inline writer and inline reviewer prompts (no persona files needed)', () => {

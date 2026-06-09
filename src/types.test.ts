@@ -1383,15 +1383,15 @@ describe('FlowItem variant discriminators are unique', () => {
 // the union through.
 
 describe('InlineAgent schema', () => {
-  it('accepts a minimal inline agent (prompt only)', () => {
-    expect(InlineAgent.safeParse({ prompt: 'do the thing' }).success).toBe(true);
+  it('accepts an inline agent with prompt and a valid name', () => {
+    // The name regex is broader than BindName: a digit may lead, and '.' / '-'
+    // are allowed in non-leading positions (an fs-safe identity for logs /
+    // windows / mermaid nodes).
+    expect(InlineAgent.safeParse({ prompt: 'p', name: 'code-reviewer.v2' }).success).toBe(true);
   });
 
-  it('accepts an inline agent with a valid name label', () => {
-    // The label regex is broader than BindName: a digit may lead, and '.' / '-'
-    // are allowed in non-leading positions (an fs-safe label for logs / windows
-    // / mermaid nodes).
-    expect(InlineAgent.safeParse({ prompt: 'p', name: 'code-reviewer.v2' }).success).toBe(true);
+  it('rejects an inline agent missing name', () => {
+    expect(InlineAgent.safeParse({ prompt: 'do the thing' }).success).toBe(false);
   });
 
   it('rejects an inline agent missing prompt', () => {
@@ -1399,7 +1399,7 @@ describe('InlineAgent schema', () => {
   });
 
   it('rejects an inline agent with an empty prompt string', () => {
-    expect(InlineAgent.safeParse({ prompt: '' }).success).toBe(false);
+    expect(InlineAgent.safeParse({ prompt: '', name: 'x' }).success).toBe(false);
   });
 
   it('rejects a name with a leading underscore', () => {
@@ -1417,7 +1417,7 @@ describe('InlineAgent schema', () => {
   });
 
   it('rejects unknown keys (strict mode)', () => {
-    expect(InlineAgent.safeParse({ prompt: 'p', unknown_key: 'x' }).success).toBe(false);
+    expect(InlineAgent.safeParse({ prompt: 'p', name: 'n', unknown_key: 'x' }).success).toBe(false);
   });
 });
 
@@ -1427,7 +1427,7 @@ describe('AgentRef schema', () => {
   });
 
   it('accepts an inline-agent object', () => {
-    expect(AgentRef.safeParse({ prompt: 'do the thing' }).success).toBe(true);
+    expect(AgentRef.safeParse({ prompt: 'do the thing', name: 'doer' }).success).toBe(true);
   });
 
   it('rejects an object that satisfies neither arm (missing prompt)', () => {
@@ -1443,29 +1443,17 @@ describe('AgentRef read helpers — isInlineAgent', () => {
   });
 
   it('returns true for an inline-agent object', () => {
-    expect(isInlineAgent({ prompt: 'p' })).toBe(true);
+    expect(isInlineAgent({ prompt: 'p', name: 'n' })).toBe(true);
   });
 });
 
 describe('AgentRef read helpers — agentLabel', () => {
   it('returns the persona name itself for a string ref', () => {
-    expect(agentLabel('code-reviewer', 'fallback')).toBe('code-reviewer');
+    expect(agentLabel('persona')).toBe('persona');
   });
 
-  it('returns the fallback for an inline agent with no name', () => {
-    expect(agentLabel({ prompt: 'p' }, 'fallback')).toBe('fallback');
-  });
-
-  it('returns the name for an inline agent that has one', () => {
-    expect(agentLabel({ prompt: 'p', name: 'reviewer' }, 'fallback')).toBe('reviewer');
-  });
-
-  it('keeps an empty name rather than falling back (?? semantics, not ||)', () => {
-    // The helper uses `?? fallback`, so only null/undefined trigger the
-    // fallback — an empty-string name resolves to ''. Parsed refs never carry
-    // an empty name (the label regex forbids it), so this pins the operator
-    // choice rather than a reachable pipeline path.
-    expect(agentLabel({ prompt: 'p', name: '' }, 'fallback')).toBe('');
+  it('returns the required name for an inline agent', () => {
+    expect(agentLabel({ prompt: 'p', name: 'n' })).toBe('n');
   });
 });
 
@@ -1493,8 +1481,10 @@ describe('StepItem.step accepts the AgentRef union', () => {
     ).toBe(true);
   });
 
-  it('accepts an inline-agent object step (prompt only)', () => {
-    expect(StepItem.safeParse({ step: { prompt: 'Review the diff.' } }).success).toBe(true);
+  it('rejects an inline-agent object step missing name', () => {
+    // `name` is required on inline agents — it is the agent's identity in
+    // logs, window titles, error messages, and mermaid nodes.
+    expect(StepItem.safeParse({ step: { prompt: 'Review the diff.' } }).success).toBe(false);
   });
 
   it('rejects an inline-agent object step with no prompt', () => {
@@ -1504,13 +1494,15 @@ describe('StepItem.step accepts the AgentRef union', () => {
   });
 
   it('rejects an inline-agent object step with an empty prompt', () => {
-    expect(StepItem.safeParse({ step: { prompt: '' } }).success).toBe(false);
+    expect(StepItem.safeParse({ step: { prompt: '', name: 'reviewer' } }).success).toBe(false);
   });
 
   it('rejects an inline-agent object step with an unknown key (InlineAgent is strict)', () => {
     // The strictObject inside the union still rejects unknown keys when the
     // step is the inline form — the retype widened the field, not its rigor.
-    expect(StepItem.safeParse({ step: { prompt: 'p', persona: 'x' } }).success).toBe(false);
+    expect(StepItem.safeParse({ step: { prompt: 'p', name: 'n', persona: 'x' } }).success).toBe(
+      false,
+    );
   });
 
   it('preserves the inline object on parse alongside the other step fields', () => {
@@ -1563,12 +1555,14 @@ describe('review_loop.writer accepts the AgentRef union', () => {
     ).toBe(true);
   });
 
-  it('accepts an inline-agent object writer (prompt only)', () => {
+  it('rejects an inline-agent object writer missing name', () => {
+    // `name` is required on inline agents — it is the agent's identity in
+    // logs, window titles, error messages, and mermaid nodes.
     expect(
       ReviewLoopItem.safeParse({
         review_loop: { ...base, writer: { prompt: 'Draft the spec.' } },
       }).success,
-    ).toBe(true);
+    ).toBe(false);
   });
 
   it('rejects an inline-agent object writer with no prompt', () => {
@@ -1585,7 +1579,7 @@ describe('review_loop.writer accepts the AgentRef union', () => {
   it('rejects an inline-agent object writer with an empty prompt', () => {
     expect(
       ReviewLoopItem.safeParse({
-        review_loop: { ...base, writer: { prompt: '' } },
+        review_loop: { ...base, writer: { prompt: '', name: 'drafter' } },
       }).success,
     ).toBe(false);
   });
@@ -1623,12 +1617,14 @@ describe('review_loop.reviewer accepts the inline-agent arm', () => {
     ).toBe(true);
   });
 
-  it('accepts an inline-agent object reviewer (prompt only)', () => {
+  it('rejects an inline-agent object reviewer missing name', () => {
+    // `name` is required on inline agents — it is the agent's identity in
+    // logs, window titles, error messages, and mermaid nodes.
     expect(
       ReviewLoopItem.safeParse({
         review_loop: { ...base, reviewer: { prompt: 'Audit the draft.' } },
       }).success,
-    ).toBe(true);
+    ).toBe(false);
   });
 
   it('accepts a subflow-array reviewer (third arm, unchanged)', () => {
@@ -1653,7 +1649,7 @@ describe('review_loop.reviewer accepts the inline-agent arm', () => {
     // persona-name reviewer.
     const { reviewer_produces, ...rest } = base;
     const result = ReviewLoopItem.safeParse({
-      review_loop: { ...rest, reviewer: { prompt: 'Audit the draft.' } },
+      review_loop: { ...rest, reviewer: { prompt: 'Audit the draft.', name: 'auditor' } },
     });
     expect(result.success).toBe(false);
     if (!result.success) {
@@ -1666,7 +1662,7 @@ describe('review_loop.reviewer accepts the inline-agent arm', () => {
   it('rejects an inline reviewer missing verdict_field (single-agent rule applies to inline)', () => {
     const { verdict_field, ...rest } = base;
     const result = ReviewLoopItem.safeParse({
-      review_loop: { ...rest, reviewer: { prompt: 'Audit the draft.' } },
+      review_loop: { ...rest, reviewer: { prompt: 'Audit the draft.', name: 'auditor' } },
     });
     expect(result.success).toBe(false);
     if (!result.success) {

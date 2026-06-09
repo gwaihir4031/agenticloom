@@ -71,17 +71,13 @@ function walkItem(
   fresh: () => string,
   indent: string,
   bindNodes: Map<string, string>,
-  index: number,
 ): Walked {
   if (isStep(item)) {
     const id = fresh();
-    // Label the node by the resolved agent reference: a persona name is itself
-    // (byte-identical to before); an inline agent is its `name`, else the
-    // step's bind, else its flow-position `inline-<index>` token. The node id
-    // (`fresh()`) stays the Mermaid identifier; this is only the visible label.
-    lines.push(
-      `${indent}${id}(["${escapeLabel(agentLabel(item.step, item.bind ?? `inline-${index}`))}"])`,
-    );
+    // Label the node by the resolved agent reference: a persona name is itself;
+    // an inline agent is its required `name`. The node id (`fresh()`) stays the
+    // Mermaid identifier; this is only the visible label.
+    lines.push(`${indent}${id}(["${escapeLabel(agentLabel(item.step))}"])`);
     if (item.bind !== undefined) bindNodes.set(item.bind, id);
     if (item.on_fail !== undefined) {
       const target = bindNodes.get(item.on_fail.retry_from);
@@ -113,20 +109,14 @@ function walkItem(
     const inner = indent + '    ';
     const writerId = fresh();
     // Label the writer node by its resolved agent reference: a persona name is
-    // itself (byte-identical to before); an inline agent is its `name`, else the
-    // loop's bind, else its flow-position `inline-<index>` token.
-    lines.push(
-      `${inner}${writerId}(["${escapeLabel(agentLabel(r.writer, r.bind ?? `inline-${index}`))}"])`,
-    );
+    // itself; an inline agent is its required `name`.
+    lines.push(`${inner}${writerId}(["${escapeLabel(agentLabel(r.writer))}"])`);
 
     if (!Array.isArray(r.reviewer)) {
       // Single-reviewer form (persona name or inline agent). Emit reviewer node,
-      // forward + back edges. A nameless inline reviewer falls back to the
-      // `inline-<index>-reviewer` token.
+      // forward + back edges.
       const reviewerId = fresh();
-      lines.push(
-        `${inner}${reviewerId}(["${escapeLabel(agentLabel(r.reviewer, `inline-${index}-reviewer`))}"])`,
-      );
+      lines.push(`${inner}${reviewerId}(["${escapeLabel(agentLabel(r.reviewer))}"])`);
       lines.push(`${inner}${writerId} -->|"writer_produces"| ${reviewerId}`);
       lines.push(`${inner}${reviewerId} -.->|"on fail"| ${writerId}`);
     } else {
@@ -194,12 +184,11 @@ function walkItem(
     const inner = indent + '    ';
     const childHeads: string[] = [];
     const childTails: string[] = [];
-    for (const [ci, child] of children.entries()) {
+    for (const child of children) {
       // Each child walks as its own sequence-of-one; we collect its heads
       // (for predecessor fan-out) and tails (for successor fan-in). The
-      // children are siblings — no edges BETWEEN them. The child index is the
-      // positional fallback for a nameless, bindless inline step's label.
-      const w = walkItem(child, lines, fresh, inner, bindNodes, ci);
+      // children are siblings — no edges BETWEEN them.
+      const w = walkItem(child, lines, fresh, inner, bindNodes);
       childHeads.push(...w.heads);
       childTails.push(...w.tails);
     }
@@ -307,10 +296,10 @@ function emitSequence(
   bindNodes: Map<string, string>,
 ): Walked {
   if (items.length === 0) return { heads: [], tails: [] };
-  const first = walkItem(items[0], lines, fresh, indent, bindNodes, 0);
+  const first = walkItem(items[0], lines, fresh, indent, bindNodes);
   let prev = first;
   for (let i = 1; i < items.length; i++) {
-    const curr = walkItem(items[i], lines, fresh, indent, bindNodes, i);
+    const curr = walkItem(items[i], lines, fresh, indent, bindNodes);
     connectAll(prev.tails, curr.heads, lines, indent);
     prev = curr;
   }

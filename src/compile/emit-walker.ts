@@ -116,10 +116,7 @@ export function emitPreCursorItem(
 ): string[] {
   if (isStep(item)) {
     if (item.bind === undefined) return [];
-    // Pre-cursor steps are always bind-bearing (bindless ones returned above),
-    // so the resolved label's fallback is the bind — the flow-position token is
-    // never reached here.
-    const resolvedLabel = agentLabel(item.step, item.bind);
+    const resolvedLabel = agentLabel(item.step);
     declare(
       item.bind,
       {
@@ -142,9 +139,7 @@ export function emitPreCursorItem(
   if (isReviewLoop(item)) {
     const r = item.review_loop;
     if (r.bind === undefined) return [];
-    // Bind-bearing by the guard above, so the resolved writer label's fallback
-    // is the loop's bind — the flow-position token is never reached here.
-    const resolvedWriter = agentLabel(r.writer, r.bind);
+    const resolvedWriter = agentLabel(r.writer);
     declare(
       r.bind,
       {
@@ -193,9 +188,7 @@ export function emitPreCursorItem(
     for (const child of item.parallel) {
       if (isStep(child)) {
         if (child.bind === undefined) continue;
-        // Bind-bearing by the guard above, so the resolved label's fallback is
-        // the child's bind — the flow-position token is never reached here.
-        const childLabel = agentLabel(child.step, child.bind);
+        const childLabel = agentLabel(child.step);
         declare(
           child.bind,
           {
@@ -218,9 +211,7 @@ export function emitPreCursorItem(
       } else if (isReviewLoop(child)) {
         const r = child.review_loop;
         if (r.bind === undefined) continue;
-        // Bind-bearing by the guard above, so the resolved writer label's
-        // fallback is the loop's bind.
-        const resolvedWriter = agentLabel(r.writer, r.bind);
+        const resolvedWriter = agentLabel(r.writer);
         declare(
           r.bind,
           {
@@ -528,13 +519,11 @@ export function emit(
     if (isStep(item)) {
       const v = item.bind ?? fresh();
       // Resolve the step's agent reference to a label once: a persona name is
-      // itself; an inline agent is its `name`, else the step's bind, else a
-      // flow-position `inline-<i>` token. The positional fallback is the item's
-      // flow index `i` (resume-stable — the same item lands at the same index
-      // on full and --resume-from compiles), never the mutating fresh()
-      // counter. Drives the runAgent name, the ProducerInfo label, and every
+      // itself; an inline agent is its required `name`. Synthesized `_N` binds
+      // (resultNameFor) are emit-internal variable names and never become
+      // labels. Drives the runAgent name, the ProducerInfo label, and every
       // diagnostic in this branch.
-      const resolvedLabel = agentLabel(item.step, item.bind ?? `inline-${i}`);
+      const resolvedLabel = agentLabel(item.step);
       const stepLabel = `step '${resolvedLabel}'`;
       // Run consume-side checks for their side effects (declarations errors,
       // file-bound validation). String-building of the runAgent call itself
@@ -607,7 +596,7 @@ export function emit(
       const termInputPathsOverride =
         itemTerminalContext !== undefined ? itemTerminalContext.reviseInputPathsIdent : undefined;
       out.push(
-        `${pad}${decl} ${v} = ${emitRunAgentExpr(item, scope, { promptOverride: termPromptOverride, mode: 'fallback', fallbackInputPathsIdent: termInputPathsOverride }, i)};`,
+        `${pad}${decl} ${v} = ${emitRunAgentExpr(item, scope, { promptOverride: termPromptOverride, mode: 'fallback', fallbackInputPathsIdent: termInputPathsOverride })};`,
       );
 
       // Emit the retryGateZone() wrapper for this step-host gate. The
@@ -624,7 +613,7 @@ export function emit(
         // Final line re-invokes the gate's own step and returns the verdict
         // PATH (step-host contract). The retry callback is host-agnostic;
         // the differing return-type lives in this one host-specific line.
-        const gateReExec = [`return ${emitRunAgentExpr(item, scope, {}, i)};`];
+        const gateReExec = [`return ${emitRunAgentExpr(item, scope)};`];
         const retryBody = buildRetryBody(
           i,
           retryFromIdxLocal,
@@ -653,14 +642,10 @@ export function emit(
       const r = item.review_loop;
       const v = r.bind ?? fresh();
       // Resolve the writer's agent reference to a label once: a persona name is
-      // itself; an inline agent is its `name`, else the loop's bind, else a
-      // flow-position `inline-<i>` token. The positional fallback is the item's
-      // flow index `i` (resume-stable — the same item lands at the same index
-      // on full and --resume-from compiles), never the mutating fresh()
-      // counter. When the writer is inline, its baked prompt threads to the
-      // runtime as `writerInlinePrompt`; persona writers leave it undefined and
-      // take runAgent's `--agent` path.
-      const writerLabel = agentLabel(r.writer, r.bind ?? `inline-${i}`);
+      // itself; an inline agent is its required `name`. When the writer is
+      // inline, its baked prompt threads to the runtime as `writerInlinePrompt`;
+      // persona writers leave it undefined and take runAgent's `--agent` path.
+      const writerLabel = agentLabel(r.writer);
       const writerInlinePrompt = isInlineAgent(r.writer) ? r.writer.prompt : undefined;
       const label = `review_loop writer='${writerLabel}'`;
       checkConsume(r.input, `${label}.input`, scope);
@@ -691,9 +676,7 @@ export function emit(
         const reviewerProduces = r.reviewer_produces!;
         const verdictField = r.verdict_field!;
         // Resolve the reviewer's agent reference the same way as the writer.
-        // The positional fallback is `inline-<i>-reviewer` so a nameless,
-        // bindless inline reviewer stays distinct from the writer's token.
-        const reviewerLabel = agentLabel(r.reviewer, `inline-${i}-reviewer`);
+        const reviewerLabel = agentLabel(r.reviewer);
         const reviewerInlinePrompt = isInlineAgent(r.reviewer) ? r.reviewer.prompt : undefined;
         validatePath(reviewerProduces, 'reviewer_produces', label);
         // Intra-block self-collision: each role has its own file. Same path

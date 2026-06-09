@@ -648,12 +648,11 @@ flow:
 });
 
 describe('emitMermaid — inline-agent step node label', () => {
-  // An inline `step:` (object form) labels its node by the resolved agent
-  // reference: name, else the step's bind, else a flow-position `inline-<index>`
-  // token. The node id stays a fresh `n*` Mermaid identifier; only the visible
-  // label changes.
+  // An inline `step:` (object form) labels its node by its required `name`.
+  // The node id stays a fresh `n*` Mermaid identifier; only the visible label
+  // changes.
 
-  it('labels an inline step by its name when set', () => {
+  it('labels an inline step by its name', () => {
     const out = emitMermaid(
       spec(`
 pipeline: p
@@ -670,7 +669,9 @@ flow:
     expect(out).toMatch(/n\d+\(\["my-reviewer"\]\)/);
   });
 
-  it('falls back to the step bind when the inline agent has no name', () => {
+  it('labels an inline step by its name even when a bind is set', () => {
+    // The bind is the emit-internal variable name; the label is always the
+    // inline agent's required `name`.
     const out = emitMermaid(
       spec(`
 pipeline: p
@@ -679,41 +680,17 @@ inputs: [x]
 flow:
   - step:
       prompt: Review the diff.
+      name: my-reviewer
     bind: stepBind
     input: $x
     produces: out.md
 `),
     );
-    expect(out).toMatch(/n\d+\(\["stepBind"\]\)/);
+    expect(out).toMatch(/n\d+\(\["my-reviewer"\]\)/);
+    expect(out).not.toMatch(/n\d+\(\["stepBind"\]\)/);
   });
 
-  it('falls back to a flow-position inline-<index> token when nameless and bindless', () => {
-    // The inline step is the second top-level item (index 1), so the
-    // positional fallback is `inline-1` — proving the label uses the flow
-    // index, not a constant.
-    const out = emitMermaid(
-      spec(`
-pipeline: p
-cli: claude
-inputs: [x]
-flow:
-  - step: persona-a
-    input: $x
-    produces: a.md
-  - step:
-      prompt: Do the thing.
-    input: $x
-    produces: out.md
-`),
-    );
-    expect(out).toMatch(/n\d+\(\["inline-1"\]\)/);
-  });
-
-  it('uses the per-child index for a nameless, bindless inline parallel child', () => {
-    // Inside a parallel, each child is walked with its own positional index.
-    // The inline step is the second child (index 1), so its fallback label is
-    // `inline-1` — pinning that the parallel-child index is threaded, not the
-    // outer flow position.
+  it('labels an inline parallel child by its name', () => {
     const out = emitMermaid(
       spec(`
 pipeline: p
@@ -725,20 +702,20 @@ flow:
         produces: a.md
       - step:
           prompt: Do the thing.
+          name: par-doer
         produces: b.md
 `),
     );
-    expect(out).toMatch(/n\d+\(\["inline-1"\]\)/);
+    expect(out).toMatch(/n\d+\(\["par-doer"\]\)/);
   });
 });
 
 describe('emitMermaid — inline-agent review_loop writer/reviewer node labels', () => {
   // The writer node and a single reviewer node label by the resolved agent
-  // reference: name, else (writer only) the loop bind, else a flow-position
-  // token — `inline-<index>` for the writer, `inline-<index>-reviewer` for the
-  // reviewer. Persona names route through agentLabel unchanged.
+  // reference: a persona name is itself; an inline agent is its required
+  // `name`. Persona names route through agentLabel unchanged.
 
-  it('labels an inline writer node by its name when set', () => {
+  it('labels an inline writer node by its name', () => {
     const out = emitMermaid(
       spec(`
 pipeline: p
@@ -759,7 +736,9 @@ flow:
     expect(out).toMatch(/n\d+\(\["drafter"\]\)/);
   });
 
-  it('falls back to the loop bind for a nameless inline writer node', () => {
+  it('labels an inline writer node by its name even when the loop has a bind', () => {
+    // The loop bind is the emit-internal variable; the writer label is always
+    // the inline agent's required `name`.
     const out = emitMermaid(
       spec(`
 pipeline: p
@@ -769,6 +748,7 @@ flow:
   - review_loop:
       writer:
         prompt: Draft the spec.
+        name: drafter
       reviewer: r
       input: $x
       bind: spec
@@ -777,32 +757,11 @@ flow:
       verdict_field: status
 `),
     );
-    expect(out).toMatch(/n\d+\(\["spec"\]\)/);
+    expect(out).toMatch(/n\d+\(\["drafter"\]\)/);
+    expect(out).not.toMatch(/n\d+\(\["spec"\]\)/);
   });
 
-  it('falls back to a flow-position inline-<index> token for a nameless, bindless inline writer', () => {
-    // The review_loop is the only top-level item (index 0), so the writer's
-    // positional fallback is `inline-0`.
-    const out = emitMermaid(
-      spec(`
-pipeline: p
-cli: claude
-inputs: [x]
-flow:
-  - review_loop:
-      writer:
-        prompt: Draft the spec.
-      reviewer: r
-      input: $x
-      writer_produces: out.md
-      reviewer_produces: rev.json
-      verdict_field: status
-`),
-    );
-    expect(out).toMatch(/n\d+\(\["inline-0"\]\)/);
-  });
-
-  it('labels an inline single reviewer node by its name when set', () => {
+  it('labels an inline single reviewer node by its name', () => {
     const out = emitMermaid(
       spec(`
 pipeline: p
@@ -821,26 +780,6 @@ flow:
 `),
     );
     expect(out).toMatch(/n\d+\(\["auditor"\]\)/);
-  });
-
-  it('falls back to inline-<index>-reviewer for a nameless inline single reviewer node', () => {
-    const out = emitMermaid(
-      spec(`
-pipeline: p
-cli: claude
-inputs: [x]
-flow:
-  - review_loop:
-      writer: w
-      reviewer:
-        prompt: Audit the draft.
-      input: $x
-      writer_produces: out.md
-      reviewer_produces: rev.json
-      verdict_field: status
-`),
-    );
-    expect(out).toMatch(/n\d+\(\["inline-0-reviewer"\]\)/);
   });
 
   it('renders persona writer + reviewer node labels byte-identically', () => {

@@ -321,11 +321,12 @@ is either a persona name or an inline agent:
   releases — loom delegates and adds no workaround. The agent-file leaf is
   cli-aware: `.claude/agents/<name>.md` for claude,
   `.github/agents/<name>.agent.md` for copilot.
-- **An inline agent** (`{ prompt, name? }`) — a one-off general agent with
+- **An inline agent** (`{ prompt, name }`) — a one-off general agent with
   no persona file, spawned with **all tools**. `prompt:` is the task
   (required; static text — no `$ref` interpolation, so per-invocation data
-  flows via `input:` / `inputs:` as before). `name?` is an optional label
-  for logs and diagrams.
+  flows via `input:` / `inputs:` as before). `name` is required — the
+  agent's identity in logs, window titles, error messages, and mermaid
+  nodes.
 
 A general `human_gate` agent is expressed by **omitting `agent:`** on an
 interactive gate — the gate's already-required `prompt:` is the task, run

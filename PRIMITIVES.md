@@ -48,10 +48,10 @@ supplies it from its file, an inline agent supplies it via `prompt:`;
 neither may be taskless. `human_gate.agent` is a related case (the
 omitted-agent general gate, below).
 
-| Form             | YAML                      | Resolves to                                                                | Tools                          |
-| ---------------- | ------------------------- | -------------------------------------------------------------------------- | ------------------------------ |
-| **Persona name** | `step: code-reviewer`     | The CLI loads the native agent file and enforces its frontmatter `tools:`. | Whatever the persona declares. |
-| **Inline agent** | `step: { prompt, name? }` | No file; loom bakes `prompt:` into the spawn as the task.                  | **All tools** (unscoped).      |
+| Form             | YAML                     | Resolves to                                                                | Tools                          |
+| ---------------- | ------------------------ | -------------------------------------------------------------------------- | ------------------------------ |
+| **Persona name** | `step: code-reviewer`    | The CLI loads the native agent file and enforces its frontmatter `tools:`. | Whatever the persona declares. |
+| **Inline agent** | `step: { prompt, name }` | No file; loom bakes `prompt:` into the spawn as the task.                  | **All tools** (unscoped).      |
 
 **Persona name (string).** loom delegates identity and tool scope to the
 CLI's native `--agent <name>` flag — it does NOT read or inline the
@@ -67,7 +67,7 @@ postscript (the I/O contract). The file leaf is cli-aware:
 A frontmatter-only persona (no body) still works — the CLI loads an empty
 system prompt but applies the file's `tools:` / `model:`.
 
-**Inline agent (`{ prompt, name? }`).** A one-off general agent with no
+**Inline agent (`{ prompt, name }`).** A one-off general agent with no
 persona file:
 
 - `prompt` (**required**, non-empty) — the agent's task. **Static text:**
@@ -75,9 +75,9 @@ persona file:
   `inputs:` (loom passes the producer paths), and loom's role postscript
   still supplies the output contract. Static-prompt is deliberate: an
   inline `prompt:` is fixed task/criteria, not a per-run template.
-- `name` (optional) — an fs-safe label (`/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/`)
-  for logs, window titles, and mermaid nodes. When omitted, the label
-  falls back to the step's `bind`, else a positional `inline-<index>`.
+- `name` (**required**) — the agent's identity in logs, window titles,
+  error messages, and mermaid nodes. fs-safe
+  (`/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/`) because it names log files.
 - loom spawns it with **all tools** and no `--agent`. Tool scoping is what
   a persona is for; the inline form is the unscoped escape hatch.
 
@@ -120,16 +120,16 @@ A persona gate (`agent:` present) delegates via `--agent` on both CLIs.
 
 Spawn one agent once.
 
-| Field        | Req? | Type                        | Notes                                                                                                                                          |
-| ------------ | ---- | --------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
-| `step`       | yes  | `AgentRef`                  | Persona name (string) OR inline `{ prompt, name? }` agent. See "Agent references" above. A persona resolves via project then global discovery. |
-| `input`      | no   | `ValueExpr`                 | Mutually exclusive with `inputs`.                                                                                                              |
-| `inputs`     | no   | `Record<string, ValueExpr>` | Mutually exclusive with `input`. Multiple labeled inputs.                                                                                      |
-| `bind`       | no   | `BindName`                  | Binds the step's `produces:` path (or its raw output if no `produces`) for downstream `$ref` use.                                              |
-| `produces`   | no   | `string` (non-empty)        | Output file path the agent writes. Required when `on_fail` is set.                                                                             |
-| `extra_args` | no   | `string[]`                  | Per-step CLI args. REPLACES `default_extra_args` (does not concat). `extra_args: []` is an explicit opt-OUT (no `--model`).                    |
-| `timeout`    | no   | `number` (positive int)     | Milliseconds. Kills the child with SIGTERM on expiry. Default 1,800,000 (30 min) applied by `runAgent` when unset.                             |
-| `on_fail`    | no   | `OnFail`                    | Makes this step a retry-zone gate. See OnFail below. Requires `produces:`.                                                                     |
+| Field        | Req? | Type                        | Notes                                                                                                                                         |
+| ------------ | ---- | --------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
+| `step`       | yes  | `AgentRef`                  | Persona name (string) OR inline `{ prompt, name }` agent. See "Agent references" above. A persona resolves via project then global discovery. |
+| `input`      | no   | `ValueExpr`                 | Mutually exclusive with `inputs`.                                                                                                             |
+| `inputs`     | no   | `Record<string, ValueExpr>` | Mutually exclusive with `input`. Multiple labeled inputs.                                                                                     |
+| `bind`       | no   | `BindName`                  | Binds the step's `produces:` path (or its raw output if no `produces`) for downstream `$ref` use.                                             |
+| `produces`   | no   | `string` (non-empty)        | Output file path the agent writes. Required when `on_fail` is set.                                                                            |
+| `extra_args` | no   | `string[]`                  | Per-step CLI args. REPLACES `default_extra_args` (does not concat). `extra_args: []` is an explicit opt-OUT (no `--model`).                   |
+| `timeout`    | no   | `number` (positive int)     | Milliseconds. Kills the child with SIGTERM on expiry. Default 1,800,000 (30 min) applied by `runAgent` when unset.                            |
+| `on_fail`    | no   | `OnFail`                    | Makes this step a retry-zone gate. See OnFail below. Requires `produces:`.                                                                    |
 
 **Cross-field rules**
 
@@ -154,7 +154,7 @@ Spawn one agent once.
     prompt: |
       Review the spec at the input path for security issues only.
       Report each finding with file, line, and severity as JSON.
-    name: sec-scan # optional label; omitted → falls back to bind, else inline-<index>
+    name: sec-scan # required; the agent's identity in logs, window titles, and mermaid nodes
   input: $spec
   produces: review.json
   bind: cr
@@ -167,24 +167,24 @@ Spawn one agent once.
 Writer ↔ reviewer iteration. The reviewer can be a single agent (string)
 or a compound subflow (`FlowItem[]` ending in `aggregate`).
 
-| Field               | Req?        | Type                     | Notes                                                                                                                                                                                                                                                      |
-| ------------------- | ----------- | ------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `writer`            | yes         | `AgentRef`               | Writer agent: persona name (string) OR inline `{ prompt, name? }`. See "Agent references" above.                                                                                                                                                           |
-| `reviewer`          | yes         | `AgentRef \| FlowItem[]` | Single reviewer (persona name OR inline `{ prompt, name? }`) OR a subflow whose last item must be `aggregate` (enforced at compile time, not parse time). A string or inline reviewer follows the single-reviewer rules below; only an array is a subflow. |
-| `input`             | yes         | `ValueExpr`              | Initial artifact bound name or literal.                                                                                                                                                                                                                    |
-| `writer_produces`   | yes         | `string` (non-empty)     | Path the writer produces.                                                                                                                                                                                                                                  |
-| `max_iters`         | no          | `number` (positive int)  | Cap on iterations. Default applied by runtime when unset.                                                                                                                                                                                                  |
-| `approve_when`      | no          | `string` (non-empty)     | Verdict value that counts as approval. Defaults to `'pass'` at runtime.                                                                                                                                                                                    |
-| `on_max_exceeded`   | no          | `'fail' \| 'continue'`   | After exhaustion: throw or continue with last draft. Default `'continue'` applied at runtime. `'fail'` throws `HaltPipelineError`.                                                                                                                         |
-| `reviewer_produces` | conditional | `string` (non-empty)     | **Required** when `reviewer` is a string; **forbidden** when reviewer is a subflow (the subflow's steps declare their own `produces:`).                                                                                                                    |
-| `verdict_field`     | conditional | `string` (non-empty)     | **Required** when `reviewer` is a string; **forbidden** when reviewer is a subflow (the terminal aggregate extracts the verdict).                                                                                                                          |
-| `bind`              | no          | `BindName`               | Binds the writer's final approved produces path.                                                                                                                                                                                                           |
+| Field               | Req?        | Type                     | Notes                                                                                                                                                                                                                                                     |
+| ------------------- | ----------- | ------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `writer`            | yes         | `AgentRef`               | Writer agent: persona name (string) OR inline `{ prompt, name }`. See "Agent references" above.                                                                                                                                                           |
+| `reviewer`          | yes         | `AgentRef \| FlowItem[]` | Single reviewer (persona name OR inline `{ prompt, name }`) OR a subflow whose last item must be `aggregate` (enforced at compile time, not parse time). A string or inline reviewer follows the single-reviewer rules below; only an array is a subflow. |
+| `input`             | yes         | `ValueExpr`              | Initial artifact bound name or literal.                                                                                                                                                                                                                   |
+| `writer_produces`   | yes         | `string` (non-empty)     | Path the writer produces.                                                                                                                                                                                                                                 |
+| `max_iters`         | no          | `number` (positive int)  | Cap on iterations. Default applied by runtime when unset.                                                                                                                                                                                                 |
+| `approve_when`      | no          | `string` (non-empty)     | Verdict value that counts as approval. Defaults to `'pass'` at runtime.                                                                                                                                                                                   |
+| `on_max_exceeded`   | no          | `'fail' \| 'continue'`   | After exhaustion: throw or continue with last draft. Default `'continue'` applied at runtime. `'fail'` throws `HaltPipelineError`.                                                                                                                        |
+| `reviewer_produces` | conditional | `string` (non-empty)     | **Required** when `reviewer` is a string; **forbidden** when reviewer is a subflow (the subflow's steps declare their own `produces:`).                                                                                                                   |
+| `verdict_field`     | conditional | `string` (non-empty)     | **Required** when `reviewer` is a string; **forbidden** when reviewer is a subflow (the terminal aggregate extracts the verdict).                                                                                                                         |
+| `bind`              | no          | `BindName`               | Binds the writer's final approved produces path.                                                                                                                                                                                                          |
 
 **Cross-field rules** (all enforced at parse time)
 
-- `reviewer:` single agent (string persona OR inline `{ prompt, name? }`) → `reviewer_produces` required.
+- `reviewer:` single agent (string persona OR inline `{ prompt, name }`) → `reviewer_produces` required.
 - `reviewer: FlowItem[]` → `reviewer_produces` must be omitted.
-- `reviewer:` single agent (string persona OR inline `{ prompt, name? }`) → `verdict_field` required.
+- `reviewer:` single agent (string persona OR inline `{ prompt, name }`) → `verdict_field` required.
 - `reviewer: FlowItem[]` → `verdict_field` must be omitted.
 
 **Note on `on_max_exceeded`.** Default exhaustion behavior is to warn and
@@ -218,6 +218,7 @@ field on `review_loop` (no cross-field rule).
 - review_loop:
     writer:
       prompt: Draft a technical spec from the ticket at the input path.
+      name: spec-drafter
     reviewer: spec-reviewer # persona reviewer alongside an inline writer
     input: $ticket
     writer_produces: SPEC.md

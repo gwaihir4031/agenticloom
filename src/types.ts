@@ -62,15 +62,17 @@ export const OnFail = z.strictObject({
 
 /** A general (inline) agent: no persona file, all tools. `prompt` is the agent's
  *  task — required and static (no `$ref` interpolation; data flows via `input:` /
- *  `inputs:`). `name` is an optional fs-safe label for logs / windows / mermaid
- *  nodes. The object form (vs a bare persona-name string) is the discriminator
- *  that lets compile reject a task-less inline agent. */
+ *  `inputs:`). `name` is required — the agent's identity in logs, window titles,
+ *  error messages, and mermaid nodes. The object form (vs a bare persona-name
+ *  string) is the discriminator that lets compile reject a task-less inline
+ *  agent. */
 export const InlineAgent = z.strictObject({
   prompt: z.string().min(1),
-  name: z
-    .string()
-    .regex(/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/)
-    .optional(),
+  name: z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/, {
+    error:
+      'name: must match /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/ (fs-safe: it names log files; ' +
+      'alphanumeric first character, then letters, digits, dots, underscores, hyphens)',
+  }),
 });
 
 /** An agent reference — the value of `step:` / `review_loop.writer` /
@@ -122,10 +124,12 @@ export interface OnFailT {
 
 /** Static-typing mirror of the `InlineAgent` Zod shape. Hand-written (like the
  *  sibling `*T` interfaces) so it can be the narrowed target of `isInlineAgent`
- *  and a stable type for downstream compile / mermaid consumers. */
+ *  and a stable type for downstream compile / mermaid consumers. `name` is
+ *  required — it is the agent's identity in logs, window titles, error
+ *  messages, and mermaid nodes. */
 export interface InlineAgentT {
   prompt: string;
-  name?: string;
+  name: string;
 }
 
 /** Static-typing mirror of the `AgentRef` Zod union. */
@@ -226,11 +230,9 @@ export const isForeach = (i: FlowItem): i is ForeachItemT => 'foreach' in i;
 export const isInlineAgent = (ref: AgentRef): ref is InlineAgentT => typeof ref === 'object';
 
 /** Resolve an agent reference to its display label: a persona name is itself; an
- *  inline agent is its `name`, or `fallback` when `name` is omitted (callers pass
- *  the step's bind, else a positional `inline-<index>`). Label only — it never
- *  drives spawn behavior. */
-export const agentLabel = (ref: AgentRef, fallback: string): string =>
-  isInlineAgent(ref) ? (ref.name ?? fallback) : ref;
+ *  inline agent is its required `name`. Label only — it never drives spawn
+ *  behavior. */
+export const agentLabel = (ref: AgentRef): string => (isInlineAgent(ref) ? ref.name : ref);
 
 /** Raw schema body for `StepItem`, BEFORE the `z.ZodType<StepItemT>`
  *  annotation widens away the inferred type. Exported so the bidirectional
