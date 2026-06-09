@@ -340,7 +340,16 @@ export const HumanGateItemBody = z.strictObject({
       interactive: z.literal(true).optional(),
       agent: z.string().optional(),
       input: ValueExpr.optional(),
-      prompt: z.string().optional(),
+      // `.min(1)`: for a general gate (agent: omitted) the prompt is the
+      // agent's ENTIRE task — an empty string would spawn a persona-less
+      // agent with no task at all. InlineAgent.prompt enforces the same.
+      prompt: z
+        .string()
+        .min(1, {
+          error:
+            "human_gate: 'prompt:' must be non-empty — it is the gate's initial message and, for a general gate (no agent:), the agent's entire task",
+        })
+        .optional(),
       // Per-gate cli args override (REPLACES `default_extra_args:`, doesn't
       // concatenate — matches `StepItem.extra_args`). Only meaningful in
       // interactive mode (plain y/N spawns no child). Note: `extra_args: []`

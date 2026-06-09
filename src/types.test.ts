@@ -376,6 +376,23 @@ describe('HumanGateItem schema', () => {
     expect(result.success).toBe(false);
   });
 
+  it('rejects an empty prompt on a general gate (prompt is the entire task)', () => {
+    const result = HumanGateItem.safeParse({
+      human_gate: { interactive: true, input: '$x', prompt: '' },
+    });
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error.issues[0].message).toMatch(/must be non-empty/);
+    }
+  });
+
+  it('rejects an empty prompt on a persona gate', () => {
+    const result = HumanGateItem.safeParse({
+      human_gate: { interactive: true, agent: 'a', input: '$x', prompt: '' },
+    });
+    expect(result.success).toBe(false);
+  });
+
   it('rejects interactive: false (literal-true-only)', () => {
     const result = HumanGateItem.safeParse({
       human_gate: { interactive: false },
