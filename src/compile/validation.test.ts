@@ -364,6 +364,61 @@ flow:
     expect(() => compile(yamlPath)).not.toThrow();
   });
 
+  it('accepts a CRLF persona whose name: is the last frontmatter line', () => {
+    // Splitting on '\n' alone left a trailing \r on the last frontmatter
+    // line, so the name parsed as 'reviewer\r' — a mismatch error whose two
+    // names rendered identically. claude loads CRLF files fine.
+    mkdirSync('.claude/agents', { recursive: true });
+    writeFileSync(
+      '.claude/agents/reviewer.md',
+      '---\r\ntools: Read\r\nname: reviewer\r\n---\r\nbody\r\n',
+    );
+    const yamlPath = setupFixture({ yaml: yamlReferencing('reviewer') });
+    expect(() => compile(yamlPath)).not.toThrow();
+  });
+
+  it('accepts a persona with a UTF-8 BOM before the opening fence', () => {
+    // A BOM at byte 0 defeated the startsWith('---') fence check and
+    // produced a false "no frontmatter" error for a file claude loads fine.
+    mkdirSync('.claude/agents', { recursive: true });
+    writeFileSync('.claude/agents/reviewer.md', '\uFEFF---\nname: reviewer\n---\nbody\n');
+    const yamlPath = setupFixture({ yaml: yamlReferencing('reviewer') });
+    expect(() => compile(yamlPath)).not.toThrow();
+  });
+
+  it('does not close the fence on an indented --- inside a block scalar', () => {
+    // The close-fence scan used trim() === '---', so an indented '---'
+    // (here: block-scalar content) closed the block early and hid the
+    // name: that follows it. Column-0-anchored parsers (and claude) don't.
+    mkdirSync('.claude/agents', { recursive: true });
+    writeFileSync(
+      '.claude/agents/reviewer.md',
+      '---\ndescription: |\n  ---\nname: reviewer\n---\nbody\n',
+    );
+    const yamlPath = setupFixture({ yaml: yamlReferencing('reviewer') });
+    expect(() => compile(yamlPath)).not.toThrow();
+  });
+
+  it('accepts an opening fence with trailing whitespace', () => {
+    // claude loads '--- \n' fences; the exact startsWith('---\n') check
+    // rejected them with a false "no frontmatter" error.
+    mkdirSync('.claude/agents', { recursive: true });
+    writeFileSync('.claude/agents/reviewer.md', '--- \nname: reviewer\n---\nbody\n');
+    const yamlPath = setupFixture({ yaml: yamlReferencing('reviewer') });
+    expect(() => compile(yamlPath)).not.toThrow();
+  });
+
+  it('reports an unreadable persona file (directory at the .md path) as a compile error', () => {
+    // existsSync is true for a directory named reviewer.md, but the read
+    // throws EISDIR — which used to escape as a raw fs crash with no
+    // compile-error prefix, pipeline name, or agent name.
+    mkdirSync('.claude/agents/reviewer.md', { recursive: true });
+    const yamlPath = setupFixture({ yaml: yamlReferencing('reviewer') });
+    expect(() => compile(yamlPath)).toThrow(
+      /Compile error: .*references agent 'reviewer' but its persona file at \.claude\/agents\/reviewer\.md could not be read: /,
+    );
+  });
+
   it('accepts a copilot persona without frontmatter (existence-only check)', () => {
     // copilot's resolution semantics are less verified and it fails loud at
     // runtime, so the frontmatter guard is claude-only.

@@ -73,19 +73,37 @@ export function agentFileLeaf(cli: AgentCli, name: string): string {
  *  its string `name:` field. `name` is undefined when the file has no
  *  frontmatter block, the block has no string `name:`, or the block's YAML
  *  fails to parse — three cases claude treats identically (the agent is not
- *  registered). `parseProblem` is set in the malformed-YAML case only, so the
- *  caller's error can surface it. Parsing is deliberately minimal: a leading
- *  `---` line, a closing line that trims to `---`, yaml-load of the slice. */
+ *  registered). `parseProblem` is set in the malformed-YAML case and
+ *  `readProblem` when the file itself can't be read (a directory at the .md
+ *  path, a permission error, ...), so the caller's error can surface each.
+ *
+ *  Fence rules are deliberately matched to what claude's loader accepts — a
+ *  false compile error here kills a persona that would have loaded fine:
+ *  - open and close fences are column-0 `---` followed only by optional
+ *    spaces/tabs; an indented `---` (e.g. inside a block scalar) does NOT
+ *    close the block;
+ *  - CRLF line endings are tolerated — the /\r?\n/ split keeps stray `\r`
+ *    out of YAML values, where it once turned a matching name into an
+ *    invisible `'reviewer\r'` mismatch;
+ *  - a leading UTF-8 BOM is stripped before fence detection. */
 function personaFrontmatterName(filePath: string): {
   name: string | undefined;
   parseProblem?: string;
+  readProblem?: string;
 } {
-  const content = readFileSync(filePath, 'utf-8');
-  if (!content.startsWith('---\n') && !content.startsWith('---\r\n')) return { name: undefined };
-  const lines = content.split('\n');
+  let raw: string;
+  try {
+    raw = readFileSync(filePath, 'utf-8');
+  } catch (e) {
+    return { name: undefined, readProblem: e instanceof Error ? e.message : String(e) };
+  }
+  const content = raw.startsWith('\uFEFF') ? raw.slice(1) : raw;
+  const fence = /^---[ \t]*$/;
+  const lines = content.split(/\r?\n/);
+  if (!fence.test(lines[0])) return { name: undefined };
   let closeIdx = -1;
   for (let i = 1; i < lines.length; i++) {
-    if (lines[i].trim() === '---') {
+    if (fence.test(lines[i])) {
       closeIdx = i;
       break;
     }
@@ -136,7 +154,16 @@ export function validatePersonaFile(
     );
   }
   if (cli === 'claude') {
-    const { name: fmName, parseProblem } = personaFrontmatterName(found);
+    const { name: fmName, parseProblem, readProblem } = personaFrontmatterName(found);
+    if (readProblem !== undefined) {
+      // existsSync passed but the read failed — e.g. a directory named
+      // `<name>.md`, or a permission error. Without this guard the raw fs
+      // error (EISDIR/EACCES) would escape with no compile-error framing.
+      throw new Error(
+        `Compile error: ${contextLabel} references agent '${name}' but its persona file at ` +
+          `${found} could not be read: ${readProblem}`,
+      );
+    }
     if (fmName === undefined) {
       const parseNote =
         parseProblem === undefined ? '' : ` (frontmatter YAML failed to parse: ${parseProblem})`;
