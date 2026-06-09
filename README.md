@@ -317,8 +317,8 @@ is either a persona name or an inline agent:
   frontmatter-only file). On claude the persona's `tools:` bind even under
   `--dangerously-skip-permissions` (real least privilege). On copilot the
   same `--agent` delegation applies, though copilot's CLI-side enforcement
-  of agent `tools:` is version-sensitive and not yet in effect in current
-  releases — loom delegates and adds no workaround. The agent-file leaf is
+  of agent `tools:` is version-sensitive and not yet in effect as of
+  copilot v1.0.60 — loom delegates and adds no workaround. The agent-file leaf is
   cli-aware: `.claude/agents/<name>.md` for claude,
   `.github/agents/<name>.agent.md` for copilot.
 - **An inline agent** (`{ prompt, name }`) — a one-off general agent with
@@ -341,6 +341,11 @@ collision:
 | --------------- | -------------------------------------- | ----------------------------------- |
 | `claude`        | `<cwd>/.claude/agents/<name>.md`       | `~/.claude/agents/<name>.md`        |
 | `copilot`       | `<cwd>/.github/agents/<name>.agent.md` | `~/.copilot/agents/<name>.agent.md` |
+
+(claude itself resolves `--agent` by walking up from the invocation cwd to
+the enclosing git root, root-most winning — so prefer running `loom` from
+the repo root, where claude's view matches the two layers loom validates;
+see PRIMITIVES.md "Agent references" for the full caveat.)
 
 Pipelines are discovered the same way regardless of `cli:`:
 `loom run <name>` looks in `<cwd>/loom/pipelines/<name>.yaml` first,

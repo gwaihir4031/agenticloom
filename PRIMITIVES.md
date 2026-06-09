@@ -70,6 +70,16 @@ reference — claude registers agents by frontmatter name, not filename, so a
 missing or mismatched `name:` would make `--agent` silently run
 persona-less. copilot personas are checked for file existence only.
 
+Discovery asymmetry to know about: loom's compile check probes exactly two
+layers (`<cwd>/.claude/agents/` and `~/.claude/agents/`), while claude
+itself resolves `--agent` by scanning every `.claude/agents/` from the
+spawn cwd **up to the enclosing git root**, root-most winning on name
+collisions. Invoked from the repo root — the common case — the two views
+coincide; invoked from a subdirectory, an ancestor layer loom never probed
+can shadow the validated file. The spawn-time init-roster check catches an
+agent that doesn't resolve at all, but a same-named ancestor persona
+resolves silently — prefer running `loom` from the repo root.
+
 A frontmatter-only persona (no body) still works — the CLI loads an empty
 system prompt but applies the file's `tools:` / `model:`.
 
@@ -107,8 +117,8 @@ and tells the spawn "general, not persona". Mixing forms is fine — a
 - **copilot** delegates identity + tools the same way via `--agent`,
   reading `.github/agents/<name>.agent.md` (project) or
   `~/.copilot/agents/<name>.agent.md` (user). **Caveat:** copilot's CLI-side
-  enforcement of an agent's `tools:` is version-sensitive and, in current
-  releases, not yet in effect (the `tools:` frontmatter is honored by
+  enforcement of an agent's `tools:` is version-sensitive and not yet in
+  effect as of copilot v1.0.60 (the `tools:` frontmatter is honored by
   copilot's editor agent system, not the CLI), so a copilot persona
   effectively runs with all tools until a copilot release enforces it.
   loom delegates and adds **no workaround**; when copilot enforces agent
@@ -187,8 +197,8 @@ or a compound subflow (`FlowItem[]` ending in `aggregate`).
 | `max_iters`         | no          | `number` (positive int)  | Cap on iterations. Default applied by runtime when unset.                                                                                                                                                                                                 |
 | `approve_when`      | no          | `string` (non-empty)     | Verdict value that counts as approval. Defaults to `'pass'` at runtime.                                                                                                                                                                                   |
 | `on_max_exceeded`   | no          | `'fail' \| 'continue'`   | After exhaustion: throw or continue with last draft. Default `'continue'` applied at runtime. `'fail'` throws `HaltPipelineError`.                                                                                                                        |
-| `reviewer_produces` | conditional | `string` (non-empty)     | **Required** when `reviewer` is a string; **forbidden** when reviewer is a subflow (the subflow's steps declare their own `produces:`).                                                                                                                   |
-| `verdict_field`     | conditional | `string` (non-empty)     | **Required** when `reviewer` is a string; **forbidden** when reviewer is a subflow (the terminal aggregate extracts the verdict).                                                                                                                         |
+| `reviewer_produces` | conditional | `string` (non-empty)     | **Required** when `reviewer` is a single agent (string persona or inline `{ prompt, name }`); **forbidden** when reviewer is a subflow (the subflow's steps declare their own `produces:`).                                                               |
+| `verdict_field`     | conditional | `string` (non-empty)     | **Required** when `reviewer` is a single agent (string persona or inline `{ prompt, name }`); **forbidden** when reviewer is a subflow (the terminal aggregate extracts the verdict).                                                                     |
 | `bind`              | no          | `BindName`               | Binds the writer's final approved produces path.                                                                                                                                                                                                          |
 
 **Cross-field rules** (all enforced at parse time)
