@@ -59,7 +59,7 @@ sed -i.bak \
   loom/pipelines/*.yaml
 ```
 
-Persona files for Copilot use a different frontmatter format (lowercase array `tools:` in `.github/agents/` rather than PascalCase comma-separated `tools:` in `.claude/agents/`). The starter pack ships both directories, so both CLIs work out of the box.
+Persona files for Copilot live in `.github/agents/` with a `.agent.md` leaf (e.g. `.github/agents/ac-writer.agent.md`) and use a different frontmatter format (lowercase array `tools:` rather than `.claude/agents/`'s PascalCase comma-separated `tools:`). The starter pack ships both directories, so both CLIs work out of the box.
 
 ### Following along
 
@@ -115,7 +115,7 @@ flow:
 
 **`step` fields**
 
-- `step: ac-writer` — the agent persona to invoke. Loom resolves this to `.claude/agents/ac-writer.md` (or `.github/agents/ac-writer.md` for Copilot).
+- `step: ac-writer` — the agent persona to invoke. Loom resolves this to `.claude/agents/ac-writer.md` (or `.github/agents/ac-writer.agent.md` for Copilot).
 - `input: $ticket` — the `$` prefix dereferences a named binding. `$ticket` resolves to the path of the ticket file you passed on the command line.
 - `produces: ACS.md` — the file this agent is expected to write. Loom makes the path available to the agent in its prompt.
 - `bind: acs` — after the step completes, bind the path of the produced file to the name `acs`, so later steps can reference it as `$acs`.
