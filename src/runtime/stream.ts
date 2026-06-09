@@ -5,6 +5,12 @@ export interface StreamEvent {
   type?: string;
   subtype?: string;
   session_id?: string;
+  // `init` system-event roster (only populated when subtype === "init"): the
+  // agents the CLI actually loaded, named by their frontmatter `name:` values.
+  // Entries are bare strings (tolerated as `{name}` objects too); older CLIs
+  // omit the field entirely. Element type is unknown because runAgent trusts
+  // only entries it can read a string name from.
+  agents?: unknown[];
   // `api_retry` system-event telemetry (only populated when subtype ===
   // "api_retry"). `error` is the category string (e.g. "overloaded",
   // "rate_limit", "server_error"); `error_status` is the raw HTTP status and

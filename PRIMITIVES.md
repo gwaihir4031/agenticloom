@@ -94,7 +94,10 @@ and tells the spawn "general, not persona". Mixing forms is fine — a
   `--dangerously-skip-permissions`. Tool _availability_ (the allowlist)
   and _permission_ (the prompt) are separate layers; skip-permissions
   waives only the prompt, so a `tools: Read` persona still cannot invoke
-  Bash. Real least privilege on the headless path.
+  Bash. Real least privilege on the headless path. loom also verifies at
+  spawn (via the stream-json init event's agent roster) that claude
+  actually loaded the requested agent — claude exits 0 on an unknown
+  `--agent`, so loom fails loud instead of running persona-less.
 - **copilot** delegates identity + tools the same way via `--agent`,
   reading `.github/agents/<name>.agent.md` (project) or
   `~/.copilot/agents/<name>.agent.md` (user). **Caveat:** copilot's CLI-side

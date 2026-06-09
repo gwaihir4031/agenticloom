@@ -973,6 +973,171 @@ describe('runAgent', () => {
     );
   });
 
+  describe('persona init-event roster verification (claude)', () => {
+    // claude (observed on 2.1.170) exits 0 with is_error:false and no stderr
+    // when `--agent <name>` doesn't resolve — the run silently proceeds
+    // persona-less with the full default toolset, so the exit handler alone
+    // can never catch a dropped persona. The init event's `agents` array is
+    // the roster claude actually loaded; a persona spawn whose requested name
+    // is missing from a PRESENT roster must reject mid-stream and kill the
+    // child. Enforcement is roster-gated (an init without an `agents` array —
+    // older CLIs — stays tolerated) and persona-gated (inline spawns pass no
+    // --agent, so there is nothing to verify).
+
+    const initWithAgents = (agents: unknown): string =>
+      JSON.stringify({ type: 'system', subtype: 'init', session_id: 's1', agents });
+
+    const resultEvent = JSON.stringify({
+      type: 'result',
+      num_turns: 1,
+      total_cost_usd: 0.001,
+      stop_reason: 'end_turn',
+    });
+
+    // makeFakeRunAgentChild's kill is an inert stub; wrap it so the test can
+    // observe the SIGTERM the enforcement branch sends.
+    const makeKillObservableChild = (
+      stdoutLines: string[],
+    ): { child: ReturnType<typeof makeFakeRunAgentChild>; wasKilled: () => boolean } => {
+      const child = makeFakeRunAgentChild({ stdoutLines });
+      let killed = false;
+      const inertKill = child.kill;
+      child.kill = (sig?: string) => {
+        killed = sig === 'SIGTERM';
+        inertKill(sig);
+      };
+      return { child, wasKilled: () => killed };
+    };
+
+    it('rejects and kills the child when the roster omits the requested agent', async () => {
+      const { child, wasKilled } = makeKillObservableChild([
+        initWithAgents(['other-agent', 'another']),
+        resultEvent,
+      ]);
+      spawnMock.mockImplementation(() => child);
+      const { runAgent } = await import('./agent.js');
+      const err = await runAgent('ac-writer', 'prompt', undefined, {
+        cli: 'claude',
+        agentDirs: ['.claude/agents/', '~/.claude/agents/'],
+        extraArgs: [],
+      }).catch((e) => e as Error);
+      expect(err).toBeInstanceOf(Error);
+      expect((err as Error).message).toContain("claude did not load agent 'ac-writer'");
+      expect((err as Error).message).toContain('persona-less');
+      // The actionable parts: the loaded roster and the spawn cwd the child
+      // actually used (the LOOM_INVOCATION_CWD expression runAgent resolves).
+      expect((err as Error).message).toContain('[other-agent, another]');
+      const expectedCwd = process.env.LOOM_INVOCATION_CWD ?? process.cwd();
+      expect((err as Error).message).toContain(`visible from ${expectedCwd}`);
+      expect(wasKilled()).toBe(true);
+    });
+
+    it("renders '(none)' when claude loaded an empty roster (bare dir)", async () => {
+      const { child, wasKilled } = makeKillObservableChild([initWithAgents([]), resultEvent]);
+      spawnMock.mockImplementation(() => child);
+      const { runAgent } = await import('./agent.js');
+      const err = await runAgent('ac-writer', 'prompt', undefined, {
+        cli: 'claude',
+        agentDirs: ['.claude/agents/', '~/.claude/agents/'],
+        extraArgs: [],
+      }).catch((e) => e as Error);
+      expect((err as Error).message).toContain('Agents claude loaded: (none).');
+      expect(wasKilled()).toBe(true);
+    });
+
+    it('resolves normally when the roster lists the requested name among others', async () => {
+      const writes = captureStdoutWrites();
+      const events = [
+        initWithAgents(['other-agent', 'ac-writer']),
+        JSON.stringify({
+          type: 'stream_event',
+          event: { type: 'content_block_delta', delta: { type: 'text_delta', text: 'done' } },
+        }),
+        resultEvent,
+      ];
+      spawnMock.mockImplementation(() => makeFakeRunAgentChild({ stdoutLines: events }));
+      const { runAgent } = await import('./agent.js');
+      await expect(
+        runAgent('ac-writer', 'prompt', undefined, {
+          cli: 'claude',
+          agentDirs: ['.claude/agents/', '~/.claude/agents/'],
+          extraArgs: [],
+        }),
+      ).resolves.toBe('done');
+      // A passing roster falls THROUGH — the init event still reaches the
+      // full-mode display path and renders its session line.
+      expect(writes.join('')).toContain('(session s1)');
+    });
+
+    it('treats {name} object entries like string entries and skips garbage', async () => {
+      const events = [initWithAgents([42, { foo: 'bar' }, { name: 'ac-writer' }]), resultEvent];
+      spawnMock.mockImplementation(() => makeFakeRunAgentChild({ stdoutLines: events }));
+      const { runAgent } = await import('./agent.js');
+      await expect(
+        runAgent('ac-writer', 'prompt', undefined, {
+          cli: 'claude',
+          agentDirs: ['.claude/agents/', '~/.claude/agents/'],
+          extraArgs: [],
+        }),
+      ).resolves.toBe('');
+    });
+
+    it('skips the check on inline spawns (no --agent passed, nothing to verify)', async () => {
+      const events = [initWithAgents(['something-else']), resultEvent];
+      spawnMock.mockImplementation(() => makeFakeRunAgentChild({ stdoutLines: events }));
+      const { runAgent } = await import('./agent.js');
+      await expect(
+        runAgent('inline-0', 'the user task', undefined, {
+          cli: 'claude',
+          agentDirs: ['.claude/agents/', '~/.claude/agents/'],
+          extraArgs: [],
+          inlinePrompt: 'INLINE SYSTEM PROMPT',
+        }),
+      ).resolves.toBe('');
+    });
+
+    it('tolerates an init event without an agents field (older CLI)', async () => {
+      const events = [
+        JSON.stringify({ type: 'system', subtype: 'init', session_id: 's1' }),
+        resultEvent,
+      ];
+      spawnMock.mockImplementation(() => makeFakeRunAgentChild({ stdoutLines: events }));
+      const { runAgent } = await import('./agent.js');
+      await expect(
+        runAgent('ac-writer', 'prompt', undefined, {
+          cli: 'claude',
+          agentDirs: ['.claude/agents/', '~/.claude/agents/'],
+          extraArgs: [],
+        }),
+      ).resolves.toBe('');
+    });
+
+    it('tolerates a stream with no init event at all', async () => {
+      spawnMock.mockImplementation(() => makeFakeRunAgentChild({ stdoutLines: [resultEvent] }));
+      const { runAgent } = await import('./agent.js');
+      await expect(
+        runAgent('ac-writer', 'prompt', undefined, {
+          cli: 'claude',
+          agentDirs: ['.claude/agents/', '~/.claude/agents/'],
+          extraArgs: [],
+        }),
+      ).resolves.toBe('');
+    });
+
+    it('tolerates an agents field that is not an array (defensive shape gate)', async () => {
+      const events = [initWithAgents('not-an-array'), resultEvent];
+      spawnMock.mockImplementation(() => makeFakeRunAgentChild({ stdoutLines: events }));
+      const { runAgent } = await import('./agent.js');
+      await expect(
+        runAgent('ac-writer', 'prompt', undefined, {
+          cli: 'claude',
+          agentDirs: ['.claude/agents/', '~/.claude/agents/'],
+          extraArgs: [],
+        }),
+      ).resolves.toBe('');
+    });
+  });
+
   describe('inputPaths pre-spawn input check', () => {
     // The pre-spawn check fires BEFORE spawn — its purpose is to prevent
     // any agent from running against a missing input. The check is the

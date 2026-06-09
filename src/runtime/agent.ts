@@ -155,6 +155,26 @@ You MAY include additional top-level fields (e.g. "reviewer_notes").
 Do not emit prose to stdout; the verdict lives in the JSON file's "status" field.`;
 }
 
+/** Extract the agent names claude reported loading from an init event's
+ *  `agents` field. Returns null when the field is absent or not an array
+ *  (older CLIs don't emit it), so callers skip enforcement entirely rather
+ *  than conflating "unknown roster" with "empty roster". Entries are the
+ *  frontmatter `name:` values — bare strings today, tolerated as
+ *  `{name: string}` objects too; anything else is skipped. */
+function loadedAgentNames(agents: unknown): string[] | null {
+  if (!Array.isArray(agents)) return null;
+  const names: string[] = [];
+  for (const entry of agents) {
+    if (typeof entry === 'string') {
+      names.push(entry);
+    } else if (typeof entry === 'object' && entry !== null) {
+      const n = (entry as Record<string, unknown>).name;
+      if (typeof n === 'string') names.push(n);
+    }
+  }
+  return names;
+}
+
 /** Cap on the rolling stderr failure tail, in UTF-16 code units. The reader
  *  retains only the trailing slice so a runaway-chatty child can't blow memory,
  *  while a failed run still carries the death reason on its reject message. Same
@@ -193,7 +213,10 @@ const STDERR_TAIL_CAP = 8 * 1024;
  *  through `formatStreamEvent` for display and captures the final `result`
  *  event's telemetry (turns, cost, stop_reason) for the RollingWindow's
  *  collapse line. Text deltas accumulate into the trimmed return value when
- *  `producesPath` is unset.
+ *  `producesPath` is unset. Persona spawns additionally audit the init
+ *  event's agent roster: claude exits 0 when `--agent <name>` doesn't
+ *  resolve, so a roster that omits the requested name rejects mid-stream
+ *  (child killed) instead of letting the run continue persona-less.
  *
  *  Copilot path: streams raw stdout line-by-line through the same
  *  RollingWindow; the trimmed accumulator is the return value when
@@ -449,6 +472,39 @@ export async function runAgent(
           if (typeof evt !== 'object' || evt === null || Array.isArray(evt)) {
             window.feed(line + '\n');
             return;
+          }
+          // Persona-spawn init audit. claude (observed on 2.1.170) exits 0
+          // with no stderr when `--agent <name>` doesn't resolve — it silently
+          // runs the prompt persona-less with the full default toolset — so
+          // the exit handler alone can never catch a dropped persona. The init
+          // event's `agents` array names every agent claude actually loaded;
+          // when the requested name is missing from a present roster, kill the
+          // child and reject before the persona-less run does real work.
+          // Enforcement is gated on the roster being a real array (older CLIs
+          // that omit it stay tolerated) and on the persona spawn form (inline
+          // spawns pass no --agent, so there is nothing to verify). On a
+          // passing roster this branch falls through so the init event still
+          // reaches the display paths below.
+          if (evt.type === 'system' && evt.subtype === 'init' && opts.inlinePrompt === undefined) {
+            const loaded = loadedAgentNames(evt.agents);
+            if (loaded !== null && !loaded.includes(name)) {
+              if (settled) return;
+              settled = true;
+              cleanup();
+              child.kill('SIGTERM');
+              window.finish('error');
+              reject(
+                new Error(
+                  `claude did not load agent '${name}' — the spawn would run persona-less. ` +
+                    `claude registers agents by their frontmatter 'name:' field, resolving ` +
+                    `.claude/agents/ from the spawn cwd up to the git root, plus ` +
+                    `~/.claude/agents. Check the persona file's 'name:' frontmatter matches ` +
+                    `'${name}' and that the file is visible from ${agentCwd}. ` +
+                    `Agents claude loaded: ${loaded.length === 0 ? '(none)' : `[${loaded.join(', ')}]`}.`,
+                ),
+              );
+              return;
+            }
           }
           if (evt.type === 'result') {
             window.setResult({
