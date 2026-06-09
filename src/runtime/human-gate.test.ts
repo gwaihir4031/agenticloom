@@ -47,34 +47,6 @@ vi.mock('readline', () => ({
   },
 }));
 
-// Mock fs for shape-symmetry with the other runtime/ test files. The copilot
-// interactive gate delegates persona resolution to the cli via `--agent <name>`
-// and no longer reads persona files itself, so these tests never exercise this
-// mock — it stays only to keep the runtime/ test setup consistent (the `fakeFs`
-// path was already unhit before this change).
-let fakeFs: Record<string, string> = {};
-const fakeFsLookup = (p: string): string | undefined => {
-  if (Object.prototype.hasOwnProperty.call(fakeFs, p)) return fakeFs[p];
-  if (nodePath.isAbsolute(p)) {
-    const rel = nodePath.relative(process.cwd(), p);
-    if (Object.prototype.hasOwnProperty.call(fakeFs, rel)) return fakeFs[rel];
-  }
-  return undefined;
-};
-
-vi.mock('fs', () => ({
-  existsSync: (p: string) => fakeFsLookup(p) !== undefined,
-  readFileSync: (p: string, _enc?: string) => {
-    const v = fakeFsLookup(p);
-    if (v !== undefined) return v;
-    const err = new Error(
-      `ENOENT: no such file or directory, open '${p}'`,
-    ) as NodeJS.ErrnoException;
-    err.code = 'ENOENT';
-    throw err;
-  },
-}));
-
 // Import AFTER vi.mock calls so the module-level imports get the mocked versions.
 let humanGate: typeof import('./human-gate.js').humanGate;
 beforeEach(async () => {
@@ -83,7 +55,6 @@ beforeEach(async () => {
   spawnMock.mockReset();
   readlineCloseMock.mockReset();
   questionAnswer = 'y';
-  fakeFs = {};
 });
 
 afterEach(() => {
