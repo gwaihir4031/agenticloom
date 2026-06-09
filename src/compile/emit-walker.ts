@@ -660,6 +660,35 @@ export function emit(
         agentName: writerLabel,
       };
 
+      // Both reviewer forms emit the same reviewLoop({ ... }) scaffold —
+      // `kind:` is the only header line that differs, and only the reviewer
+      // wiring in the middle is branch-specific. writer: carries the resolved
+      // LABEL string; writerInlinePrompt: is emitted only for an inline
+      // writer (the runtime's inline-prompt field). For a persona writer the
+      // label is the bare name and the inline field is absent, so this is
+      // byte-identical to the pre-inline emit.
+      const lines = [
+        `${pad}const ${v} = await reviewLoop({`,
+        `${pad}  kind: '${Array.isArray(r.reviewer) ? 'compound' : 'single'}',`,
+        `${pad}  cli: CLI,`,
+        `${pad}  agentDirs: AGENT_DIRS,`,
+        `${pad}  defaultExtraArgs: DEFAULT_EXTRA_ARGS,`,
+        `${pad}  writer: ${JSON.stringify(writerLabel)},`,
+      ];
+      if (writerInlinePrompt !== undefined)
+        lines.push(`${pad}  writerInlinePrompt: ${JSON.stringify(writerInlinePrompt)},`);
+
+      // Single-only verdict-extraction fields (`reviewerProduces:` +
+      // `verdictField:`). They sit between the shared writerProduces and
+      // approveWhen lines below, so the single arm stashes them here rather
+      // than pushing onto `lines` inside the split. The compound form emits
+      // neither — the aggregate inside the subflow already extracts the
+      // verdict; the loop only consumes the aggregate's pre-extracted string.
+      // The compound runtime interface (CompoundReviewerOpts) does not
+      // declare verdictField, and schema-side `verdict_field:` is forbidden
+      // on the YAML for the compound form (a refine in types.ts catches it).
+      const verdictExtractionLines: string[] = [];
+
       // Array → subflow (compound) reviewer; string or inline object → single
       // reviewer. Splitting on Array.isArray (not typeof === 'string') routes
       // an inline-object reviewer through the single path, where its verdict
@@ -687,36 +716,15 @@ export function emit(
         registerPath(reviewerProduces, 'reviewer_produces', label, pathScope);
 
         declare(v, loopProducerInfo, scope, currentScopeId);
-        // writer:/reviewer: carry the resolved LABEL string; writerInlinePrompt:
-        // / reviewerInlinePrompt: are emitted only for inline agents (the
-        // runtime's inline-prompt fields). For persona writer+reviewer the labels
-        // are the bare names and the inline fields are absent, so this is
-        // byte-identical to the pre-inline emit.
-        const lines = [
-          `${pad}const ${v} = await reviewLoop({`,
-          `${pad}  kind: 'single',`,
-          `${pad}  cli: CLI,`,
-          `${pad}  agentDirs: AGENT_DIRS,`,
-          `${pad}  defaultExtraArgs: DEFAULT_EXTRA_ARGS,`,
-          `${pad}  writer: ${JSON.stringify(writerLabel)},`,
-        ];
-        if (writerInlinePrompt !== undefined)
-          lines.push(`${pad}  writerInlinePrompt: ${JSON.stringify(writerInlinePrompt)},`);
+        // reviewer: mirrors writer: — the resolved label, with the inline
+        // prompt emitted only for an inline reviewer.
         lines.push(`${pad}  reviewer: ${JSON.stringify(reviewerLabel)},`);
         if (reviewerInlinePrompt !== undefined)
           lines.push(`${pad}  reviewerInlinePrompt: ${JSON.stringify(reviewerInlinePrompt)},`);
-        lines.push(
-          `${pad}  input: ${inputExprFor(r.input, scope)},`,
-          `${pad}  maxIters: ${r.max_iters ?? 3},`,
-          `${pad}  writerProduces: ${JSON.stringify(r.writer_produces)},`,
+        verdictExtractionLines.push(
           `${pad}  reviewerProduces: ${JSON.stringify(reviewerProduces)},`,
           `${pad}  verdictField: ${JSON.stringify(verdictField)},`,
         );
-        if (r.approve_when) lines.push(`${pad}  approveWhen: ${JSON.stringify(r.approve_when)},`);
-        if (r.on_max_exceeded)
-          lines.push(`${pad}  onMaxExceeded: ${JSON.stringify(r.on_max_exceeded)},`);
-        lines.push(`${pad}});`);
-        out.push(...lines);
       } else {
         const subflow = r.reviewer;
         validateReviewerSubflow(subflow, label);
@@ -799,41 +807,28 @@ export function emit(
           )
           .join(', ');
 
-        // writer: carries the resolved LABEL; writerInlinePrompt: is emitted
-        // only for an inline writer (the compound reviewer is a subflow, whose
-        // inner steps carry their own inline handling, so there is no single
-        // reviewerInlinePrompt here). Persona writer → byte-identical to before.
-        const lines = [
-          `${pad}const ${v} = await reviewLoop({`,
-          `${pad}  kind: 'compound',`,
-          `${pad}  cli: CLI,`,
-          `${pad}  agentDirs: AGENT_DIRS,`,
-          `${pad}  defaultExtraArgs: DEFAULT_EXTRA_ARGS,`,
-          `${pad}  writer: ${JSON.stringify(writerLabel)},`,
-        ];
-        if (writerInlinePrompt !== undefined)
-          lines.push(`${pad}  writerInlinePrompt: ${JSON.stringify(writerInlinePrompt)},`);
+        // The compound reviewer is a subflow whose inner steps carry their
+        // own inline handling, so there is no single reviewerInlinePrompt
+        // here — only the closure wiring is compound-specific.
         lines.push(
           `${pad}  reviewerSubflow: async (${r.bind ?? v}) => {`,
           ...subBody,
           `${pad}    return { verdict: ${aggBind}, reviewerPaths: [${pathEntries}] };`,
           `${pad}  },`,
-          `${pad}  input: ${inputExprFor(r.input, scope)},`,
-          `${pad}  maxIters: ${r.max_iters ?? 3},`,
-          `${pad}  writerProduces: ${JSON.stringify(r.writer_produces)},`,
         );
-        // No `verdictField:` on the compound branch — the aggregate inside
-        // the subflow already extracts the verdict; the loop only consumes
-        // the aggregate's pre-extracted string. The compound runtime
-        // interface (CompoundReviewerOpts) does not declare verdictField.
-        // Schema-side `verdict_field:` is forbidden on the YAML for the
-        // compound form (a refine in types.ts catches it).
-        if (r.approve_when) lines.push(`${pad}  approveWhen: ${JSON.stringify(r.approve_when)},`);
-        if (r.on_max_exceeded)
-          lines.push(`${pad}  onMaxExceeded: ${JSON.stringify(r.on_max_exceeded)},`);
-        lines.push(`${pad}});`);
-        out.push(...lines);
       }
+
+      lines.push(
+        `${pad}  input: ${inputExprFor(r.input, scope)},`,
+        `${pad}  maxIters: ${r.max_iters ?? 3},`,
+        `${pad}  writerProduces: ${JSON.stringify(r.writer_produces)},`,
+        ...verdictExtractionLines,
+      );
+      if (r.approve_when) lines.push(`${pad}  approveWhen: ${JSON.stringify(r.approve_when)},`);
+      if (r.on_max_exceeded)
+        lines.push(`${pad}  onMaxExceeded: ${JSON.stringify(r.on_max_exceeded)},`);
+      lines.push(`${pad}});`);
+      out.push(...lines);
     } else if (isHumanGate(item)) {
       const h = item.human_gate;
       if (h.interactive === true) {
