@@ -11,12 +11,7 @@ import {
   agentLabel,
 } from '../types.js';
 import { ensureTerminalBindForArm, val, resultNameFor, getBindName } from './flow-helpers.js';
-import {
-  validateReviewerSubflow,
-  validatePath,
-  firstExisting,
-  agentFileLeaf,
-} from './validation.js';
+import { validateReviewerSubflow, validatePath, validatePersonaFile } from './validation.js';
 // Type-only: `AgentCli` is a string union, erased at emit; keeps emit-walker's
 // module graph free of runtime/agent.ts's heavy deps (same posture as
 // validation.ts, whose helpers this file already shares).
@@ -853,22 +848,14 @@ export function emit(
         const gateLabel =
           agent !== undefined ? `human_gate (agent '${agent}')` : 'human_gate (general)';
         if (agent !== undefined) {
-          // Persona gate: the agent must have a persona file in at least one
-          // layer of agentDirs. Same layered probe as the flow-walking check
-          // (validateAgentFilesExist) but inlined here because human_gate has
-          // its own emit branch. Shares the same cli-aware leaf so both sites
-          // validate the exact filename the CLI will open. A general gate
+          // Persona gate: the agent must resolve exactly like a flow step's —
+          // the same shared probe as the flow-walking check
+          // (validateAgentFilesExist), called here because human_gate has its
+          // own emit branch. Covers the layered cli-aware existence check AND
+          // claude's frontmatter-name check, so a gate persona that claude
+          // would not register fails at compile time too. A general gate
           // (agent omitted) spawns no persona, so there is nothing to probe.
-          const { found, attempted } = firstExisting(agentDirs, agentFileLeaf(cli, agent));
-          if (found === null) {
-            throw new Error(
-              `Compile error: human_gate interactive mode references agent '${agent}' ` +
-                `but no persona file exists at either layer:\n` +
-                attempted.map((p) => `  ${p}`).join('\n') +
-                '\n' +
-                `Create the file at either path or fix the agent name.`,
-            );
-          }
+          validatePersonaFile(agentDirs, cli, agent, 'human_gate interactive mode');
         }
         checkConsume(input, `${gateLabel}.input`, scope);
         // `input:` resolves to the artifact PATH (a string identifier referring

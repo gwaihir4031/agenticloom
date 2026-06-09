@@ -404,6 +404,31 @@ flow:
     const emitted = compile(yamlPath);
     expect(emitted).toMatch(/await humanGate\({[\s\S]*?agent: "gate-agent"/);
   });
+
+  it('rejects an interactive claude human_gate whose persona frontmatter name mismatches', () => {
+    // The gate probe shares validatePersonaFile with the flow-walking check,
+    // so claude's frontmatter-name guard applies to gate personas too: a
+    // mismatched name: would make `--agent gate-agent` silently run
+    // persona-less.
+    mkdirSync('.claude/agents', { recursive: true });
+    writeFileSync('.claude/agents/gate-agent.md', '---\nname: other-name\n---\nbody\n');
+    const yamlPath = setupFixture({
+      yaml: `
+pipeline: claude-gate-fm-mismatch
+cli: claude
+inputs: [x]
+flow:
+  - human_gate:
+      interactive: true
+      agent: gate-agent
+      input: $x
+      prompt: review
+`,
+    });
+    expect(() => compile(yamlPath)).toThrow(
+      /human_gate interactive mode[\s\S]*declares frontmatter name: 'other-name' but the pipeline references 'gate-agent'/,
+    );
+  });
 });
 
 describe('emit shape — general (omitted-agent) human_gate', () => {
@@ -437,8 +462,8 @@ flow:
   });
 
   it('compiles a general gate nested in a branch arm with no persona file (probe skipped)', () => {
-    // The persona probe (firstExisting + agentFileLeaf) runs only when `agent`
-    // is present, at every emit() site including the recursive branch-arm one.
+    // The persona probe (validatePersonaFile) runs only when `agent` is
+    // present, at every emit() site including the recursive branch-arm one.
     // A general gate references no persona file, so compile must not probe —
     // it would otherwise throw a missing-persona error for a file that was
     // never meant to exist. No agents are created here.

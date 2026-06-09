@@ -304,6 +304,86 @@ flow:
   });
 });
 
+describe('claude frontmatter name check (via compile)', () => {
+  // claude registers agents by the frontmatter `name:` field, not the
+  // filename — a persona file whose frontmatter is missing or mismatched is
+  // invisible to `--agent <name>`, and claude exits 0 and runs persona-less.
+  // These tests pin the compile-time guard on top of the existence check.
+  // The positive matching-name case is covered throughout this file: every
+  // setupFixture persona carries `name: <agent>` frontmatter.
+  const yamlReferencing = (agent: string) => `
+pipeline: fm-check
+cli: claude
+inputs: [x]
+flow:
+  - step: ${agent}
+    input: $x
+    produces: out.md
+`;
+
+  it('rejects a persona whose frontmatter name mismatches the reference, naming both', () => {
+    mkdirSync('.claude/agents', { recursive: true });
+    writeFileSync('.claude/agents/reviewer.md', '---\nname: other-name\n---\nbody\n');
+    const yamlPath = setupFixture({ yaml: yamlReferencing('reviewer') });
+    expect(() => compile(yamlPath)).toThrow(
+      /\.claude\/agents\/reviewer\.md declares frontmatter name: 'other-name' but the pipeline references 'reviewer'/,
+    );
+  });
+
+  it('rejects a persona file with no frontmatter, telling the user to add name:', () => {
+    // Files written for the pre-delegation runtime (which inlined bodies
+    // regardless of frontmatter) may have no frontmatter at all.
+    mkdirSync('.claude/agents', { recursive: true });
+    writeFileSync('.claude/agents/reviewer.md', 'You are a meticulous reviewer.\n');
+    const yamlPath = setupFixture({ yaml: yamlReferencing('reviewer') });
+    expect(() => compile(yamlPath)).toThrow(
+      /has no 'name:' frontmatter[\s\S]*Add frontmatter at the top of the file:[\s\S]*name: reviewer/,
+    );
+  });
+
+  it('rejects a persona whose frontmatter block lacks a name: field', () => {
+    mkdirSync('.claude/agents', { recursive: true });
+    writeFileSync('.claude/agents/reviewer.md', '---\ntools: Read\n---\nbody\n');
+    const yamlPath = setupFixture({ yaml: yamlReferencing('reviewer') });
+    expect(() => compile(yamlPath)).toThrow(/has no 'name:' frontmatter/);
+  });
+
+  it('rejects a persona whose frontmatter YAML is malformed, naming the parse problem', () => {
+    mkdirSync('.claude/agents', { recursive: true });
+    writeFileSync('.claude/agents/reviewer.md', '---\nname: [unclosed\n---\nbody\n');
+    const yamlPath = setupFixture({ yaml: yamlReferencing('reviewer') });
+    expect(() => compile(yamlPath)).toThrow(/frontmatter YAML failed to parse/);
+  });
+
+  it('accepts a frontmatter-only persona (name + tools, empty body)', () => {
+    // The bare-cli agent convention: the CLI loads an empty system prompt
+    // but applies the file's tools:.
+    mkdirSync('.claude/agents', { recursive: true });
+    writeFileSync('.claude/agents/reviewer.md', '---\nname: reviewer\ntools: Read\n---\n');
+    const yamlPath = setupFixture({ yaml: yamlReferencing('reviewer') });
+    expect(() => compile(yamlPath)).not.toThrow();
+  });
+
+  it('accepts a copilot persona without frontmatter (existence-only check)', () => {
+    // copilot's resolution semantics are less verified and it fails loud at
+    // runtime, so the frontmatter guard is claude-only.
+    mkdirSync('.github/agents', { recursive: true });
+    writeFileSync('.github/agents/reviewer.agent.md', 'You are a meticulous reviewer.\n');
+    const yamlPath = setupFixture({
+      yaml: `
+pipeline: copilot-no-fm
+cli: copilot
+inputs: [x]
+flow:
+  - step: reviewer
+    input: $x
+    produces: out.md
+`,
+    });
+    expect(() => compile(yamlPath)).not.toThrow();
+  });
+});
+
 describe('validatePath (via compile)', () => {
   it('rejects absolute path in produces', () => {
     const yamlPath = setupFixture({

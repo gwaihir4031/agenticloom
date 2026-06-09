@@ -64,6 +64,12 @@ postscript (the I/O contract). The file leaf is cli-aware:
 | `claude`        | `<name>.md`       | `.claude/agents/code-reviewer.md`       |
 | `copilot`       | `<name>.agent.md` | `.github/agents/code-reviewer.agent.md` |
 
+Compile validates every referenced persona file: it must exist at the
+cli-aware leaf, and on claude its frontmatter `name:` must equal the
+reference — claude registers agents by frontmatter name, not filename, so a
+missing or mismatched `name:` would make `--agent` silently run
+persona-less. copilot personas are checked for file existence only.
+
 A frontmatter-only persona (no body) still works — the CLI loads an empty
 system prompt but applies the file's `tools:` / `model:`.
 
