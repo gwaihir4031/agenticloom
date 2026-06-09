@@ -83,6 +83,12 @@ async function confirmYesOrThrow(): Promise<void> {
   if (!/^y/i.test(ans)) throw new Error('Pipeline halted by human gate.');
 }
 
+/** Display label for a gate's agent: the persona name, else the fixed
+ *  general-gate label. Single owner of the fallback so the announcement,
+ *  TTY/exit errors, and the scrollback collapse tag can never disagree on
+ *  the gate's identity. */
+const gateAgentLabel = (agent: string | undefined): string => agent ?? 'human-gate';
+
 /** Spawn the interactive agent session for a `human_gate` with
  *  `interactive: true`. A persona gate (`opts.agent` present) delegates
  *  persona resolution natively via `--agent <name>` on both clis: claude
@@ -99,9 +105,7 @@ async function confirmYesOrThrow(): Promise<void> {
  *  would hide the gate's purpose, and compile-time refusal would add
  *  friction to every local run. */
 async function spawnInteractiveAgent(opts: InteractiveGateOpts): Promise<void> {
-  // A general gate carries no agent name; fall back to the gate's own label
-  // in every user-facing message (TTY error, announcement, exit/error text).
-  const agentLabel = opts.agent ?? 'human-gate';
+  const agentLabel = gateAgentLabel(opts.agent);
   requireTTYForHumanGate(`interactive mode for agent '${agentLabel}'`);
 
   // The full initial message: loom-built prompt + the auto-appended path
@@ -334,7 +338,7 @@ export async function humanGate(opts?: InteractiveGateOpts): Promise<void> {
   const elapsed = formatDuration(Date.now() - start);
   const tag =
     opts?.interactive === true
-      ? `human gate (${opts.agent ?? 'human-gate'} · ${elapsed})`
+      ? `human gate (${gateAgentLabel(opts.agent)} · ${elapsed})`
       : `human gate (${elapsed})`;
   if (process.stdout.isTTY) {
     const linesToClear = opts?.interactive === true ? 2 : 1;
