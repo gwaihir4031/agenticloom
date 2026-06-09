@@ -877,6 +877,18 @@ describe('ReviseWith schema', () => {
     }
   });
 
+  it('rejects a revise prompt starting with a dash (CLI would parse the -p value as a flag)', () => {
+    // In prompt-only revise mode this string becomes the retry target's
+    // ENTIRE -p value — a dash-leading value kills the spawn on the retry
+    // pass, after the expensive first pass already ran.
+    const result = ReviseWith.safeParse({ prompt: '--- corrected instructions ---\nFix it.' });
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error.issues[0].message).toMatch(/must not start with '-'/);
+    }
+    expect(ReviseWith.safeParse({ prompt: 'Fix it - per the review.' }).success).toBe(true);
+  });
+
   it('rejects revise_with with empty prompt string', () => {
     const result = ReviseWith.safeParse({ prompt: '' });
     expect(result.success).toBe(false);

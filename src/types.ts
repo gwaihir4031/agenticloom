@@ -14,7 +14,20 @@ export const BindName = z.string().regex(/^[a-zA-Z_][a-zA-Z0-9_]*$/, {
 /** Empty `{}` is rejected to eliminate silent retry-with-no-revise. */
 export const ReviseWith = z
   .strictObject({
-    prompt: z.string().min(1).optional(),
+    // Same dash-leading rule as InlineAgent.prompt / the human_gate prompt:
+    // in prompt-only revise mode this string becomes the retry target's
+    // entire -p value, and the CLI parses a dash-leading value as a flag —
+    // the spawn would die on the retry pass, after the expensive first pass
+    // already ran.
+    prompt: z
+      .string()
+      .min(1)
+      .refine((p) => !p.startsWith('-'), {
+        error:
+          "revise_with.prompt: must not start with '-' — the CLI parses a dash-leading " +
+          '-p value as a flag, killing the run on the retry pass. Begin with a word.',
+      })
+      .optional(),
     inputs: z
       .array(
         z.string().min(1).regex(/^\$/, {
