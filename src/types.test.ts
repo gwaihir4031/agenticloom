@@ -393,6 +393,16 @@ describe('HumanGateItem schema', () => {
     expect(result.success).toBe(false);
   });
 
+  it('rejects a prompt starting with a dash (CLI would parse the argv value as a flag)', () => {
+    const result = HumanGateItem.safeParse({
+      human_gate: { interactive: true, input: '$x', prompt: '- iterate with me' },
+    });
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error.issues[0].message).toMatch(/must not start with '-'/);
+    }
+  });
+
   it('rejects interactive: false (literal-true-only)', () => {
     const result = HumanGateItem.safeParse({
       human_gate: { interactive: false },
@@ -1417,6 +1427,20 @@ describe('InlineAgent schema', () => {
 
   it('rejects an inline agent with an empty prompt string', () => {
     expect(InlineAgent.safeParse({ prompt: '', name: 'x' }).success).toBe(false);
+  });
+
+  it('rejects a prompt starting with a dash (CLI would parse the -p value as a flag)', () => {
+    // A pasted persona file (leading frontmatter '---') and a leading markdown
+    // list ('- check x') are the two realistic shapes; both die at spawn with
+    // the CLI's "unknown option" parse error, so compile rejects them early.
+    const frontmatter = InlineAgent.safeParse({ prompt: '---\nname: x\n---\nbody', name: 'n' });
+    expect(frontmatter.success).toBe(false);
+    if (!frontmatter.success) {
+      expect(frontmatter.error.issues[0].message).toMatch(/must not start with '-'/);
+    }
+    expect(InlineAgent.safeParse({ prompt: '- review the spec', name: 'n' }).success).toBe(false);
+    // A dash later in the prompt is fine — only the leading byte breaks argv parsing.
+    expect(InlineAgent.safeParse({ prompt: 'review - then report', name: 'n' }).success).toBe(true);
   });
 
   it('rejects a name with a leading underscore', () => {

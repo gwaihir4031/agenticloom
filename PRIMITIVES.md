@@ -74,7 +74,9 @@ persona file:
   no `$ref` interpolation. Per-invocation data still flows via `input:` /
   `inputs:` (loom passes the producer paths), and loom's role postscript
   still supplies the output contract. Static-prompt is deliberate: an
-  inline `prompt:` is fixed task/criteria, not a per-run template.
+  inline `prompt:` is fixed task/criteria, not a per-run template. Must
+  not start with `-` — the CLI parses a dash-leading `-p` value as a
+  flag, so compile rejects it (same rule for the `human_gate` prompt).
 - `name` (**required**) — the agent's identity in logs, window titles,
   error messages, and mermaid nodes. fs-safe
   (`/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/`) because it names log files.

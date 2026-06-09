@@ -67,7 +67,18 @@ export const OnFail = z.strictObject({
  *  string) is the discriminator that lets compile reject a task-less inline
  *  agent. */
 export const InlineAgent = z.strictObject({
-  prompt: z.string().min(1),
+  // `.refine`: the prompt heads the spawned `-p` value, and both CLIs parse a
+  // dash-leading value as a flag (`claude -p '---…'` → "error: unknown
+  // option"), so a leading '-' is a guaranteed runtime spawn failure —
+  // reject it at compile time instead.
+  prompt: z
+    .string()
+    .min(1)
+    .refine((p) => !p.startsWith('-'), {
+      error:
+        "prompt: must not start with '-' — the CLI parses a dash-leading -p value as a flag " +
+        '(a pasted frontmatter `---` or a leading markdown list breaks the spawn). Begin with a word.',
+    }),
   name: z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/, {
     error:
       'name: must match /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/ (fs-safe: it names log files; ' +
@@ -348,6 +359,12 @@ export const HumanGateItemBody = z.strictObject({
         .min(1, {
           error:
             "human_gate: 'prompt:' must be non-empty — it is the gate's initial message and, for a general gate (no agent:), the agent's entire task",
+        })
+        // Same dash-leading rule as InlineAgent.prompt: the gate prompt heads
+        // the interactive spawn's positional message argv value.
+        .refine((p) => !p.startsWith('-'), {
+          error:
+            "human_gate: 'prompt:' must not start with '-' — the CLI parses a dash-leading argv value as a flag. Begin with a word.",
         })
         .optional(),
       // Per-gate cli args override (REPLACES `default_extra_args:`, doesn't
