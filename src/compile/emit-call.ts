@@ -8,8 +8,8 @@ import {
   isBranch,
   isAggregate,
   isForeach,
-  isInlineAgent,
   agentLabel,
+  inlinePromptOf,
 } from '../types.js';
 import { ProducerInfo } from './scope.js';
 import { inputExprFor, multiInputExpr, computeInputPaths, substituteBindRefs } from './inputs.js';
@@ -171,9 +171,9 @@ export function emitRunAgentExpr(
   // (on_fail retry via buildRetryBody, parallel-child re-fire via
   // emitParallelRetry) through here re-bakes the inline prompt automatically.
   const agentArg = JSON.stringify(agentLabel(it.step));
-  const inlinePromptClause = isInlineAgent(it.step)
-    ? `, inlinePrompt: ${JSON.stringify(it.step.prompt)}`
-    : '';
+  const inlinePrompt = inlinePromptOf(it.step);
+  const inlinePromptClause =
+    inlinePrompt !== undefined ? `, inlinePrompt: ${JSON.stringify(inlinePrompt)}` : '';
   const optsExpr = `{ cli: CLI, agentDirs: AGENT_DIRS, extraArgs: ${extraArgsExpr}${timeoutExpr}${inputPathsClause}${inlinePromptClause} }`;
   return `await runAgent(${agentArg}, ${inputExpr}${producesArg}, ${optsExpr})`;
 }

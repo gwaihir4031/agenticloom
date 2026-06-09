@@ -7,8 +7,8 @@ import {
   isBranch,
   isAggregate,
   isForeach,
-  isInlineAgent,
   agentLabel,
+  inlinePromptOf,
 } from '../types.js';
 import { ensureTerminalBindForArm, val, resultNameFor, getBindName } from './flow-helpers.js';
 import { validateReviewerSubflow, validatePath, validatePersonaFile } from './validation.js';
@@ -120,7 +120,7 @@ export function emitPreCursorItem(
         location: `step '${resolvedLabel}'`,
         fileField: 'produces',
         agentName: resolvedLabel,
-        inlinePrompt: isInlineAgent(item.step) ? item.step.prompt : undefined,
+        inlinePrompt: inlinePromptOf(item.step),
         producesPath: item.produces,
         extraArgs: item.extra_args,
         timeout: item.timeout,
@@ -192,7 +192,7 @@ export function emitPreCursorItem(
             location: `step '${childLabel}' (hoisted from parallel)`,
             fileField: 'produces',
             agentName: childLabel,
-            inlinePrompt: isInlineAgent(child.step) ? child.step.prompt : undefined,
+            inlinePrompt: inlinePromptOf(child.step),
             producesPath: child.produces,
             extraArgs: child.extra_args,
             timeout: child.timeout,
@@ -543,7 +543,7 @@ export function emit(
           location: stepLabel,
           fileField: 'produces',
           agentName: resolvedLabel,
-          inlinePrompt: isInlineAgent(item.step) ? item.step.prompt : undefined,
+          inlinePrompt: inlinePromptOf(item.step),
           producesPath: item.produces,
           extraArgs: item.extra_args,
           timeout: item.timeout,
@@ -641,7 +641,7 @@ export function emit(
       // inline, its baked prompt threads to the runtime as `writerInlinePrompt`;
       // persona writers leave it undefined and take runAgent's `--agent` path.
       const writerLabel = agentLabel(r.writer);
-      const writerInlinePrompt = isInlineAgent(r.writer) ? r.writer.prompt : undefined;
+      const writerInlinePrompt = inlinePromptOf(r.writer);
       const label = `review_loop writer='${writerLabel}'`;
       checkConsume(r.input, `${label}.input`, scope);
       validatePath(r.writer_produces, 'writer_produces', label);
@@ -672,7 +672,7 @@ export function emit(
         const verdictField = r.verdict_field!;
         // Resolve the reviewer's agent reference the same way as the writer.
         const reviewerLabel = agentLabel(r.reviewer);
-        const reviewerInlinePrompt = isInlineAgent(r.reviewer) ? r.reviewer.prompt : undefined;
+        const reviewerInlinePrompt = inlinePromptOf(r.reviewer);
         validatePath(reviewerProduces, 'reviewer_produces', label);
         // Intra-block self-collision: each role has its own file. Same path
         // across roles means one overwrites the other between iterations or

@@ -18,6 +18,7 @@ import {
   isForeach,
   isInlineAgent,
   agentLabel,
+  inlinePromptOf,
 } from './types.js';
 import type { FlowItem } from './types.js';
 
@@ -1437,9 +1438,9 @@ describe('FlowItem variant discriminators are unique', () => {
 // An agent reference is either a bare persona-name string (the CLI loads its
 // agent file) or an inline-agent object. The object form is the discriminator
 // that lets a later compile pass reject a task-less inline agent. These blocks
-// pin the schema's accept/reject surface and the two pure read helpers
-// (isInlineAgent / agentLabel) that every later compile + mermaid site resolves
-// the union through.
+// pin the schema's accept/reject surface and the pure read helpers
+// (isInlineAgent / agentLabel / inlinePromptOf) that every later compile +
+// mermaid site resolves the union through.
 
 describe('InlineAgent schema', () => {
   it('accepts an inline agent with prompt and a valid name', () => {
@@ -1527,6 +1528,18 @@ describe('AgentRef read helpers — agentLabel', () => {
 
   it('returns the required name for an inline agent', () => {
     expect(agentLabel({ prompt: 'p', name: 'n' })).toBe('n');
+  });
+});
+
+describe('AgentRef read helpers — inlinePromptOf', () => {
+  it('returns undefined for a persona-name string', () => {
+    expect(inlinePromptOf('persona')).toBeUndefined();
+  });
+
+  it('returns the baked prompt for an inline agent', () => {
+    expect(inlinePromptOf({ prompt: 'Review the diff.', name: 'reviewer' })).toBe(
+      'Review the diff.',
+    );
   });
 });
 

@@ -260,6 +260,14 @@ export const isInlineAgent = (ref: AgentRef): ref is InlineAgentT => typeof ref 
  *  behavior. */
 export const agentLabel = (ref: AgentRef): string => (isInlineAgent(ref) ? ref.name : ref);
 
+/** Baked inline prompt of an agent reference: the inline agent's `prompt`;
+ *  undefined for a persona name. Companion to `agentLabel` — the pair
+ *  (label, inlinePrompt) is what every compile site derives from an
+ *  AgentRef; missing the prompt half at a producer site silently degrades
+ *  an inline retry re-fire into a persona lookup with no file. */
+export const inlinePromptOf = (ref: AgentRef): string | undefined =>
+  isInlineAgent(ref) ? ref.prompt : undefined;
+
 /** Raw schema body for `StepItem`, BEFORE the `z.ZodType<StepItemT>`
  *  annotation widens away the inferred type. Exported so the bidirectional
  *  drift-detection tests in `types.test.ts` can compare
