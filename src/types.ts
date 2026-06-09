@@ -74,19 +74,31 @@ export const OnFail = z.strictObject({
 });
 
 /** Shared schema for `default_extra_args:` / `extra_args:`. Rejects a
- *  smuggled `--agent`: loom owns agent delegation, and extra args are
- *  appended AFTER loom's own `--agent <name>` in the spawn argv, so a user
- *  `--agent` would silently win (last flag wins) and replace the
- *  compile-validated persona — or give an inline agent a persona it must
- *  not have. */
+ *  smuggled `--agent` or `--agents`: loom owns agent delegation. Extra args
+ *  are appended AFTER loom's own `--agent <name>` in the spawn argv, so a
+ *  user `--agent` would silently win (last flag wins) and replace the
+ *  compile-validated persona — and a user `--agents` JSON definition can
+ *  shadow a persona under the same name (the init-roster audit cannot catch
+ *  that: the name IS in the roster). */
 const ExtraArgs = z
   .array(z.string())
-  .refine((a) => !a.some((s) => s === '--agent' || s.startsWith('--agent=')), {
-    error:
-      "extra_args: must not contain '--agent' — loom owns agent delegation " +
-      '(the persona comes from step:/writer:/reviewer:/agent:); a trailing --agent ' +
-      'would silently replace the compile-validated persona.',
-  });
+  .refine(
+    (a) =>
+      !a.some(
+        (s) =>
+          s === '--agent' ||
+          s.startsWith('--agent=') ||
+          s === '--agents' ||
+          s.startsWith('--agents='),
+      ),
+    {
+      error:
+        "extra_args: must not contain '--agent' or '--agents' — loom owns agent " +
+        'delegation (the persona comes from step:/writer:/reviewer:/agent:). A trailing ' +
+        '--agent would silently replace the compile-validated persona; an --agents JSON ' +
+        'definition can shadow a persona under the same name.',
+    },
+  );
 
 /** A general (inline) agent: no persona file, all tools. `prompt` is the agent's
  *  task — required and static (no `$ref` interpolation; data flows via `input:` /

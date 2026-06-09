@@ -157,6 +157,17 @@ describe('StepItem schema', () => {
     expect(StepItem.safeParse({ step: 'a', extra_args: ['--agent=helper'] }).success).toBe(false);
   });
 
+  it("rejects '--agents' (inline JSON agent definitions) in extra_args", () => {
+    // --agents can shadow a compile-validated persona under the same name;
+    // the init-roster audit cannot catch it (the name IS in the roster).
+    expect(
+      StepItem.safeParse({ step: 'a', extra_args: ['--agents', '{"a": {"prompt": "x"}}'] }).success,
+    ).toBe(false);
+    expect(
+      StepItem.safeParse({ step: 'a', extra_args: ['--agents={"a": {"prompt": "x"}}'] }).success,
+    ).toBe(false);
+  });
+
   it('rejects unknown keys (strict mode)', () => {
     expect(StepItem.safeParse({ step: 'a', unknown_key: 'x' }).success).toBe(false);
   });
