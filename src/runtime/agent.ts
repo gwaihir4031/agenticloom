@@ -499,7 +499,9 @@ export async function runAgent(
                     `claude registers agents by their frontmatter 'name:' field, resolving ` +
                     `.claude/agents/ from the spawn cwd up to the git root, plus ` +
                     `~/.claude/agents. Check the persona file's 'name:' frontmatter matches ` +
-                    `'${name}' and that the file is visible from ${agentCwd}. ` +
+                    `'${name}', that the file is visible from ${agentCwd}, and that its ` +
+                    `frontmatter includes a description: (claude refuses to register agents ` +
+                    `without one). ` +
                     `Agents claude loaded: ${loaded.length === 0 ? '(none)' : `[${loaded.join(', ')}]`}.`,
                 ),
               );

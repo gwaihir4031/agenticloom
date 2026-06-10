@@ -314,7 +314,9 @@ is either a persona name or an inline agent:
   `tools:`**; loom no longer inlines the persona body. The persona file
   must be discoverable via the layered lookup below — missing files are
   caught at compile time (a bare-cli agent with no body still works as a
-  frontmatter-only file). On claude the persona's `tools:` bind even under
+  frontmatter-only file, as long as the frontmatter carries both `name:`
+  and `description:` — claude refuses to register an agent without a
+  description). On claude the persona's `tools:` bind even under
   `--dangerously-skip-permissions` (real least privilege). On copilot the
   same `--agent` delegation applies, though copilot's CLI-side enforcement
   of agent `tools:` is version-sensitive and not yet in effect as of

@@ -65,13 +65,15 @@ postscript (the I/O contract). The file leaf is cli-aware:
 | `copilot`       | `<name>.agent.md` | `.github/agents/code-reviewer.agent.md` |
 
 Compile validates every referenced persona file: it must exist at the
-cli-aware leaf, and on claude some layer's frontmatter `name:` must equal
-the reference — claude registers both layers and resolves `--agent` by
-frontmatter name, not filename, so a project file whose `name:` mismatches
-is a different agent (a matching global file still satisfies the
-reference), and compile fails only when no layer's `name:` matches, which
-would make `--agent` silently run persona-less. copilot personas are
-checked for file existence only.
+cli-aware leaf, and on claude some layer's frontmatter must declare both a
+`name:` equal to the reference and a non-empty `description:` — claude
+registers both layers, resolves `--agent` by frontmatter name, not
+filename, and refuses to register an agent whose frontmatter lacks a
+description. A project file whose `name:` mismatches is a different agent
+(a matching global file still satisfies the reference), a description-less
+file never registers at all, and compile fails only when no layer
+satisfies the reference, which would make `--agent` silently run
+persona-less. copilot personas are checked for file existence only.
 
 Discovery asymmetry to know about: loom's compile check probes exactly two
 layers (`<cwd>/.claude/agents/` and `~/.claude/agents/`), while claude
@@ -84,7 +86,9 @@ agent that doesn't resolve at all, but a same-named ancestor persona
 resolves silently — prefer running `loom` from the repo root.
 
 A frontmatter-only persona (no body) still works — the CLI loads an empty
-system prompt but applies the file's `tools:` / `model:`.
+system prompt but applies the file's `tools:` / `model:`. The frontmatter
+must carry BOTH `name:` and `description:`: claude refuses to register an
+agent file without a description, so a name-only file never loads.
 
 **Inline agent (`{ prompt, name }`).** A one-off general agent with no
 persona file:

@@ -308,9 +308,12 @@ describe('claude frontmatter name check (via compile)', () => {
   // claude registers agents by the frontmatter `name:` field, not the
   // filename — a persona file whose frontmatter is missing or mismatched is
   // invisible to `--agent <name>`, and claude exits 0 and runs persona-less.
-  // These tests pin the compile-time guard on top of the existence check.
-  // The positive matching-name case is covered throughout this file: every
-  // setupFixture persona carries `name: <agent>` frontmatter.
+  // claude also refuses to REGISTER an agent whose frontmatter lacks a
+  // `description:` (live-verified on 2.1.170), so a name-only file is just
+  // as invisible. These tests pin the compile-time guard on top of the
+  // existence check. The positive case is covered throughout this file:
+  // every setupFixture persona carries `name: <agent>` + `description:`
+  // frontmatter.
   const yamlReferencing = (agent: string) => `
 pipeline: fm-check
 cli: claude
@@ -355,11 +358,53 @@ flow:
     expect(() => compile(yamlPath)).toThrow(/frontmatter YAML failed to parse/);
   });
 
-  it('accepts a frontmatter-only persona (name + tools, empty body)', () => {
-    // The bare-cli agent convention: the CLI loads an empty system prompt
-    // but applies the file's tools:.
+  it('rejects a persona whose frontmatter has a matching name: but no description:', () => {
+    // claude (live-verified on 2.1.170) refuses to REGISTER an agent whose
+    // frontmatter lacks description:, so a name-only file passes the name
+    // check yet never loads — `--agent reviewer` would run persona-less.
     mkdirSync('.claude/agents', { recursive: true });
-    writeFileSync('.claude/agents/reviewer.md', '---\nname: reviewer\ntools: Read\n---\n');
+    writeFileSync('.claude/agents/reviewer.md', '---\nname: reviewer\n---\nbody\n');
+    const yamlPath = setupFixture({ yaml: yamlReferencing('reviewer') });
+    let message = '';
+    try {
+      compile(yamlPath);
+    } catch (e) {
+      message = e instanceof Error ? e.message : String(e);
+    }
+    // ONE thrown error covers everything asserted below: the path, the
+    // missing-description reason, the persona-less consequence, and the
+    // fix-it showing the FULL minimal loadable block (a name-only template
+    // would instruct the user to create another unloadable file).
+    expect(message).toContain('.claude/agents/reviewer.md');
+    expect(message).toContain("declares name: 'reviewer' but has no 'description:' frontmatter");
+    expect(message).toContain('claude refuses to register agents without a description');
+    expect(message).toContain('persona-less');
+    expect(message).toMatch(
+      /Add a description line to the frontmatter:\n {2}---\n {2}name: reviewer\n {2}description: <one line on when to use this agent>\n {2}---/,
+    );
+  });
+
+  it('rejects a persona whose description: is an empty string', () => {
+    // An empty description is as unloadable as a missing one — claude does
+    // not register the agent either way.
+    mkdirSync('.claude/agents', { recursive: true });
+    writeFileSync(
+      '.claude/agents/reviewer.md',
+      "---\nname: reviewer\ndescription: ''\n---\nbody\n",
+    );
+    const yamlPath = setupFixture({ yaml: yamlReferencing('reviewer') });
+    expect(() => compile(yamlPath)).toThrow(/has no 'description:' frontmatter/);
+  });
+
+  it('accepts a frontmatter-only persona (name + description, empty body)', () => {
+    // The bare-cli agent convention: the CLI loads an empty system prompt
+    // but applies the file's frontmatter. name: + description: is the
+    // minimal block claude registers, so it must compile clean as-is.
+    mkdirSync('.claude/agents', { recursive: true });
+    writeFileSync(
+      '.claude/agents/reviewer.md',
+      '---\nname: reviewer\ndescription: test persona\n---\n',
+    );
     const yamlPath = setupFixture({ yaml: yamlReferencing('reviewer') });
     expect(() => compile(yamlPath)).not.toThrow();
   });
@@ -371,7 +416,7 @@ flow:
     mkdirSync('.claude/agents', { recursive: true });
     writeFileSync(
       '.claude/agents/reviewer.md',
-      '---\r\ntools: Read\r\nname: reviewer\r\n---\r\nbody\r\n',
+      '---\r\ndescription: test persona\r\nname: reviewer\r\n---\r\nbody\r\n',
     );
     const yamlPath = setupFixture({ yaml: yamlReferencing('reviewer') });
     expect(() => compile(yamlPath)).not.toThrow();
@@ -381,7 +426,10 @@ flow:
     // A BOM at byte 0 defeated the startsWith('---') fence check and
     // produced a false "no frontmatter" error for a file claude loads fine.
     mkdirSync('.claude/agents', { recursive: true });
-    writeFileSync('.claude/agents/reviewer.md', '\uFEFF---\nname: reviewer\n---\nbody\n');
+    writeFileSync(
+      '.claude/agents/reviewer.md',
+      '\uFEFF---\nname: reviewer\ndescription: test persona\n---\nbody\n',
+    );
     const yamlPath = setupFixture({ yaml: yamlReferencing('reviewer') });
     expect(() => compile(yamlPath)).not.toThrow();
   });
@@ -403,7 +451,10 @@ flow:
     // claude loads '--- \n' fences; the exact startsWith('---\n') check
     // rejected them with a false "no frontmatter" error.
     mkdirSync('.claude/agents', { recursive: true });
-    writeFileSync('.claude/agents/reviewer.md', '--- \nname: reviewer\n---\nbody\n');
+    writeFileSync(
+      '.claude/agents/reviewer.md',
+      '--- \nname: reviewer\ndescription: test persona\n---\nbody\n',
+    );
     const yamlPath = setupFixture({ yaml: yamlReferencing('reviewer') });
     expect(() => compile(yamlPath)).not.toThrow();
   });
@@ -445,7 +496,10 @@ flow:
       // works. Compile must mirror that and pass.
       const globalAgents = splitProjectLayerFromGlobal();
       writeFileSync('.claude/agents/reviewer.md', '---\nname: other-name\n---\nbody\n');
-      writeFileSync(path.join(globalAgents, 'reviewer.md'), '---\nname: reviewer\n---\nbody\n');
+      writeFileSync(
+        path.join(globalAgents, 'reviewer.md'),
+        '---\nname: reviewer\ndescription: test persona\n---\nbody\n',
+      );
       const yamlPath = setupFixture({ yaml: yamlReferencing('reviewer') });
       expect(() => compile(yamlPath)).not.toThrow();
     });
@@ -458,7 +512,7 @@ flow:
       const globalAgents = splitProjectLayerFromGlobal();
       writeFileSync('.claude/agents/reviewer.md', '---\nname: other-name\n---\nbody\n');
       const globalPath = path.join(globalAgents, 'reviewer.md');
-      writeFileSync(globalPath, '---\nname: reviewer\n---\nbody\n');
+      writeFileSync(globalPath, '---\nname: reviewer\ndescription: test persona\n---\nbody\n');
       const resolved = validatePersonaFile(
         ['.claude/agents/', '~/.claude/agents/'],
         'claude',
@@ -473,7 +527,10 @@ flow:
       // reference on its own, so a global file that would fail the check
       // (mismatched name) must not be able to break compile.
       const globalAgents = splitProjectLayerFromGlobal();
-      writeFileSync('.claude/agents/reviewer.md', '---\nname: reviewer\n---\nbody\n');
+      writeFileSync(
+        '.claude/agents/reviewer.md',
+        '---\nname: reviewer\ndescription: test persona\n---\nbody\n',
+      );
       writeFileSync(path.join(globalAgents, 'reviewer.md'), '---\nname: wrong-name\n---\nbody\n');
       const yamlPath = setupFixture({ yaml: yamlReferencing('reviewer') });
       expect(() => compile(yamlPath)).not.toThrow();
@@ -507,8 +564,52 @@ flow:
       expect(message).toMatch(
         /\n {2}\/[^\n]*\.claude\/agents\/reviewer\.md has no 'name:' frontmatter\n/,
       );
-      // ...and the fix-it tail.
-      expect(message).toMatch(/add it at the top:\n {2}---\n {2}name: reviewer\n {2}---/);
+      // ...and the fix-it tail showing the full minimal loadable block
+      // (name: alone is unloadable — claude refuses to register an agent
+      // without a description).
+      expect(message).toMatch(
+        /the minimal loadable block is:\n {2}---\n {2}name: reviewer\n {2}description: <one line on when to use this agent>\n {2}---/,
+      );
+    });
+
+    it('skips a description-less project layer and resolves a loadable global-layer persona', () => {
+      // claude refuses to register the description-less project file, so
+      // `--agent reviewer` loads the global file and the run works. Compile
+      // must mirror that skip rather than failing on the first name-matched
+      // layer.
+      const globalAgents = splitProjectLayerFromGlobal();
+      writeFileSync('.claude/agents/reviewer.md', '---\nname: reviewer\n---\nbody\n');
+      writeFileSync(
+        path.join(globalAgents, 'reviewer.md'),
+        '---\nname: reviewer\ndescription: test persona\n---\nbody\n',
+      );
+      const yamlPath = setupFixture({ yaml: yamlReferencing('reviewer') });
+      expect(() => compile(yamlPath)).not.toThrow();
+    });
+
+    it('renders a no-description layer reason in the multi-layer listing', () => {
+      // Project file matches the name but lacks a description (claude would
+      // refuse to register it); global file has no frontmatter at all. The
+      // aggregated error must carry each path's own reason.
+      const globalAgents = splitProjectLayerFromGlobal();
+      writeFileSync('.claude/agents/reviewer.md', '---\nname: reviewer\n---\nbody\n');
+      writeFileSync(path.join(globalAgents, 'reviewer.md'), 'You are a meticulous reviewer.\n');
+      const yamlPath = setupFixture({ yaml: yamlReferencing('reviewer') });
+      let message = '';
+      try {
+        compile(yamlPath);
+      } catch (e) {
+        message = e instanceof Error ? e.message : String(e);
+      }
+      expect(message).toMatch(
+        /references agent 'reviewer' but no layer's persona file satisfies it/,
+      );
+      expect(message).toMatch(
+        /\n {2}\.claude\/agents\/reviewer\.md declares name: 'reviewer' but has no 'description:' frontmatter\n/,
+      );
+      expect(message).toMatch(
+        /\n {2}\/[^\n]*\.claude\/agents\/reviewer\.md has no 'name:' frontmatter\n/,
+      );
     });
   });
 
@@ -520,6 +621,26 @@ flow:
     const yamlPath = setupFixture({
       yaml: `
 pipeline: copilot-no-fm
+cli: copilot
+inputs: [x]
+flow:
+  - step: reviewer
+    input: $x
+    produces: out.md
+`,
+    });
+    expect(() => compile(yamlPath)).not.toThrow();
+  });
+
+  it('accepts a copilot persona whose frontmatter has name: but no description:', () => {
+    // The description requirement mirrors claude's loader refusing to
+    // register description-less agents; copilot stays existence-only, so a
+    // name-only copilot persona must keep compiling.
+    mkdirSync('.github/agents', { recursive: true });
+    writeFileSync('.github/agents/reviewer.agent.md', '---\nname: reviewer\n---\nbody\n');
+    const yamlPath = setupFixture({
+      yaml: `
+pipeline: copilot-no-description
 cli: copilot
 inputs: [x]
 flow:

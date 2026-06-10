@@ -221,7 +221,15 @@ export function setupFixture(opts: {
     const suffix = cli === 'copilot' ? '.agent.md' : '.md';
     mkdirSync(dir, { recursive: true });
     for (const name of opts.agents) {
-      writeFileSync(`${dir}/${name}${suffix}`, `---\nname: ${name}\n---\nbody\n`);
+      // name: + description: is the minimal frontmatter claude registers —
+      // claude refuses to load an agent file without a description, and the
+      // compile-time persona check mirrors that, so default fixtures must
+      // carry both. Tests exercising degenerate frontmatter write their own
+      // files inline instead of using this helper.
+      writeFileSync(
+        `${dir}/${name}${suffix}`,
+        `---\nname: ${name}\ndescription: test persona\n---\nbody\n`,
+      );
     }
   }
   const yamlPath = path.join(cwd, 'pipeline.yaml');

@@ -756,7 +756,10 @@ describe('main() run command (workspace + spawn wiring)', () => {
   // child exits 0 immediately so runChild resolves cleanly.
   function writeMinimalPipeline(dir: string): void {
     mkdirSync(path.join(dir, '.claude/agents'), { recursive: true });
-    writeFileSync(path.join(dir, '.claude/agents/w.md'), '---\nname: w\n---\nbody\n');
+    writeFileSync(
+      path.join(dir, '.claude/agents/w.md'),
+      '---\nname: w\ndescription: test persona\n---\nbody\n',
+    );
     writeFileSync(
       path.join(dir, 'p.yaml'),
       [
@@ -941,8 +944,14 @@ describe('main() --resume-from validation', () => {
 
   function writeMinimalPipeline(dir: string): void {
     mkdirSync(path.join(dir, '.claude/agents'), { recursive: true });
-    writeFileSync(path.join(dir, '.claude/agents/writer.md'), '---\nname: writer\n---\nbody\n');
-    writeFileSync(path.join(dir, '.claude/agents/rev.md'), '---\nname: rev\n---\nbody\n');
+    writeFileSync(
+      path.join(dir, '.claude/agents/writer.md'),
+      '---\nname: writer\ndescription: test persona\n---\nbody\n',
+    );
+    writeFileSync(
+      path.join(dir, '.claude/agents/rev.md'),
+      '---\nname: rev\ndescription: test persona\n---\nbody\n',
+    );
     writeFileSync(
       path.join(dir, 'p.yaml'),
       [
@@ -968,10 +977,22 @@ describe('main() --resume-from validation', () => {
     // `writerOut`. `mid` sits strictly between → cursor naming midOut
     // must be rejected as cursor-inside-retry-zone.
     mkdirSync(path.join(dir, '.claude/agents'), { recursive: true });
-    writeFileSync(path.join(dir, '.claude/agents/writer.md'), '---\nname: writer\n---\nbody\n');
-    writeFileSync(path.join(dir, '.claude/agents/mid.md'), '---\nname: mid\n---\nbody\n');
-    writeFileSync(path.join(dir, '.claude/agents/rev.md'), '---\nname: rev\n---\nbody\n');
-    writeFileSync(path.join(dir, '.claude/agents/follower.md'), '---\nname: follower\n---\nbody\n');
+    writeFileSync(
+      path.join(dir, '.claude/agents/writer.md'),
+      '---\nname: writer\ndescription: test persona\n---\nbody\n',
+    );
+    writeFileSync(
+      path.join(dir, '.claude/agents/mid.md'),
+      '---\nname: mid\ndescription: test persona\n---\nbody\n',
+    );
+    writeFileSync(
+      path.join(dir, '.claude/agents/rev.md'),
+      '---\nname: rev\ndescription: test persona\n---\nbody\n',
+    );
+    writeFileSync(
+      path.join(dir, '.claude/agents/follower.md'),
+      '---\nname: follower\ndescription: test persona\n---\nbody\n',
+    );
     writeFileSync(
       path.join(dir, 'p.yaml'),
       [
@@ -1091,8 +1112,14 @@ describe('main() --resume-from validation', () => {
 
   it('rejects --resume-from naming a nested bind (review_loop subflow)', async () => {
     mkdirSync(path.join(tmpDir, '.claude/agents'), { recursive: true });
-    writeFileSync(path.join(tmpDir, '.claude/agents/writer.md'), '---\nname: writer\n---\nbody\n');
-    writeFileSync(path.join(tmpDir, '.claude/agents/inner.md'), '---\nname: inner\n---\nbody\n');
+    writeFileSync(
+      path.join(tmpDir, '.claude/agents/writer.md'),
+      '---\nname: writer\ndescription: test persona\n---\nbody\n',
+    );
+    writeFileSync(
+      path.join(tmpDir, '.claude/agents/inner.md'),
+      '---\nname: inner\ndescription: test persona\n---\nbody\n',
+    );
     writeFileSync(
       path.join(tmpDir, 'p.yaml'),
       [
@@ -1154,15 +1181,15 @@ describe('main() --resume-from validation', () => {
     mkdirSync(path.join(tmpDir, '.claude/agents'), { recursive: true });
     writeFileSync(
       path.join(tmpDir, '.claude/agents/pre-step.md'),
-      '---\nname: pre-step\n---\nbody\n',
+      '---\nname: pre-step\ndescription: test persona\n---\nbody\n',
     );
     writeFileSync(
       path.join(tmpDir, '.claude/agents/child-a.md'),
-      '---\nname: child-a\n---\nbody\n',
+      '---\nname: child-a\ndescription: test persona\n---\nbody\n',
     );
     writeFileSync(
       path.join(tmpDir, '.claude/agents/child-b.md'),
-      '---\nname: child-b\n---\nbody\n',
+      '---\nname: child-b\ndescription: test persona\n---\nbody\n',
     );
     writeFileSync(
       path.join(tmpDir, 'p.yaml'),
@@ -1237,8 +1264,14 @@ describe('main() --resume-from validation', () => {
 
   it('rejects --resume-from cursor inside an aggregate-host retry zone', async () => {
     mkdirSync(path.join(tmpDir, '.claude/agents'), { recursive: true });
-    writeFileSync(path.join(tmpDir, '.claude/agents/writer.md'), '---\nname: writer\n---\nbody\n');
-    writeFileSync(path.join(tmpDir, '.claude/agents/mid.md'), '---\nname: mid\n---\nbody\n');
+    writeFileSync(
+      path.join(tmpDir, '.claude/agents/writer.md'),
+      '---\nname: writer\ndescription: test persona\n---\nbody\n',
+    );
+    writeFileSync(
+      path.join(tmpDir, '.claude/agents/mid.md'),
+      '---\nname: mid\ndescription: test persona\n---\nbody\n',
+    );
     writeFileSync(
       path.join(tmpDir, 'p.yaml'),
       [
@@ -1411,9 +1444,12 @@ describe('main() --resume-from validation', () => {
     mkdirSync(path.join(tmpDir, '.claude/agents'), { recursive: true });
     writeFileSync(
       path.join(tmpDir, '.claude/agents/pre-step.md'),
-      '---\nname: pre-step\n---\nbody\n',
+      '---\nname: pre-step\ndescription: test persona\n---\nbody\n',
     );
-    writeFileSync(path.join(tmpDir, '.claude/agents/inner.md'), '---\nname: inner\n---\nbody\n');
+    writeFileSync(
+      path.join(tmpDir, '.claude/agents/inner.md'),
+      '---\nname: inner\ndescription: test persona\n---\nbody\n',
+    );
     writeFileSync(
       path.join(tmpDir, 'p.yaml'),
       [
@@ -1478,8 +1514,14 @@ describe('main() --resume-from validation', () => {
     // aggregate's verdict either gates a retry zone (Draft 5 shape, not
     // exercised here) or is the terminal "pass/fail" of the pipeline.
     mkdirSync(path.join(tmpDir, '.claude/agents'), { recursive: true });
-    writeFileSync(path.join(tmpDir, '.claude/agents/writer.md'), '---\nname: writer\n---\nbody\n');
-    writeFileSync(path.join(tmpDir, '.claude/agents/rev.md'), '---\nname: rev\n---\nbody\n');
+    writeFileSync(
+      path.join(tmpDir, '.claude/agents/writer.md'),
+      '---\nname: writer\ndescription: test persona\n---\nbody\n',
+    );
+    writeFileSync(
+      path.join(tmpDir, '.claude/agents/rev.md'),
+      '---\nname: rev\ndescription: test persona\n---\nbody\n',
+    );
     writeFileSync(
       path.join(tmpDir, 'p.yaml'),
       [
@@ -1537,14 +1579,17 @@ describe('main() --resume-from validation', () => {
     // binds are rejected separately as nested-cursor by the existing
     // "rejects nested cursor" tests above.
     mkdirSync(path.join(tmpDir, '.claude/agents'), { recursive: true });
-    writeFileSync(path.join(tmpDir, '.claude/agents/writer.md'), '---\nname: writer\n---\nbody\n');
+    writeFileSync(
+      path.join(tmpDir, '.claude/agents/writer.md'),
+      '---\nname: writer\ndescription: test persona\n---\nbody\n',
+    );
     writeFileSync(
       path.join(tmpDir, '.claude/agents/child-a.md'),
-      '---\nname: child-a\n---\nbody\n',
+      '---\nname: child-a\ndescription: test persona\n---\nbody\n',
     );
     writeFileSync(
       path.join(tmpDir, '.claude/agents/child-b.md'),
-      '---\nname: child-b\n---\nbody\n',
+      '---\nname: child-b\ndescription: test persona\n---\nbody\n',
     );
     writeFileSync(
       path.join(tmpDir, 'p.yaml'),
@@ -1605,10 +1650,13 @@ describe('main() --resume-from validation', () => {
     // (different shape from parallel) so this exercises the
     // getBindNameFromFlowItem branch-path explicitly.
     mkdirSync(path.join(tmpDir, '.claude/agents'), { recursive: true });
-    writeFileSync(path.join(tmpDir, '.claude/agents/writer.md'), '---\nname: writer\n---\nbody\n');
+    writeFileSync(
+      path.join(tmpDir, '.claude/agents/writer.md'),
+      '---\nname: writer\ndescription: test persona\n---\nbody\n',
+    );
     writeFileSync(
       path.join(tmpDir, '.claude/agents/then-step.md'),
-      '---\nname: then-step\n---\nbody\n',
+      '---\nname: then-step\ndescription: test persona\n---\nbody\n',
     );
     writeFileSync(
       path.join(tmpDir, 'p.yaml'),
@@ -1700,8 +1748,14 @@ describe('main() --resume-from validation', () => {
     // the "unknown bind" path and surface available top-level binds
     // (which here are the OTHER step's bind, not the agent name).
     mkdirSync(path.join(tmpDir, '.claude/agents'), { recursive: true });
-    writeFileSync(path.join(tmpDir, '.claude/agents/writer.md'), '---\nname: writer\n---\nbody\n');
-    writeFileSync(path.join(tmpDir, '.claude/agents/rev.md'), '---\nname: rev\n---\nbody\n');
+    writeFileSync(
+      path.join(tmpDir, '.claude/agents/writer.md'),
+      '---\nname: writer\ndescription: test persona\n---\nbody\n',
+    );
+    writeFileSync(
+      path.join(tmpDir, '.claude/agents/rev.md'),
+      '---\nname: rev\ndescription: test persona\n---\nbody\n',
+    );
     writeFileSync(
       path.join(tmpDir, 'p.yaml'),
       [
@@ -2000,7 +2054,10 @@ describe('top-level error wrapper (end-to-end via subprocess)', () => {
    *  for the spawn-ENOENT path. */
   function writeRunnablePipeline(): void {
     mkdirSync(path.join(tmpDir, '.claude/agents'), { recursive: true });
-    writeFileSync(path.join(tmpDir, '.claude/agents/w.md'), '---\nname: w\n---\nbody\n');
+    writeFileSync(
+      path.join(tmpDir, '.claude/agents/w.md'),
+      '---\nname: w\ndescription: test persona\n---\nbody\n',
+    );
     writeFileSync(
       path.join(tmpDir, 'p.yaml'),
       [
@@ -2268,7 +2325,10 @@ describe('Draft 5 CLI-layer rejection coverage (auto-revise on retry_from + aggr
   function writePersonas(names: string[] = ['writer']): void {
     mkdirSync(path.join(tmpDir, '.claude/agents'), { recursive: true });
     for (const n of names) {
-      writeFileSync(path.join(tmpDir, `.claude/agents/${n}.md`), `---\nname: ${n}\n---\nbody\n`);
+      writeFileSync(
+        path.join(tmpDir, `.claude/agents/${n}.md`),
+        `---\nname: ${n}\ndescription: test persona\n---\nbody\n`,
+      );
     }
   }
 
