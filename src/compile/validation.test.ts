@@ -651,6 +651,29 @@ flow:
     });
     expect(() => compile(yamlPath)).not.toThrow();
   });
+
+  it('accepts a copilot persona whose frontmatter name: mismatches the reference', () => {
+    // The mismatch fixture that fails the claude check above must PASS for
+    // copilot: its resolution arm is existence-only. Every other copilot
+    // fixture's frontmatter happens to match its filename (or is absent), so
+    // without this case a refactor accidentally extending the claude
+    // name/description checks to copilot would stay green. The file also
+    // lacks a description:, pinning that check's claude-only scope too.
+    mkdirSync('.github/agents', { recursive: true });
+    writeFileSync('.github/agents/reviewer.agent.md', '---\nname: other-name\n---\nbody\n');
+    const yamlPath = setupFixture({
+      yaml: `
+pipeline: copilot-fm-mismatch
+cli: copilot
+inputs: [x]
+flow:
+  - step: reviewer
+    input: $x
+    produces: out.md
+`,
+    });
+    expect(() => compile(yamlPath)).not.toThrow();
+  });
 });
 
 describe('validatePath (via compile)', () => {

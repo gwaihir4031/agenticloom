@@ -4944,6 +4944,46 @@ flow:
     expect(emitted).toMatch(/rewriteProducerFiles:[\s\S]+inlinePrompt: "Produce the artifact\."/);
   });
 
+  it('re-bakes the inline prompt in the rewrite closure for a pre-cursor producer (--resume-from)', () => {
+    // Under --resume-from the inline producer is rewritten to a path-literal
+    // bind-assignment, so the aggregate's rewrite closure is fed by
+    // emitPreCursorItem's declare (agentName + inlinePrompt), not the main
+    // pass's. The closure must still carry the inline label as the runAgent
+    // name AND the baked prompt — dropping either would degrade the
+    // parse-retry re-fire to a persona `--agent <label>` lookup with no file.
+    const yamlPath = setupFixture({
+      agents: ['mid-agent'],
+      yaml: `
+pipeline: p
+cli: claude
+inputs: [x]
+flow:
+  - step:
+      prompt: Produce the artifact.
+      name: producer
+    input: $x
+    produces: out.json
+    bind: r
+  - step: mid-agent
+    input: $x
+    produces: mid.json
+    bind: mid
+  - aggregate:
+      inputs: { r: $r, mid: $mid }
+      verdict_field: status
+`,
+    });
+    const emitted = compile(yamlPath, { resumeFrom: 'mid' });
+    // The pre-cursor producer is rewritten — a path-literal bind, no spawn...
+    expect(emitted).toMatch(/const r = "out\.json";/);
+    // ...yet its rewrite closure still re-fires by the inline label with the
+    // baked prompt, mirroring the main-pass closure shape above.
+    expect(emitted).toMatch(
+      /rewriteProducerFiles:[\s\S]+runAgent\("producer", correctivePrompt, "out\.json"/,
+    );
+    expect(emitted).toMatch(/rewriteProducerFiles:[\s\S]+inlinePrompt: "Produce the artifact\."/);
+  });
+
   it('re-bakes the inline prompt when an on_fail retry re-emits the retry_from target', () => {
     // The retry_from target is an inline producer; the step-gate retry
     // callback re-emits it through emitRunAgentExpr, so the inline prompt is

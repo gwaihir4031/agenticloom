@@ -1501,8 +1501,14 @@ describe('InlineAgent schema', () => {
 
   it('rejects a name with a leading underscore', () => {
     // Diverges from BindName (which permits a leading underscore): the label
-    // regex requires an alphanumeric first character.
-    expect(InlineAgent.safeParse({ prompt: 'p', name: '_internal' }).success).toBe(false);
+    // regex requires an alphanumeric first character. The message must be the
+    // custom fs-safe one — 'fs-safe' is the discriminating fragment, since
+    // zod's DEFAULT regex message also says "must match pattern /.../".
+    const result = InlineAgent.safeParse({ prompt: 'p', name: '_internal' });
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error.issues[0].message).toMatch(/must match .*fs-safe/);
+    }
   });
 
   it('rejects a name containing whitespace', () => {

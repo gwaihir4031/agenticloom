@@ -1082,6 +1082,32 @@ describe('runAgent', () => {
       ).resolves.toBe('');
     });
 
+    it('renders only the readable names when a garbage-laden roster rejects the spawn', async () => {
+      // Garbage skipping is only falsifiable through a rejection: the test
+      // above resolves via its matching {name} entry, so a coercion
+      // regression (pushing String(entry) for garbage) would stay invisible
+      // there. Here no entry matches, so the spawn must reject — and the
+      // roster listing must carry exactly the readable name, with no
+      // '42' / '[object Object]' coercion artifacts.
+      const { child, wasKilled } = makeKillObservableChild([
+        initWithAgents([42, { foo: 'bar' }, 'other-agent']),
+        resultEvent,
+      ]);
+      spawnMock.mockImplementation(() => child);
+      const { runAgent } = await import('./agent.js');
+      const err = await runAgent('ac-writer', 'prompt', undefined, {
+        cli: 'claude',
+        agentDirs: ['.claude/agents/', '~/.claude/agents/'],
+        extraArgs: [],
+      }).catch((e) => e as Error);
+      expect(err).toBeInstanceOf(Error);
+      expect((err as Error).message).toContain("claude did not load agent 'ac-writer'");
+      expect((err as Error).message).toContain('Agents claude loaded: [other-agent].');
+      expect((err as Error).message).not.toContain('42');
+      expect((err as Error).message).not.toContain('object Object');
+      expect(wasKilled()).toBe(true);
+    });
+
     it('skips the check on inline spawns (no --agent passed, nothing to verify)', async () => {
       const events = [initWithAgents(['something-else']), resultEvent];
       spawnMock.mockImplementation(() => makeFakeRunAgentChild({ stdoutLines: events }));
