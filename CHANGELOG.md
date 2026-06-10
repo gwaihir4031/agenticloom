@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Bindless steps inside a retry zone now re-fire on retry. A step without `bind:` sitting between a gate's `retry_from` target and the gate was admitted as a zone member at compile time but dropped from the emitted retry callback, so attempt 2+ executed a different zone than attempt 1. It now re-fires as a bare statement on every bounce, for step-host (`on_fail`) and aggregate-host (`retry_from`) gates. **Behavior change:** pipelines with such side-effect steps in retry zones now spawn them on every retry attempt. ([#17](https://github.com/gwaihir4031/agenticloom/pull/17))
+
 ## [0.2.0] - 2026-06-10
 
 ### Changed

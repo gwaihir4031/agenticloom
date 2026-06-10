@@ -303,3 +303,97 @@ flow:
     expect(retryBody).not.toMatch(/await foreach\(\{/);
   });
 });
+
+describe('buildRetryBody: bindless step members re-fire as bare statements', () => {
+  // A step with no `bind:` (and typically no `produces:`) sitting between
+  // the retry_from target and the gate is a side-effect member: its
+  // contribution is its effect, not a consumed output. Skipping it on
+  // retry would make attempt 2+ execute a different zone than attempt 1,
+  // so the retry callback re-fires it as a bare statement — no
+  // reassignment; the main pass declared its synthesized `_N` as const
+  // and nothing downstream consumes it.
+  it('re-fires a bindless side-effect step in a step-host gate zone', () => {
+    const yamlPath = setupFixture({
+      agents: ['writer', 'committer', 'rev'],
+      yaml: `
+pipeline: p
+cli: claude
+inputs: [x]
+flow:
+  - step: writer
+    input: $x
+    produces: out.md
+    bind: writerOut
+  - step: committer
+    input: $writerOut
+  - step: rev
+    input: $writerOut
+    produces: rev.json
+    bind: revOut
+    on_fail:
+      verdict_field: status
+      retry_from: writerOut
+      revise_with:
+        inputs: [$revOut]
+`,
+    });
+    const emitted = compile(yamlPath);
+    const retryStart = emitted.indexOf('retry: async (currentVerdict) =>');
+    expect(retryStart).toBeGreaterThan(-1);
+    // Slice up to the gate re-exec `return` so assertions only see the
+    // zone-member re-fires.
+    const retryBody = emitted.slice(retryStart, emitted.indexOf('return ', retryStart));
+    // The bindless member re-fires on every bounce...
+    expect(retryBody).toMatch(/^\s*await runAgent\("committer"/m);
+    // ...as a bare statement, never a reassignment.
+    expect(retryBody).not.toMatch(/= await runAgent\("committer"/);
+    // The re-fire keeps the member's NORMAL input — revise threading
+    // belongs to the retry_from target only.
+    expect(retryBody).toMatch(/await runAgent\("committer", `writer finished its work/);
+  });
+
+  it('re-fires a bindless side-effect step in an aggregate-host gate zone (shared walk)', () => {
+    const yamlPath = setupFixture({
+      agents: ['writer', 'committer', 'rev'],
+      yaml: `
+pipeline: p
+cli: claude
+inputs: [x]
+flow:
+  - step: writer
+    input: $x
+    produces: out.md
+    bind: writerOut
+  - step: committer
+    input: $writerOut
+  - step: rev
+    input: $writerOut
+    produces: rev.json
+    bind: revOut
+  - aggregate:
+      inputs:
+        r: $revOut
+      verdict_field: status
+      bind: agg
+      retry_from: writerOut
+      max_retries: 1
+      revise_with:
+        inputs: [$revOut]
+`,
+    });
+    const emitted = compile(yamlPath);
+    const retryStart = emitted.indexOf('retry: async (currentVerdict) =>');
+    expect(retryStart).toBeGreaterThan(-1);
+    const retryBody = emitted.slice(retryStart, emitted.indexOf('return ', retryStart));
+    expect(retryBody).toMatch(/^\s*await runAgent\("committer"/m);
+    expect(retryBody).not.toMatch(/= await runAgent\("committer"/);
+    // Flow order is preserved: target re-fire, then the side-effect
+    // member, then the bound member.
+    const writerIdx = retryBody.indexOf('writerOut = await runAgent("writer"');
+    const committerIdx = retryBody.indexOf('await runAgent("committer"');
+    const revIdx = retryBody.indexOf('revOut = await runAgent("rev"');
+    expect(writerIdx).toBeGreaterThan(-1);
+    expect(committerIdx).toBeGreaterThan(writerIdx);
+    expect(revIdx).toBeGreaterThan(committerIdx);
+  });
+});
