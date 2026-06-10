@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-06-10
+
 ### Fixed
 
 - Two retry-zone emit shapes no longer produce a script that throws `TypeError: Assignment to constant variable`. A retry-gate host without `bind:` (schema-legal: `on_fail` requires `produces:` only; aggregate `bind:` is optional) had its synthesized binding declared `const` yet reassigned with the gate's post-zone result, throwing as soon as the gate completed. A bound `foreach` inside a retry zone (as `retry_from` target or intermediate member) was declared `const` yet reassigned by the retry callback, throwing on the first bounce. Both are now `let`-declared like other reassigned zone bindings. ([#18](https://github.com/gwaihir4031/agenticloom/pull/18))
