@@ -213,9 +213,10 @@ export function setupFixture(opts: {
   if (opts.agents && opts.agents.length > 0) {
     // Mirror the per-cli project-layer convention the compiler validates
     // against (compile/index.ts AGENT_DIR_DEFAULTS). Only the project layer
-    // is created — the layered probe returns on the first existing layer, so
-    // the project file alone satisfies the check, matching how the claude
-    // path here has only ever created the project layer.
+    // is created — the layered probe returns on the first SATISFYING layer
+    // (for claude: frontmatter name + description), and the fixture
+    // frontmatter written below is what satisfies it, so the project file
+    // alone passes the check.
     const cli = opts.cli ?? 'claude';
     const dir = cli === 'copilot' ? '.github/agents' : '.claude/agents';
     const suffix = cli === 'copilot' ? '.agent.md' : '.md';

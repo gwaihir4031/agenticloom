@@ -108,8 +108,6 @@ function walkItem(
     lines.push(`${indent}subgraph ${loopId}["${title}"]`);
     const inner = indent + '    ';
     const writerId = fresh();
-    // Label the writer node by its resolved agent reference: a persona name is
-    // itself; an inline agent is its required `name`.
     lines.push(`${inner}${writerId}(["${escapeLabel(agentLabel(r.writer))}"])`);
 
     if (!Array.isArray(r.reviewer)) {

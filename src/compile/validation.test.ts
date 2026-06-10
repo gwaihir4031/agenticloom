@@ -472,9 +472,10 @@ flow:
   });
 
   it('does not close the fence on an indented --- inside a block scalar', () => {
-    // The close-fence scan used trim() === '---', so an indented '---'
-    // (here: block-scalar content) closed the block early and hid the
-    // name: that follows it. Column-0-anchored parsers (and claude) don't.
+    // An indented '---' (here: block-scalar content) must not close the
+    // block — claude's loader anchors close fences at column 0, so a
+    // trim()-based scan would end the block early and hide the name:
+    // that follows it.
     mkdirSync('.claude/agents', { recursive: true });
     writeFileSync(
       '.claude/agents/reviewer.md',
@@ -485,8 +486,8 @@ flow:
   });
 
   it('accepts an opening fence with trailing whitespace', () => {
-    // claude loads '--- \n' fences; the exact startsWith('---\n') check
-    // rejected them with a false "no frontmatter" error.
+    // claude loads '--- \n' fences; an exact startsWith('---\n') check
+    // would reject them with a false "no frontmatter" error.
     mkdirSync('.claude/agents', { recursive: true });
     writeFileSync(
       '.claude/agents/reviewer.md',
@@ -498,8 +499,8 @@ flow:
 
   it('reports an unreadable persona file (directory at the .md path) as a compile error', () => {
     // existsSync is true for a directory named reviewer.md, but the read
-    // throws EISDIR — which used to escape as a raw fs crash with no
-    // compile-error prefix, pipeline name, or agent name.
+    // throws EISDIR — which must surface as a prefixed compile error naming
+    // the pipeline and agent, not escape as a raw fs crash.
     mkdirSync('.claude/agents/reviewer.md', { recursive: true });
     const yamlPath = setupFixture({ yaml: yamlReferencing('reviewer') });
     expect(() => compile(yamlPath)).toThrow(

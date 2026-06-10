@@ -166,9 +166,8 @@ function unreadablePersonaError(r: PersonaRejection, name: string, contextLabel:
 }
 
 /** Render the exactly-one-failing-file compile error for a claude reference
- *  in the single-file wording (pinned by tests and unchanged from when
- *  claude's check examined only the first existing layer): each kind frames
- *  `reason` with its own fix-it guidance. */
+ *  in the single-file wording (pinned by validation.test.ts): each kind
+ *  frames `reason` with its own fix-it guidance. */
 function singleClaudeRejectionError(
   r: PersonaRejection,
   name: string,
@@ -502,8 +501,9 @@ export function validatePersonaFile(
   return resolvePersonaByFrontmatter(agentDirs, agentFileLeaf(cli, name), name, contextLabel, cli);
 }
 
-/** Walk the flow and collect every agent name referenced by a `step:` or
- *  by a `review_loop`'s string-form writer/reviewer. Verify each via
+/** Walk the flow and collect every agent name referenced by a string-form
+ *  `step:` or by a `review_loop`'s string-form writer/reviewer (inline-object
+ *  agents reference no file and are skipped). Verify each via
  *  `validatePersonaFile`: a persona file must exist in at least one layer of
  *  `agentDirs`, and some layer's file must satisfy the per-cli registration
  *  rules (claude: frontmatter `name:` matching the reference plus a

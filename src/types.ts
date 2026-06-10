@@ -15,8 +15,8 @@ export const BindName = z.string().regex(/^[a-zA-Z_][a-zA-Z0-9_]*$/, {
 export const ReviseWith = z
   .strictObject({
     // Same dash-leading rule as InlineAgent.prompt / the human_gate prompt:
-    // in prompt-only revise mode this string becomes the retry target's
-    // entire -p value, and the CLI parses a dash-leading value as a flag —
+    // in prompt-only revise mode this string heads the persona retry
+    // target's -p value, and the CLI parses a dash-leading value as a flag —
     // the spawn would die on the retry pass, after the expensive first pass
     // already ran.
     prompt: z
@@ -174,7 +174,7 @@ export const AgentRef = z.union([PersonaName, InlineAgent]);
 // adds runtime predicates only. So these types match the BASE schema shape
 // (before refines). They're intentionally looser than what the Zod schemas
 // reject at parse time (refines add cross-field invariants TS can't express,
-// e.g. "if interactive: true then agent/input/prompt are required").
+// e.g. "if interactive: true then input/prompt are required").
 
 export interface ReviseWithT {
   prompt?: string;
@@ -297,9 +297,11 @@ export const isForeach = (i: FlowItem): i is ForeachItemT => 'foreach' in i;
  *  way. */
 export const isInlineAgent = (ref: AgentRef): ref is InlineAgentT => typeof ref === 'object';
 
-/** Resolve an agent reference to its display label: a persona name is itself; an
- *  inline agent is its required `name`. Label only — it never drives spawn
- *  behavior. */
+/** Resolve an agent reference to its name: a persona name is itself; an
+ *  inline agent is its required `name`. For a persona ref the returned name
+ *  is also the spawn's `--agent` value; an inline agent's `name` is
+ *  display-only (the inline spawn passes no `--agent`). The spawn FORM is
+ *  selected by `inlinePromptOf`, never by this label. */
 export const agentLabel = (ref: AgentRef): string => (isInlineAgent(ref) ? ref.name : ref);
 
 /** Baked inline prompt of an agent reference: the inline agent's `prompt`;
@@ -426,7 +428,8 @@ export const HumanGateItemBody = z.strictObject({
             "human_gate: 'prompt:' must be non-empty — it is the gate's initial message and, for a general gate (no agent:), the agent's entire task",
         })
         // Same dash-leading rule as InlineAgent.prompt: the gate prompt heads
-        // the interactive spawn's positional message argv value.
+        // the interactive spawn's message argv value (claude: positional;
+        // copilot: the --interactive value).
         .refine((p) => !p.startsWith('-'), {
           error:
             "human_gate: 'prompt:' must not start with '-' — the CLI parses a dash-leading argv value as a flag. Begin with a word.",

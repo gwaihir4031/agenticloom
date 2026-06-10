@@ -907,8 +907,8 @@ describe('ReviseWith schema', () => {
   });
 
   it('rejects a revise prompt starting with a dash (CLI would parse the -p value as a flag)', () => {
-    // In prompt-only revise mode this string becomes the retry target's
-    // ENTIRE -p value — a dash-leading value kills the spawn on the retry
+    // In prompt-only revise mode this string heads the persona retry
+    // target's -p value — a dash-leading value kills the spawn on the retry
     // pass, after the expensive first pass already ran.
     const result = ReviseWith.safeParse({ prompt: '--- corrected instructions ---\nFix it.' });
     expect(result.success).toBe(false);
