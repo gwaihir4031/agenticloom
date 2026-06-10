@@ -1077,12 +1077,39 @@ describe('runAgent', () => {
       expect(err).toBeInstanceOf(Error);
       expect((err as Error).message).toContain("claude did not load agent 'ac-writer'");
       expect((err as Error).message).toContain('persona-less');
-      // The actionable parts: the loaded roster and the spawn cwd the child
-      // actually used (the LOOM_INVOCATION_CWD expression runAgent resolves).
+      // The actionable parts: the loaded roster and the spawn cwd hint.
+      // expectedCwd mirrors production's `LOOM_INVOCATION_CWD ?? process.cwd()`
+      // expression, so this assertion can only pin the fallback branch (the
+      // env var is unset here); the env branch is pinned against a distinct
+      // literal in the next test.
       expect((err as Error).message).toContain('[other-agent, another]');
       const expectedCwd = process.env.LOOM_INVOCATION_CWD ?? process.cwd();
       expect((err as Error).message).toContain(`visible from ${expectedCwd}`);
       expect(wasKilled()).toBe(true);
+    });
+
+    it('renders the LOOM_INVOCATION_CWD value in the visible-from hint when the env var is set', async () => {
+      // Asserting against a distinct literal (not production's ?? expression)
+      // makes the env branch falsifiable: a regression that resolved the hint
+      // from process.cwd() alone would render the vitest cwd and fail here.
+      // Save/restore mirrors the 'spawn cwd threading' block's env handling.
+      const originalInvocationCwd = process.env.LOOM_INVOCATION_CWD;
+      process.env.LOOM_INVOCATION_CWD = '/distinct/invocation/dir';
+      try {
+        const { child } = makeKillObservableChild([initWithAgents(['other-agent']), resultEvent]);
+        spawnMock.mockImplementation(() => child);
+        const { runAgent } = await import('./agent.js');
+        const err = await runAgent('ac-writer', 'prompt', undefined, {
+          cli: 'claude',
+          agentDirs: ['.claude/agents/', '~/.claude/agents/'],
+          extraArgs: [],
+        }).catch((e) => e as Error);
+        expect(err).toBeInstanceOf(Error);
+        expect((err as Error).message).toContain('visible from /distinct/invocation/dir');
+      } finally {
+        if (originalInvocationCwd === undefined) delete process.env.LOOM_INVOCATION_CWD;
+        else process.env.LOOM_INVOCATION_CWD = originalInvocationCwd;
+      }
     });
 
     it("renders '(none)' when claude loaded an empty roster (bare dir)", async () => {

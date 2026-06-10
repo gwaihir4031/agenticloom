@@ -489,6 +489,38 @@ describe('reviewLoop (single reviewer)', () => {
     expect(revisePrompt).toMatch(/^WRITER INLINE IDENTITY\n\n---\n\nYour previous draft is at:/);
   });
 
+  it('threads reviewerInlinePrompt through the second reviewer spawn, not just iteration 1', async () => {
+    // The reviewer twin of the writer-revise test above: the inline prompt
+    // rides the shared reviewerOpts bag, so the post-revise re-review spawn
+    // takes the inline form too, not only the iteration-1 review.
+    installFileWritingSpawnMock([
+      JSON.stringify({ status: 'fail' }),
+      JSON.stringify({ status: 'pass' }),
+    ]);
+    const { reviewLoop } = await import('./review-loop.js');
+    await reviewLoop({
+      kind: 'single',
+      cli: 'claude',
+      agentDirs: ['.claude/agents/', '~/.claude/agents/'],
+      defaultExtraArgs: [],
+      writer: 'w',
+      reviewer: 'r',
+      reviewerInlinePrompt: 'REVIEWER INLINE IDENTITY',
+      input: 'input',
+      writerProduces: 'out.md',
+      reviewerProduces: 'review.json',
+      verdictField: 'status',
+      maxIters: 3,
+    });
+    // calls: 0 writer(initial), 1 reviewer(fail), 2 writer(revise), 3 reviewer(pass).
+    const secondReviewerArgs = spawnMock.mock.calls[3][1] as string[];
+    expect(secondReviewerArgs).not.toContain('--agent');
+    const secondReviewerPrompt = secondReviewerArgs.find((a: string) =>
+      a.includes('Write your review to:'),
+    );
+    expect(secondReviewerPrompt).toMatch(/^REVIEWER INLINE IDENTITY\n\n---\n\n/);
+  });
+
   it('routes the writer and reviewer inline prompts to their own spawns without cross-leak', async () => {
     installFileWritingSpawnMock([JSON.stringify({ status: 'pass' })]);
     const { reviewLoop } = await import('./review-loop.js');

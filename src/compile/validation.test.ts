@@ -362,6 +362,39 @@ flow:
     expect(() => compile(yamlPath)).toThrow(/frontmatter YAML failed to parse/);
   });
 
+  it('rejects a persona whose opening fence is never closed', () => {
+    // An opening '---' with no closing fence line is no frontmatter block at
+    // all — there is nothing to read a name: from, even though a name: line
+    // sits below the fence.
+    mkdirSync('.claude/agents', { recursive: true });
+    writeFileSync('.claude/agents/reviewer.md', '---\nname: reviewer\ndescription: test persona\n');
+    const yamlPath = setupFixture({ yaml: yamlReferencing('reviewer') });
+    expect(() => compile(yamlPath)).toThrow(/has no 'name:' frontmatter/);
+  });
+
+  it('rejects a persona whose frontmatter parses to a scalar, not a map', () => {
+    // 'just some text' is valid YAML (a string scalar), so the parse
+    // succeeds — but there is no map to read name: from, leaving the file as
+    // unregistrable as one with no frontmatter.
+    mkdirSync('.claude/agents', { recursive: true });
+    writeFileSync('.claude/agents/reviewer.md', '---\njust some text\n---\nbody\n');
+    const yamlPath = setupFixture({ yaml: yamlReferencing('reviewer') });
+    expect(() => compile(yamlPath)).toThrow(/has no 'name:' frontmatter/);
+  });
+
+  it('rejects a persona whose name: is a YAML number, not a string', () => {
+    // `name: 123` parses to a number; registration requires a STRING name,
+    // so a non-string value is treated as no name at all (the description
+    // here is valid, pinning that the rejection is the name's stringness).
+    mkdirSync('.claude/agents', { recursive: true });
+    writeFileSync(
+      '.claude/agents/reviewer.md',
+      '---\nname: 123\ndescription: test persona\n---\nbody\n',
+    );
+    const yamlPath = setupFixture({ yaml: yamlReferencing('reviewer') });
+    expect(() => compile(yamlPath)).toThrow(/has no 'name:' frontmatter/);
+  });
+
   it('rejects a persona whose frontmatter has a matching name: but no description:', () => {
     // claude (live-verified on 2.1.170) refuses to REGISTER an agent whose
     // frontmatter lacks description:, so a name-only file passes the name
@@ -605,6 +638,31 @@ flow:
       );
       const yamlPath = setupFixture({ yaml: yamlReferencing('reviewer') });
       expect(() => compile(yamlPath)).not.toThrow();
+      warnSpy.mockRestore();
+    });
+
+    it('skips an unreadable project layer (directory at the .md path) and resolves a readable global-layer persona', () => {
+      // existsSync passes for a directory named reviewer.md but the read
+      // throws EISDIR. The unreadable rejection must behave like the other
+      // rejection kinds: recorded and skipped on the way to a satisfying
+      // global layer rather than escalated into a compile failure — but NOT
+      // silently: the skip WARN must name the passed-over path with the read
+      // problem, and its "resolves via" tail pins that the GLOBAL layer is
+      // the one resolving the reference.
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const globalAgents = splitProjectLayerFromGlobal();
+      mkdirSync('.claude/agents/reviewer.md', { recursive: true });
+      writeFileSync(
+        path.join(globalAgents, 'reviewer.md'),
+        '---\nname: reviewer\ndescription: test persona\n---\nbody\n',
+      );
+      const yamlPath = setupFixture({ yaml: yamlReferencing('reviewer') });
+      expect(() => compile(yamlPath)).not.toThrow();
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringMatching(
+          /^WARN: persona 'reviewer': skipped \.claude\/agents\/reviewer\.md \(could not be read: .*'--agent reviewer' resolves via \/[^\n]*\.claude\/agents\/reviewer\.md\.$/,
+        ),
+      );
       warnSpy.mockRestore();
     });
 
