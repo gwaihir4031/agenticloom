@@ -192,8 +192,9 @@ Spawn one agent once.
 
 ## ReviewLoopItem — `review_loop:`
 
-Writer ↔ reviewer iteration. The reviewer can be a single agent (string)
-or a compound subflow (`FlowItem[]` ending in `aggregate`).
+Writer ↔ reviewer iteration. The reviewer can be a single agent (a
+persona-name string or an inline `{ prompt, name }` agent) or a compound
+subflow (`FlowItem[]` ending in `aggregate`).
 
 | Field               | Req?        | Type                     | Notes                                                                                                                                                                                                                                                     |
 | ------------------- | ----------- | ------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -710,8 +711,10 @@ flow:
   enforce on recursive lazy unions. Notably: the compound-reviewer
   subflow's last item must be `aggregate`.
 - **Runtime (`src/runtime/`)** — file existence + JSON parsing
-  (`pipeline-helpers.ts`, `read-agent-file.ts`), agent discovery +
-  timeouts (`agent.ts`), retry-zone re-execution (`aggregate.ts`).
+  (`pipeline-helpers.ts`, `read-agent-file.ts`), spawn-time persona
+  verification via the init-event roster + timeouts (`agent.ts`; persona
+  discovery itself belongs to the CLI's `--agent` — see "Agent
+  references" above), retry-zone re-execution (`aggregate.ts`).
 
 A change to any primitive's shape must be reflected in:
 

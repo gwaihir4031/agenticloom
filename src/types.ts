@@ -343,7 +343,7 @@ export const ReviewLoopItemBody = z.strictObject({
     .strictObject({
       writer: AgentRef,
       // Three distinct JSON types so the union is unambiguous: a string persona
-      // name, an inline `{ prompt, name? }` agent (object), or a subflow
+      // name, an inline `{ prompt, name }` agent (object), or a subflow
       // (array). The structural rule "subflow's last item must be aggregate" is
       // enforced at compile time in validateReviewerSubflow (compile/validation.ts);
       // Zod's recursive refine on a lazy cycle is awkward, so that gap is
