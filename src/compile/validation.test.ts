@@ -288,7 +288,10 @@ flow:
     // setupCompileTestEnv, so `~/.copilot/agents/` expands there.
     const globalDir = path.join(homedir(), '.copilot', 'agents');
     mkdirSync(globalDir, { recursive: true });
-    writeFileSync(path.join(globalDir, 'reviewer.agent.md'), '---\nname: reviewer\n---\nbody\n');
+    writeFileSync(
+      path.join(globalDir, 'reviewer.agent.md'),
+      '---\nname: reviewer\ndescription: test persona\n---\nbody\n',
+    );
     const yamlPath = setupFixture({
       yaml: `
 pipeline: copilot-global-layer
@@ -612,67 +615,183 @@ flow:
       );
     });
   });
+});
 
-  it('accepts a copilot persona without frontmatter (existence-only check)', () => {
-    // copilot's resolution semantics are less verified and it fails loud at
-    // runtime, so the frontmatter guard is claude-only.
+describe('copilot frontmatter description check (via compile)', () => {
+  // GitHub Copilot CLI (live-verified on 1.0.61) registers an agent file iff
+  // its frontmatter parses and carries a STRING `description:` — and resolves
+  // `--agent <ref>` by registered frontmatter name OR by the filename stem of
+  // a registrable `<ref>.agent.md`. So a frontmatter/filename name mismatch
+  // still loads (NOT an error for copilot, unlike claude), while ANY
+  // description-less file is unregistered and `--agent <ref>` exits 1 at
+  // spawn ("No such agent: <ref>") — after every upstream pipeline step has
+  // already run. These tests pin the compile-time guard to exactly those
+  // probed semantics.
+  const yamlReferencing = (agent: string) => `
+pipeline: copilot-fm-check
+cli: copilot
+inputs: [x]
+flow:
+  - step: ${agent}
+    input: $x
+    produces: out.md
+`;
+
+  it('rejects a copilot persona without frontmatter', () => {
+    // Probed: a plain-body probe-plain.agent.md never registers and
+    // `--agent probe-plain` exits 1 "No such agent" — copilot has NO
+    // filename fallback for frontmatter-less files.
     mkdirSync('.github/agents', { recursive: true });
     writeFileSync('.github/agents/reviewer.agent.md', 'You are a meticulous reviewer.\n');
-    const yamlPath = setupFixture({
-      yaml: `
-pipeline: copilot-no-fm
-cli: copilot
-inputs: [x]
-flow:
-  - step: reviewer
-    input: $x
-    produces: out.md
-`,
-    });
-    expect(() => compile(yamlPath)).not.toThrow();
+    const yamlPath = setupFixture({ yaml: yamlReferencing('reviewer') });
+    let message = '';
+    try {
+      compile(yamlPath);
+    } catch (e) {
+      message = e instanceof Error ? e.message : String(e);
+    }
+    // ONE thrown error covers everything asserted below: the path, the
+    // missing-description reason, the loud-but-late spawn consequence, and
+    // the fix-it showing the full registrable block.
+    expect(message).toContain('.github/agents/reviewer.agent.md');
+    expect(message).toContain("has no 'description:' frontmatter");
+    expect(message).toContain(`'--agent reviewer' would fail at spawn`);
+    expect(message).toContain('No such agent: reviewer');
+    expect(message).toMatch(
+      /Add frontmatter at the top of the file:\n {2}---\n {2}name: reviewer\n {2}description: <one line on when to use this agent>\n {2}---/,
+    );
   });
 
-  it('accepts a copilot persona whose frontmatter has name: but no description:', () => {
-    // The description requirement mirrors claude's loader refusing to
-    // register description-less agents; copilot stays existence-only, so a
-    // name-only copilot persona must keep compiling.
+  it('rejects a copilot persona whose frontmatter has name: but no description:', () => {
+    // Probed: probe-nodesc.agent.md (`name:` only) never registers — copilot
+    // refuses description-less agent files just like claude, so the old
+    // existence-only acceptance compiled a pipeline that died at spawn.
     mkdirSync('.github/agents', { recursive: true });
     writeFileSync('.github/agents/reviewer.agent.md', '---\nname: reviewer\n---\nbody\n');
-    const yamlPath = setupFixture({
-      yaml: `
-pipeline: copilot-no-description
-cli: copilot
-inputs: [x]
-flow:
-  - step: reviewer
-    input: $x
-    produces: out.md
-`,
-    });
+    const yamlPath = setupFixture({ yaml: yamlReferencing('reviewer') });
+    expect(() => compile(yamlPath)).toThrow(/has no 'description:' frontmatter/);
+  });
+
+  it('rejects a copilot persona whose description: is null-valued', () => {
+    // Probed: `description:` with no value parses to YAML null and copilot
+    // does NOT register the file — the field must be a string.
+    mkdirSync('.github/agents', { recursive: true });
+    writeFileSync(
+      '.github/agents/reviewer.agent.md',
+      '---\nname: reviewer\ndescription:\n---\nbody\n',
+    );
+    const yamlPath = setupFixture({ yaml: yamlReferencing('reviewer') });
+    expect(() => compile(yamlPath)).toThrow(/has no 'description:' frontmatter/);
+  });
+
+  it('accepts a copilot persona whose description: is an empty string', () => {
+    // Probed boundary against claude: copilot DOES register
+    // `description: ''` (claude refuses), so the copilot arm must not
+    // borrow claude's non-empty rule.
+    mkdirSync('.github/agents', { recursive: true });
+    writeFileSync(
+      '.github/agents/reviewer.agent.md',
+      "---\nname: reviewer\ndescription: ''\n---\nbody\n",
+    );
+    const yamlPath = setupFixture({ yaml: yamlReferencing('reviewer') });
     expect(() => compile(yamlPath)).not.toThrow();
   });
 
   it('accepts a copilot persona whose frontmatter name: mismatches the reference', () => {
-    // The mismatch fixture that fails the claude check above must PASS for
-    // copilot: its resolution arm is existence-only. Every other copilot
-    // fixture's frontmatter happens to match its filename (or is absent), so
-    // without this case a refactor accidentally extending the claude
-    // name/description checks to copilot would stay green. The file also
-    // lacks a description:, pinning that check's claude-only scope too.
+    // Probed: probe-foo.agent.md declaring `name: probe-bar` registers as
+    // probe-bar AND `--agent probe-foo` still resolves and loads the persona
+    // by filename stem — a mismatch is a working spawn for copilot, so the
+    // claude name-match rule must NOT extend here. The mismatch fixture that
+    // fails the claude check must PASS for copilot (with the description
+    // copilot requires), pinning the per-cli divergence.
     mkdirSync('.github/agents', { recursive: true });
-    writeFileSync('.github/agents/reviewer.agent.md', '---\nname: other-name\n---\nbody\n');
-    const yamlPath = setupFixture({
-      yaml: `
-pipeline: copilot-fm-mismatch
-cli: copilot
-inputs: [x]
-flow:
-  - step: reviewer
-    input: $x
-    produces: out.md
-`,
-    });
+    writeFileSync(
+      '.github/agents/reviewer.agent.md',
+      '---\nname: other-name\ndescription: test persona\n---\nbody\n',
+    );
+    const yamlPath = setupFixture({ yaml: yamlReferencing('reviewer') });
     expect(() => compile(yamlPath)).not.toThrow();
+  });
+
+  it('accepts a copilot persona with description: but no name:', () => {
+    // Probed: a name-less probe-desconly.agent.md registers under its
+    // FILENAME stem and `--agent probe-desconly` loads it — `name:` is
+    // optional for copilot (claude would reject this file).
+    mkdirSync('.github/agents', { recursive: true });
+    writeFileSync(
+      '.github/agents/reviewer.agent.md',
+      '---\ndescription: test persona\n---\nbody\n',
+    );
+    const yamlPath = setupFixture({ yaml: yamlReferencing('reviewer') });
+    expect(() => compile(yamlPath)).not.toThrow();
+  });
+
+  describe('layered description resolution', () => {
+    /** Copilot twin of the claude `splitProjectLayerFromGlobal` helper: chdir
+     *  into a `project/` subdir so the project (`.github/agents/`) and global
+     *  (`~/.copilot/agents/`) layers are distinct directories, as in a real
+     *  checkout. Creates both agents dirs and returns the global one. */
+    function splitCopilotLayers(): string {
+      const projectRoot = path.join(process.cwd(), 'project');
+      mkdirSync(path.join(projectRoot, '.github', 'agents'), { recursive: true });
+      process.chdir(projectRoot);
+      const globalAgents = path.join(homedir(), '.copilot', 'agents');
+      mkdirSync(globalAgents, { recursive: true });
+      return globalAgents;
+    }
+
+    it('skips a description-less project layer and resolves a registrable global-layer persona', () => {
+      // Probed: with a description-less project probe-lay.agent.md and a
+      // registrable global one, `--agent probe-lay` loads the GLOBAL persona
+      // — the unregistrable project file does not shadow it. Compile must
+      // mirror that skip rather than failing on the first existing layer.
+      const globalAgents = splitCopilotLayers();
+      writeFileSync('.github/agents/reviewer.agent.md', '---\nname: reviewer\n---\nbody\n');
+      writeFileSync(
+        path.join(globalAgents, 'reviewer.agent.md'),
+        '---\nname: reviewer\ndescription: test persona\n---\nbody\n',
+      );
+      const yamlPath = setupFixture({ yaml: yamlReferencing('reviewer') });
+      expect(() => compile(yamlPath)).not.toThrow();
+    });
+
+    it('throws one error naming every examined copilot layer when none is registrable', () => {
+      // Two different rejection flavors: the project file has name-only
+      // frontmatter, the global file's frontmatter YAML is malformed (probed:
+      // copilot registers neither). The aggregated error must carry each
+      // path's own reason plus the copilot spawn framing.
+      const globalAgents = splitCopilotLayers();
+      writeFileSync('.github/agents/reviewer.agent.md', '---\nname: reviewer\n---\nbody\n');
+      writeFileSync(
+        path.join(globalAgents, 'reviewer.agent.md'),
+        '---\nname: [unclosed\n---\nbody\n',
+      );
+      const yamlPath = setupFixture({ yaml: yamlReferencing('reviewer') });
+      let message = '';
+      try {
+        compile(yamlPath);
+      } catch (e) {
+        message = e instanceof Error ? e.message : String(e);
+      }
+      // ONE thrown error covers everything asserted below.
+      expect(message).toMatch(
+        /Compile error: pipeline 'copilot-fm-check' references agent 'reviewer' but no layer's persona file satisfies it/,
+      );
+      expect(message).toContain('No such agent: reviewer');
+      // The project line (relative spelling, listed first in layer order)...
+      expect(message).toMatch(
+        /\n {2}\.github\/agents\/reviewer\.agent\.md has no 'description:' frontmatter\n/,
+      );
+      // ...the global line (absolute, ~-expanded spelling) with the
+      // parse-problem note...
+      expect(message).toMatch(
+        /\n {2}\/[^\n]*\.copilot\/agents\/reviewer\.agent\.md has no 'description:' frontmatter \(frontmatter YAML failed to parse: /,
+      );
+      // ...and the fix-it tail showing the full registrable block.
+      expect(message).toMatch(
+        /the minimal registrable block is:\n {2}---\n {2}name: reviewer\n {2}description: <one line on when to use this agent>\n {2}---/,
+      );
+    });
   });
 });
 

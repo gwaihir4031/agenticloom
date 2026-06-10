@@ -312,11 +312,15 @@ is either a persona name or an inline agent:
 - **A persona name** (string) — loom delegates to the CLI's native
   `--agent <name>`, so the CLI loads the agent file and **enforces its
   `tools:`**; loom no longer inlines the persona body. The persona file
-  must be discoverable via the layered lookup below — missing files are
-  caught at compile time (a bare-cli agent with no body still works as a
-  frontmatter-only file, as long as the frontmatter carries both `name:`
-  and `description:` — claude refuses to register an agent without a
-  description). On claude the persona's `tools:` bind even under
+  must be discoverable via the layered lookup below — missing files and
+  files the CLI would refuse to register are caught at compile time. A
+  bare-cli agent with no body still works as a frontmatter-only file:
+  claude requires frontmatter `name:` matching the reference plus a
+  non-empty `description:` (claude refuses to register an agent without a
+  description); copilot requires a string `description:`, with `name:`
+  optional (it defaults to the filename stem) and a mismatched `name:`
+  still loading by filename stem — live-verified on copilot v1.0.61. On
+  claude the persona's `tools:` bind even under
   `--dangerously-skip-permissions` (real least privilege). On copilot the
   same `--agent` delegation applies, though copilot's CLI-side enforcement
   of agent `tools:` is version-sensitive and not yet in effect as of

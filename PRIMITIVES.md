@@ -75,7 +75,20 @@ description. A project file whose `name:` mismatches is a different agent
 (a matching global file still satisfies the reference), a description-less
 file never registers at all, and compile fails only when no layer
 satisfies the reference, which would make `--agent` silently run
-persona-less. copilot personas are checked for file existence only.
+persona-less.
+
+copilot personas are validated against copilot's own registration rule
+(live-verified on copilot v1.0.61): some layer's `<name>.agent.md` must
+carry a string `description:` in parseable frontmatter — the empty string
+counts; a missing field, a null value, missing frontmatter, and malformed
+YAML do not. The frontmatter `name:` is NOT required to match: copilot
+registers a name-less file under its filename stem, and `--agent <name>`
+loads `<name>.agent.md` by filename stem even when its frontmatter declares
+a different name. A description-less file never registers, and copilot then
+fails at spawn (exit 1, `No such agent`) — loud but late, after upstream
+steps have already run and paid their cost; compile catches it up front.
+The unregistrable-layer skip applies as on claude: a description-less
+project file does not shadow a registrable global file.
 
 Discovery asymmetry to know about: loom's compile check probes exactly two
 layers (`<cwd>/.claude/agents/` and `~/.claude/agents/`), while claude
@@ -90,7 +103,9 @@ resolves silently — prefer running `loom` from the repo root.
 A frontmatter-only persona (no body) still works — the CLI loads an empty
 system prompt but applies the file's `tools:` / `model:`. The frontmatter
 must carry BOTH `name:` and `description:`: claude refuses to register an
-agent file without a description, so a name-only file never loads.
+agent file without a description, so a name-only file never loads — and
+copilot (v1.0.61) likewise refuses description-less files, while treating
+a missing `name:` as the filename stem.
 
 **Inline agent (`{ prompt, name }`).** A one-off general agent with no
 persona file:
@@ -128,7 +143,13 @@ and tells the spawn "general, not persona". Mixing forms is fine — a
   `--agent`, so loom fails loud instead of running persona-less.
 - **copilot** delegates identity + tools the same way via `--agent`,
   reading `.github/agents/<name>.agent.md` (project) or
-  `~/.copilot/agents/<name>.agent.md` (user). **Caveat:** copilot's CLI-side
+  `~/.copilot/agents/<name>.agent.md` (user). copilot registers an agent
+  file only when its frontmatter carries a string `description:`
+  (registering it under its frontmatter `name:`, or the filename stem when
+  `name:` is absent), and also loads `<name>.agent.md` by filename stem on
+  a name mismatch; an unregistered `--agent` exits 1 at spawn (`No such
+agent`) — natively loud, and front-run by compile's persona validation
+  above (all live-verified on v1.0.61). **Caveat:** copilot's CLI-side
   enforcement of an agent's `tools:` is version-sensitive and not yet in
   effect as of copilot v1.0.60 (the `tools:` frontmatter is honored by
   copilot's editor agent system, not the CLI), so a copilot persona

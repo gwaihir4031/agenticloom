@@ -35,27 +35,6 @@ function layerCandidate(dir: string, leaf: string): string {
   return expandHome(path.posix.join(dir, leaf));
 }
 
-/** Probe `dirs` in order for the first directory containing `leaf`; returns
- *  the found path (or null) plus every attempted candidate so error messages
- *  can name the exact paths that were checked. This existence-only probe is
- *  the copilot resolution arm; claude resolution instead walks every layer
- *  by frontmatter name (`resolveClaudePersonaByName`). The runtime delegates
- *  persona resolution to the CLI and keeps no copy. Module-private: external
- *  callers (notably `emit-walker.ts`'s human_gate persona probe) go through
- *  `validatePersonaFile`, so no caller can bypass the per-cli semantics. */
-function firstExisting(
-  dirs: string[],
-  leaf: string,
-): { found: string | null; attempted: string[] } {
-  const attempted: string[] = [];
-  for (const dir of dirs) {
-    const candidate = layerCandidate(dir, leaf);
-    attempted.push(candidate);
-    if (existsSync(candidate)) return { found: candidate, attempted };
-  }
-  return { found: null, attempted };
-}
-
 /** Per-cli persona-file leaf suffix. claude opens `<name>.md`; GitHub Copilot
  *  CLI opens `<name>.agent.md`. The directory and the leaf are the two halves
  *  of "the file the CLI will open", so the leaf is parameterized by cli the
@@ -147,37 +126,55 @@ function missingPersonaError(contextLabel: string, name: string, attempted: stri
   );
 }
 
-/** Why an existing candidate file failed to satisfy a claude reference.
- *  `reason` is the path-suffixed fragment ("declares frontmatter name: 'x'
- *  but the pipeline references 'y'", "has no 'name:' frontmatter", "declares
+/** Why an existing candidate file failed to satisfy a reference. `reason`
+ *  is the path-suffixed fragment ("declares frontmatter name: 'x' but the
+ *  pipeline references 'y'", "has no 'name:' frontmatter", "declares
  *  name: 'x' but has no 'description:' frontmatter", "could not be read:
  *  <err>") shared by the single-candidate errors and the aggregated
- *  multi-layer error, so both render identical per-file wording. */
+ *  multi-layer error, so both render identical per-file wording. The claude
+ *  evaluator produces all four kinds; the copilot evaluator only
+ *  'unreadable' and 'no-description' (copilot resolution ignores the
+ *  frontmatter `name:` for the file at the reference's own leaf — see
+ *  `evaluateCopilotCandidate`). */
 type PersonaRejection = {
   path: string;
   kind: 'unreadable' | 'no-name' | 'name-mismatch' | 'no-description';
   reason: string;
 };
 
-/** The minimal frontmatter block claude will register — both `name:` and
- *  `description:` are required (claude refuses to register an agent file
- *  without a description). Every fix-it tail shows this full block so the
- *  advice never instructs the user to create an unloadable name-only file. */
+/** The minimal frontmatter block BOTH clis will register — claude requires
+ *  `name:` plus a non-empty `description:`; GitHub Copilot CLI (live-verified
+ *  on 1.0.61) requires a string `description:` and treats a missing `name:`
+ *  as the filename stem. Every fix-it tail shows this full block so the
+ *  advice never instructs the user to create a file one cli would refuse
+ *  (e.g. a name-only file, which NEITHER cli registers). */
 function minimalFrontmatterBlock(name: string): string {
   return `  ---\n  name: ${name}\n  description: <one line on when to use this agent>\n  ---`;
 }
 
-/** Render the exactly-one-failing-file compile error in the single-file
- *  wording (pinned by tests and unchanged from when claude's check examined
- *  only the first existing layer): each kind frames `reason` with its own
- *  fix-it guidance. */
-function singleLayerRejectionError(r: PersonaRejection, name: string, contextLabel: string): Error {
+/** The cli-neutral unreadable-persona compile error (a directory at the
+ *  persona path, a permission error, ...): identical wording for both clis,
+ *  framing the raw fs failure as a compile error instead of letting it
+ *  escape unprefixed. */
+function unreadablePersonaError(r: PersonaRejection, name: string, contextLabel: string): Error {
+  return new Error(
+    `Compile error: ${contextLabel} references agent '${name}' but its persona file at ` +
+      `${r.path} ${r.reason}`,
+  );
+}
+
+/** Render the exactly-one-failing-file compile error for a claude reference
+ *  in the single-file wording (pinned by tests and unchanged from when
+ *  claude's check examined only the first existing layer): each kind frames
+ *  `reason` with its own fix-it guidance. */
+function singleClaudeRejectionError(
+  r: PersonaRejection,
+  name: string,
+  contextLabel: string,
+): Error {
   switch (r.kind) {
     case 'unreadable':
-      return new Error(
-        `Compile error: ${contextLabel} references agent '${name}' but its persona file at ` +
-          `${r.path} ${r.reason}`,
-      );
+      return unreadablePersonaError(r, name, contextLabel);
     case 'no-name':
       return new Error(
         `Compile error: ${contextLabel} references agent '${name}' but persona file ${r.path} ` +
@@ -204,25 +201,167 @@ function singleLayerRejectionError(r: PersonaRejection, name: string, contextLab
   }
 }
 
-/** The claude arm of `validatePersonaFile`: resolve `--agent <name>` the way
- *  claude itself does — claude registers the agent files of BOTH layers and
- *  matches by frontmatter `name:`, not filename — and return the first layer
- *  (project-most, mirroring claude's project-over-global precedence) whose
- *  file satisfies the reference. A layer whose file exists but does not
- *  satisfy it (no frontmatter name / mismatched name / missing description /
- *  unreadable) is recorded and SKIPPED, exactly as claude skips it: a project
- *  `reviewer.md` declaring `name: other` is a different agent, not a broken
- *  reference, and a global `reviewer.md` declaring `name: reviewer` still
- *  resolves the spawn. A name-matched file additionally needs a non-empty
- *  string `description:` — claude (live-verified on 2.1.170) refuses to
- *  register an agent whose frontmatter lacks one, so without the check the
- *  spawn would run persona-less despite the matching name. Throws only when
- *  NO layer satisfies, naming every examined file and why it was rejected. */
-function resolveClaudePersonaByName(
+/** Render the exactly-one-failing-file compile error for a copilot
+ *  reference. The copilot evaluator produces only 'unreadable' and
+ *  'no-description' rejections, so every non-unreadable rejection renders
+ *  the missing-description wording. The spawn behavior it names is
+ *  live-verified on GitHub Copilot CLI 1.0.61: an unregistered `--agent`
+ *  exits 1 with `No such agent: <name>` before running anything — loud,
+ *  but only AFTER every upstream pipeline step has already run and paid
+ *  its cost, which is exactly what this compile-time check prevents. */
+function singleCopilotRejectionError(
+  r: PersonaRejection,
+  name: string,
+  contextLabel: string,
+): Error {
+  if (r.kind === 'unreadable') return unreadablePersonaError(r, name, contextLabel);
+  return new Error(
+    `Compile error: ${contextLabel} references agent '${name}' but persona file ${r.path} ` +
+      `${r.reason} — GitHub Copilot CLI registers an agent file only when its frontmatter ` +
+      `carries a string 'description:', so '--agent ${name}' would fail at spawn with ` +
+      `"No such agent: ${name}". Add frontmatter at the top of the file:\n` +
+      minimalFrontmatterBlock(name),
+  );
+}
+
+/** The aggregated no-layer-satisfies error for a claude reference, naming
+ *  every examined file and the reason claude would skip it. */
+function multiLayerClaudeError(
+  rejections: PersonaRejection[],
+  name: string,
+  contextLabel: string,
+): Error {
+  return new Error(
+    `Compile error: ${contextLabel} references agent '${name}' but no layer's persona file satisfies it — ` +
+      `claude registers agents by frontmatter name, so '--agent ${name}' would not load any of these ` +
+      `files and the spawn would silently run persona-less:\n` +
+      rejections.map((r) => `  ${r.path} ${r.reason}`).join('\n') +
+      '\n' +
+      `Align one file's frontmatter name with the reference (or rename the reference); ` +
+      `if a file is missing frontmatter or a description, the minimal loadable block is:\n` +
+      minimalFrontmatterBlock(name),
+  );
+}
+
+/** The aggregated no-layer-satisfies error for a copilot reference — same
+ *  shape as the claude one, but framing copilot's loud-but-late spawn
+ *  failure ("No such agent", exit 1) instead of claude's silent
+ *  persona-less run. */
+function multiLayerCopilotError(
+  rejections: PersonaRejection[],
+  name: string,
+  contextLabel: string,
+): Error {
+  return new Error(
+    `Compile error: ${contextLabel} references agent '${name}' but no layer's persona file satisfies it — ` +
+      `GitHub Copilot CLI registers an agent file only when its frontmatter carries a string ` +
+      `'description:', so '--agent ${name}' would fail at spawn with "No such agent: ${name}":\n` +
+      rejections.map((r) => `  ${r.path} ${r.reason}`).join('\n') +
+      '\n' +
+      `Add a 'description:' to one file's frontmatter; the minimal registrable block is:\n` +
+      minimalFrontmatterBlock(name),
+  );
+}
+
+/** Evaluate one existing claude candidate file against the reference: null
+ *  means the file satisfies it (claude registers it under `name`); otherwise
+ *  the rejection explaining why claude would skip it. claude — live-verified
+ *  on 2.1.170 — registers an agent file only when its frontmatter `name:`
+ *  matches AND a non-empty string `description:` is present; anything else
+ *  leaves `--agent <name>` running silently persona-less. */
+function evaluateClaudeCandidate(candidate: string, name: string): PersonaRejection | null {
+  const {
+    name: fmName,
+    description: fmDescription,
+    parseProblem,
+    readProblem,
+  } = personaFrontmatter(candidate);
+  if (readProblem !== undefined) {
+    // existsSync passed but the read failed — e.g. a directory named
+    // `<name>.md`, or a permission error. Without this guard the raw fs
+    // error (EISDIR/EACCES) would escape with no compile-error framing.
+    return { path: candidate, kind: 'unreadable', reason: `could not be read: ${readProblem}` };
+  }
+  if (fmName === undefined) {
+    const parseNote =
+      parseProblem === undefined ? '' : ` (frontmatter YAML failed to parse: ${parseProblem})`;
+    return { path: candidate, kind: 'no-name', reason: `has no 'name:' frontmatter${parseNote}` };
+  }
+  if (fmName !== name) {
+    return {
+      path: candidate,
+      kind: 'name-mismatch',
+      reason: `declares frontmatter name: '${fmName}' but the pipeline references '${name}'`,
+    };
+  }
+  if (fmDescription === undefined || fmDescription.trim() === '') {
+    return {
+      path: candidate,
+      kind: 'no-description',
+      reason: `declares name: '${name}' but has no 'description:' frontmatter`,
+    };
+  }
+  return null;
+}
+
+/** Evaluate one existing copilot candidate file: null means it satisfies the
+ *  reference. Live-verified on GitHub Copilot CLI 1.0.61: copilot registers
+ *  an agent file iff its frontmatter parses and carries a STRING
+ *  `description:` — the empty string is accepted (unlike claude); a
+ *  null-valued `description:`, a missing field, missing frontmatter, and
+ *  malformed YAML are all refused, and `--agent` then exits 1 at spawn with
+ *  "No such agent". The frontmatter `name:` is irrelevant to whether THIS
+ *  reference resolves: when absent, copilot registers the file under its
+ *  filename stem (which IS the reference — the candidate is
+ *  `<reference>.agent.md`); when present but different, `--agent
+ *  <reference>` still resolves and loads the file by filename stem (a
+ *  `probe-foo.agent.md` declaring `name: probe-bar` loads under BOTH
+ *  `--agent probe-foo` and `--agent probe-bar`). So the only rejection
+ *  kinds produced here are 'unreadable' and 'no-description'. */
+function evaluateCopilotCandidate(candidate: string): PersonaRejection | null {
+  const { description, parseProblem, readProblem } = personaFrontmatter(candidate);
+  if (readProblem !== undefined) {
+    return { path: candidate, kind: 'unreadable', reason: `could not be read: ${readProblem}` };
+  }
+  if (description === undefined) {
+    const parseNote =
+      parseProblem === undefined ? '' : ` (frontmatter YAML failed to parse: ${parseProblem})`;
+    return {
+      path: candidate,
+      kind: 'no-description',
+      reason: `has no 'description:' frontmatter${parseNote}`,
+    };
+  }
+  return null;
+}
+
+/** Resolve `--agent <name>` across the layered `agentDirs` the way `cli`
+ *  itself does: examine the file at the cli-aware `leaf` in each layer and
+ *  return the first (project-most) layer whose file satisfies the reference
+ *  under that cli's live-verified registration rules
+ *  (`evaluateClaudeCandidate` / `evaluateCopilotCandidate`). A layer whose
+ *  file exists but does not satisfy is recorded and SKIPPED, exactly as the
+ *  CLIs themselves skip unregistrable files — live-verified for both clis: a
+ *  failing project-layer file does not shadow a satisfying global-layer one.
+ *  Throws only when NO layer satisfies, naming every examined file and why
+ *  it was rejected.
+ *
+ *  The returned path is validation-only at every call site (both
+ *  `validateAgentFilesExist` and emit-walker's human_gate probe discard it).
+ *  For claude it is also the file claude would load (project-over-global
+ *  precedence); copilot — live-observed on 1.0.61 — loads the GLOBAL file
+ *  when both layers register the same name, so for copilot the return means
+ *  "a satisfying layer", not "the loading layer".
+ *
+ *  Module-private: external callers (notably `emit-walker.ts`'s human_gate
+ *  persona probe) go through `validatePersonaFile`, so no caller can bypass
+ *  the per-cli semantics. */
+function resolvePersonaByFrontmatter(
   agentDirs: string[],
   leaf: string,
   name: string,
   contextLabel: string,
+  cli: AgentCli,
 ): string {
   const attempted: string[] = [];
   const examined = new Set<string>();
@@ -253,63 +392,22 @@ function resolveClaudePersonaByName(
     }
     if (examined.has(realPath)) continue;
     examined.add(realPath);
-    const {
-      name: fmName,
-      description: fmDescription,
-      parseProblem,
-      readProblem,
-    } = personaFrontmatter(candidate);
-    if (readProblem !== undefined) {
-      // existsSync passed but the read failed — e.g. a directory named
-      // `<name>.md`, or a permission error. Without this guard the raw fs
-      // error (EISDIR/EACCES) would escape with no compile-error framing.
-      rejections.push({
-        path: candidate,
-        kind: 'unreadable',
-        reason: `could not be read: ${readProblem}`,
-      });
-      continue;
-    }
-    if (fmName === undefined) {
-      const parseNote =
-        parseProblem === undefined ? '' : ` (frontmatter YAML failed to parse: ${parseProblem})`;
-      rejections.push({
-        path: candidate,
-        kind: 'no-name',
-        reason: `has no 'name:' frontmatter${parseNote}`,
-      });
-      continue;
-    }
-    if (fmName !== name) {
-      rejections.push({
-        path: candidate,
-        kind: 'name-mismatch',
-        reason: `declares frontmatter name: '${fmName}' but the pipeline references '${name}'`,
-      });
-      continue;
-    }
-    if (fmDescription === undefined || fmDescription.trim() === '') {
-      rejections.push({
-        path: candidate,
-        kind: 'no-description',
-        reason: `declares name: '${name}' but has no 'description:' frontmatter`,
-      });
-      continue;
-    }
-    return candidate;
+    const rejection =
+      cli === 'claude'
+        ? evaluateClaudeCandidate(candidate, name)
+        : evaluateCopilotCandidate(candidate);
+    if (rejection === null) return candidate;
+    rejections.push(rejection);
   }
   if (rejections.length === 0) throw missingPersonaError(contextLabel, name, attempted);
-  if (rejections.length === 1) throw singleLayerRejectionError(rejections[0], name, contextLabel);
-  throw new Error(
-    `Compile error: ${contextLabel} references agent '${name}' but no layer's persona file satisfies it — ` +
-      `claude registers agents by frontmatter name, so '--agent ${name}' would not load any of these ` +
-      `files and the spawn would silently run persona-less:\n` +
-      rejections.map((r) => `  ${r.path} ${r.reason}`).join('\n') +
-      '\n' +
-      `Align one file's frontmatter name with the reference (or rename the reference); ` +
-      `if a file is missing frontmatter or a description, the minimal loadable block is:\n` +
-      minimalFrontmatterBlock(name),
-  );
+  if (rejections.length === 1) {
+    throw cli === 'claude'
+      ? singleClaudeRejectionError(rejections[0], name, contextLabel)
+      : singleCopilotRejectionError(rejections[0], name, contextLabel);
+  }
+  throw cli === 'claude'
+    ? multiLayerClaudeError(rejections, name, contextLabel)
+    : multiLayerCopilotError(rejections, name, contextLabel);
 }
 
 /** Resolve agent `name`'s persona file across the layered `agentDirs` and
@@ -319,7 +417,8 @@ function resolveClaudePersonaByName(
  *  semantics; `contextLabel` carries each site's error prefix
  *  (`pipeline '<name>'` / `human_gate interactive mode`).
  *
- *  Per-cli resolution semantics:
+ *  Per-cli resolution semantics (both live-verified — claude 2.1.170,
+ *  GitHub Copilot CLI 1.0.61):
  *  - claude: BY NAME ACROSS LAYERS, mirroring how claude itself registers
  *    agents from both layers and resolves `--agent` by the frontmatter
  *    `name:` field, NOT the filename. The first layer whose file's
@@ -332,33 +431,38 @@ function resolveClaudePersonaByName(
  *    would exit 0 and run persona-less. The runtime init-roster guard
  *    (runtime/agent.ts) catches that at spawn; this catches it at compile
  *    time with a fix-it message.
- *  - copilot: existence-only, first existing leaf wins. Its resolution
- *    semantics are less verified, and it already fails loud at runtime on an
- *    unresolved `--agent`. */
+ *  - copilot: BY REGISTRABLE FILE AT THE LEAF. copilot registers each
+ *    `*.agent.md` whose frontmatter parses and carries a string
+ *    `description:` (empty string included), under its frontmatter `name:`
+ *    when present or the filename stem when absent — and `--agent <name>`
+ *    ADDITIONALLY loads `<name>.agent.md` by filename stem even when its
+ *    frontmatter declares a different name. So the reference resolves iff
+ *    some layer's `<name>.agent.md` carries a string description: a
+ *    frontmatter/filename name mismatch still loads and is NOT an error
+ *    here, while a description-less file is never registered and `--agent`
+ *    exits 1 at spawn ("No such agent") — loud but LATE, after every
+ *    upstream step has already run. This check moves that failure to
+ *    compile time. */
 export function validatePersonaFile(
   agentDirs: string[],
   cli: AgentCli,
   name: string,
   contextLabel: string,
 ): string {
-  const leaf = agentFileLeaf(cli, name);
-  if (cli === 'claude') {
-    return resolveClaudePersonaByName(agentDirs, leaf, name, contextLabel);
-  }
-  const { found, attempted } = firstExisting(agentDirs, leaf);
-  if (found === null) throw missingPersonaError(contextLabel, name, attempted);
-  return found;
+  return resolvePersonaByFrontmatter(agentDirs, agentFileLeaf(cli, name), name, contextLabel, cli);
 }
 
 /** Walk the flow and collect every agent name referenced by a `step:` or
  *  by a `review_loop`'s string-form writer/reviewer. Verify each via
  *  `validatePersonaFile`: a persona file must exist in at least one layer of
- *  `agentDirs`, and (claude only) some layer's file must declare a
- *  frontmatter `name:` matching the reference plus a non-empty
- *  `description:`. Missing in every layer → compile error naming every
- *  attempted path. Pushes the "persona file exists and is loadable" check up from
- *  runtime to compile time, so a typo or missing file fails before the
- *  pipeline starts running rather than mid-flight.
+ *  `agentDirs`, and some layer's file must satisfy the per-cli registration
+ *  rules (claude: frontmatter `name:` matching the reference plus a
+ *  non-empty `description:`; copilot: a string `description:` — see
+ *  `validatePersonaFile` for the live-verified semantics). Missing in every
+ *  layer → compile error naming every attempted path. Pushes the "persona
+ *  file exists and is loadable" check up from runtime to compile time, so a
+ *  typo or missing file fails before the pipeline starts running rather
+ *  than mid-flight.
  *
  *  Throws on the FIRST failing reference (Set traversal order); does not
  *  aggregate. Iterate-and-fix-and-rerun is the preserved UX. */
