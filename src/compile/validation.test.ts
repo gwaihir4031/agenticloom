@@ -615,6 +615,51 @@ flow:
         /\n {2}\/[^\n]*\.claude\/agents\/reviewer\.md has no 'name:' frontmatter\n/,
       );
     });
+
+    it('names the probed-but-absent global layer alongside a project-layer rejection', () => {
+      // With only the project file failing (name mismatch) and NO file at
+      // the global layer, the error used to discuss the project file alone —
+      // a user who believed a global persona existed (typo'd directory,
+      // different $HOME) would "fix" by deleting the project file and
+      // re-run into a missing-persona error instead of converging in one
+      // pass. The tail names the probed path that had no file.
+      splitProjectLayerFromGlobal();
+      writeFileSync('.claude/agents/reviewer.md', '---\nname: other-name\n---\nbody\n');
+      const yamlPath = setupFixture({ yaml: yamlReferencing('reviewer') });
+      let message = '';
+      try {
+        compile(yamlPath);
+      } catch (e) {
+        message = e instanceof Error ? e.message : String(e);
+      }
+      // ONE thrown error covers both: the existing file's rejection reason
+      // and the absent global path.
+      expect(message).toContain(
+        "declares frontmatter name: 'other-name' but the pipeline references 'reviewer'",
+      );
+      expect(message).toContain(
+        `Also checked (no file): ${path.join(homedir(), '.claude', 'agents', 'reviewer.md')}`,
+      );
+    });
+
+    it('omits the Also-checked tail when every probed layer has a file', () => {
+      // Both layers exist and both are rejected — there is no fileless
+      // layer to report, so the tail must not render (an "Also checked"
+      // naming nothing, or repeating a path already listed with its
+      // rejection reason, would be noise).
+      const globalAgents = splitProjectLayerFromGlobal();
+      writeFileSync('.claude/agents/reviewer.md', '---\nname: other-name\n---\nbody\n');
+      writeFileSync(path.join(globalAgents, 'reviewer.md'), 'You are a meticulous reviewer.\n');
+      const yamlPath = setupFixture({ yaml: yamlReferencing('reviewer') });
+      let message = '';
+      try {
+        compile(yamlPath);
+      } catch (e) {
+        message = e instanceof Error ? e.message : String(e);
+      }
+      expect(message).toMatch(/no layer's persona file satisfies it/);
+      expect(message).not.toContain('Also checked');
+    });
   });
 });
 

@@ -265,6 +265,18 @@ function multiLayerCopilotError(
   );
 }
 
+/** Append the probed-but-absent layer paths to a rejection-based compile
+ *  error (single-candidate and multi-layer, both clis). Without the tail
+ *  those errors name only the files that EXIST and fail — a user who
+ *  believes a persona lives at another layer (typo'd directory, different
+ *  $HOME) would "fix" the named file (e.g. delete it) and re-run into a
+ *  missing-persona error instead of converging in one pass. Returns the
+ *  error unchanged when every probed layer had a file. */
+function withNoFileTail(error: Error, noFile: readonly string[]): Error {
+  if (noFile.length === 0) return error;
+  return new Error(`${error.message}\nAlso checked (no file): ${noFile.join(', ')}`);
+}
+
 /** Evaluate one existing claude candidate file against the reference: null
  *  means the file satisfies it (claude registers it under `name`); otherwise
  *  the rejection explaining why claude would skip it. claude — live-verified
@@ -346,7 +358,8 @@ function evaluateCopilotCandidate(candidate: string): PersonaRejection | null {
  *  CLIs themselves skip unregistrable files — live-verified for both clis: a
  *  failing project-layer file does not shadow a satisfying global-layer one.
  *  Throws only when NO layer satisfies, naming every examined file and why
- *  it was rejected.
+ *  it was rejected — plus, when some probed layer had no file at all, an
+ *  `Also checked (no file)` tail naming those paths (`withNoFileTail`).
  *
  *  The returned path is validation-only at every call site (both
  *  `validateAgentFilesExist` and emit-walker's human_gate probe discard it).
@@ -366,12 +379,16 @@ function resolvePersonaByFrontmatter(
   cli: AgentCli,
 ): string {
   const attempted: string[] = [];
+  const noFile: string[] = [];
   const examined = new Set<string>();
   const rejections: PersonaRejection[] = [];
   for (const dir of agentDirs) {
     const candidate = layerCandidate(dir, leaf);
     attempted.push(candidate);
-    if (!existsSync(candidate)) continue;
+    if (!existsSync(candidate)) {
+      noFile.push(candidate);
+      continue;
+    }
     // Two layer spellings can denote the same file — running loom from $HOME
     // collapses `.claude/agents/` and `~/.claude/agents/` into one directory.
     // That is ONE candidate, not two: dedupe by realpath (not string
@@ -403,13 +420,19 @@ function resolvePersonaByFrontmatter(
   }
   if (rejections.length === 0) throw missingPersonaError(contextLabel, name, attempted);
   if (rejections.length === 1) {
-    throw cli === 'claude'
-      ? singleClaudeRejectionError(rejections[0], name, contextLabel)
-      : singleCopilotRejectionError(rejections[0], name, contextLabel);
+    throw withNoFileTail(
+      cli === 'claude'
+        ? singleClaudeRejectionError(rejections[0], name, contextLabel)
+        : singleCopilotRejectionError(rejections[0], name, contextLabel),
+      noFile,
+    );
   }
-  throw cli === 'claude'
-    ? multiLayerClaudeError(rejections, name, contextLabel)
-    : multiLayerCopilotError(rejections, name, contextLabel);
+  throw withNoFileTail(
+    cli === 'claude'
+      ? multiLayerClaudeError(rejections, name, contextLabel)
+      : multiLayerCopilotError(rejections, name, contextLabel),
+    noFile,
+  );
 }
 
 /** Resolve agent `name`'s persona file across the layered `agentDirs` and
