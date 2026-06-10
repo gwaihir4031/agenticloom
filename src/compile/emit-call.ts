@@ -45,9 +45,10 @@ export type RunAgentEmitOverrides =
     };
 
 /** Emit the `await runAgent(...)` call expression for a step (no `const` /
- *  `let` prefix, no trailing `;`). Used by both the main-pass step emit
+ *  `let` prefix, no trailing `;`). Used by the main-pass step emit
  *  (which prepends `const`/`let ${v} = ` + appends `;`) and the on_fail
- *  retry-callback emit (which prepends `${memberBind} = ` for re-assignment).
+ *  retry-callback emit, which prepends `${memberBind} = ` for re-assignment
+ *  — or emits the expression as a bare statement for bindless zone members.
  *
  *  This is pure string assembly — it does NOT call `checkConsume`,
  *  `validatePath`, or `registerPath`. Those side-effecting checks fire
@@ -305,7 +306,17 @@ export function buildRetryBody(
     const member = items[k];
     if (isStep(member)) {
       const memberBind = member.bind;
-      if (memberBind === undefined) continue;
+      if (memberBind === undefined) {
+        // Bindless step = side-effect member: its contribution is its
+        // effect, not a consumed output, so it re-fires on every bounce —
+        // skipping it would make attempt 2+ execute a different zone than
+        // attempt 1. Bare statement, no reassignment: the main pass
+        // declared its synthesized `_N` as `const` and nothing downstream
+        // consumes it. It can never be the retry_from target (the target
+        // resolves from a bind name), so no revise threading applies.
+        body.push(`${pad}    ${emitRunAgentExpr(member, scope)};`);
+        continue;
+      }
       if (k === retryFromIdx) {
         body.push(
           `${pad}    ${memberBind} = ${emitRunAgentExpr(member, scope, { promptOverride: revisePromptExpr, inputPathsOverride: reviseInputPaths })};`,
