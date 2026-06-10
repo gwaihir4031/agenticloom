@@ -4,6 +4,7 @@ import { tmpdir, homedir } from 'os';
 import * as path from 'path';
 import { fileURLToPath } from 'url';
 import { compile } from './index.js';
+import type { AgentCli } from '../runtime/agent.js';
 
 // ESM-friendly equivalent of `__dirname`. `import.meta.url` is the only
 // way to get the current module's URL in an ESM context; converting to a
@@ -187,7 +188,16 @@ export function setupCompileTestEnv(): () => void {
  *  Returns the absolute path to the YAML file for compile() to read. */
 export function setupFixture(opts: {
   yaml: string;
-  agents?: string[]; // persona names to create at .claude/agents/<name>.md
+  /** Persona names to create under the project layer for `cli` (default
+   *  'claude'): claude → `.claude/agents/<name>.md`, copilot →
+   *  `.github/agents/<name>.agent.md`. Set `cli: 'copilot'` to match a
+   *  `cli: copilot` pipeline so the compiler's cli-aware existence check
+   *  finds the file. The leaf is written from independent literals here (not
+   *  via `agentFileLeaf`) so a test that creates the fixture and asserts the
+   *  compiler finds it genuinely cross-checks the convention rather than
+   *  agreeing with production by construction. */
+  agents?: string[];
+  cli?: AgentCli;
 }): string {
   // Guard: setupFixture relies on cwd being the per-test tmpdir set up by
   // setupCompileTestEnv. If a test calls setupFixture before beforeEach (or
@@ -201,9 +211,26 @@ export function setupFixture(opts: {
     );
   }
   if (opts.agents && opts.agents.length > 0) {
-    mkdirSync('.claude/agents', { recursive: true });
+    // Mirror the per-cli project-layer convention the compiler validates
+    // against (compile/index.ts AGENT_DIR_DEFAULTS). Only the project layer
+    // is created — the layered probe returns on the first SATISFYING layer
+    // (for claude: frontmatter name + description), and the fixture
+    // frontmatter written below is what satisfies it, so the project file
+    // alone passes the check.
+    const cli = opts.cli ?? 'claude';
+    const dir = cli === 'copilot' ? '.github/agents' : '.claude/agents';
+    const suffix = cli === 'copilot' ? '.agent.md' : '.md';
+    mkdirSync(dir, { recursive: true });
     for (const name of opts.agents) {
-      writeFileSync(`.claude/agents/${name}.md`, `---\nname: ${name}\n---\nbody\n`);
+      // name: + description: is the minimal frontmatter claude registers —
+      // claude refuses to load an agent file without a description, and the
+      // compile-time persona check mirrors that, so default fixtures must
+      // carry both. Tests exercising degenerate frontmatter write their own
+      // files inline instead of using this helper.
+      writeFileSync(
+        `${dir}/${name}${suffix}`,
+        `---\nname: ${name}\ndescription: test persona\n---\nbody\n`,
+      );
     }
   }
   const yamlPath = path.join(cwd, 'pipeline.yaml');

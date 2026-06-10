@@ -9,7 +9,7 @@ Loom compiles a pipeline YAML into a TypeScript script that orchestrates CLI cod
 
 ## When invoked
 
-Write or edit a pipeline at `<cwd>/loom/pipelines/<name>.yaml`. Validate via `loom compile <name> /tmp/out.ts` when shell + loom are available; otherwise give the user the command. Persona authoring (`.claude/agents/<name>.md` files) is out of scope — if a referenced agent has no persona file, `loom compile` fails with the candidate paths listed; surface that error to the user verbatim.
+Write or edit a pipeline at `<cwd>/loom/pipelines/<name>.yaml`. Validate via `loom compile <name> /tmp/out.ts` when shell + loom are available; otherwise give the user the command. Persona authoring (agent files under `.claude/agents/` or `.github/agents/`) is out of scope — if a referenced persona has no agent file, `loom compile` fails with the candidate paths listed; surface that error to the user verbatim.
 
 ## Schema
 
@@ -22,8 +22,15 @@ inputs: [name1, name2]       # bind names accepted at runtime (default [])
 flow: [ FlowItem, ... ]      # required; array of primitives
 ```
 
+### Agent references — `step:`, `review_loop.writer`, `review_loop.reviewer`
+Each accepts EITHER form; forms mix freely (e.g. inline writer + persona reviewer):
+- **Persona name (string)** — e.g. `step: code-reviewer`. The CLI loads the native agent file (layered lookup; see Invariants) and enforces its `tools:`.
+- **Inline agent (object)** — `{ prompt, name }`, BOTH required. No persona file; runs with **all tools**.
+  - `prompt` — the agent's task. Static text: no `$ref` interpolation (per-run data still flows via `input:`/`inputs:`). Must not start with `-`.
+  - `name` — the agent's identity in logs, window titles, and mermaid nodes. fs-safe: `^[a-zA-Z0-9][a-zA-Z0-9._-]*$`.
+
 ### `step` — one agent invocation
-- Required: `step: <agent-name>`
+- Required: `step: <agent-ref>` (persona name string OR inline `{ prompt, name }`)
 - One of `input: $bind | "literal"` OR `inputs: { key: $ref, ... }` (not both)
 - Optional: `bind`, `produces`, `extra_args`, `timeout` (ms, runtime default 1,800,000 / 30 min), `on_fail`
 - `on_fail` (turns the step into a retry-zone gate; requires `produces` so the gate can read its verdict):
@@ -38,15 +45,16 @@ on_fail:
 ```
 
 ### `review_loop` — bounded writer ↔ reviewer
-- Required: `writer`, `input`, `writer_produces`
+- Required: `writer` (agent ref: persona name OR inline `{ prompt, name }`), `input`, `writer_produces`
 - `reviewer` is ONE of:
-  - **Agent name (string)** — then `reviewer_produces` AND `verdict_field` are also required.
+  - **Single agent (persona name string OR inline `{ prompt, name }`)** — then `reviewer_produces` AND `verdict_field` are also required.
   - **Subflow (`FlowItem[]`)** — last item MUST be `aggregate`; `reviewer_produces`/`verdict_field` must be ABSENT (the inner aggregate carries the verdict).
 - Optional: `max_iters` (runtime default 3), `approve_when` (default 'pass'), `on_max_exceeded: fail | continue` (default `'continue'`; `'fail'` throws `HaltPipelineError` on exhaustion), `bind`
 
 ### `human_gate` — pause for human
 - **Plain y/N**: `human_gate: {}` with no other fields permitted.
-- **Interactive REPL** (all four required together): `interactive: true`, `agent`, `input: $bind`, `prompt`.
+- **Interactive REPL** (required together): `interactive: true`, `input: $bind`, `prompt`. `prompt` must be non-empty and must not start with `-`.
+- `agent` is OPTIONAL in interactive mode (always a persona-name string, never inline): present → persona gate; omitted → general gate (all tools; the gate's `prompt` is the agent's task; labeled `human-gate` in logs/mermaid).
 - Optional in interactive: `extra_args` (only meaningful here — plain y/N spawns no child).
 - **Both modes require a TTY** — `human_gate` fails loudly when stdin/stdout aren't terminals (e.g. CI, piped input).
 
@@ -199,7 +207,7 @@ flow:
 ```
 
 ### Pattern 5 — Interactive human gate after automated review
-Pauses for a human to edit the artifact via an agent REPL. Inherits stdio; the user types directly to the agent; gate confirms y/N on REPL exit.
+Pauses for a human to edit the artifact via an agent REPL. Inherits stdio; the user types directly to the agent; gate confirms y/N on REPL exit. Omit `agent:` for a general gate — all tools, with the gate's `prompt` as the task.
 ```yaml
 pipeline: ac-with-human
 cli: claude
@@ -291,6 +299,26 @@ flow:
     produces: review.json
 ```
 
+### Pattern 8 — Inline agent (one-off, no persona file)
+`step:`/`writer:`/`reviewer:` accept an inline `{ prompt, name }` agent instead of a persona name; forms mix freely. The inline agent runs with all tools; `prompt` is its static task (per-run data still flows via `input:`).
+```yaml
+pipeline: spec-inline
+cli: claude
+inputs: [ticket]
+flow:
+  - review_loop:
+      writer:
+        prompt: |
+          Draft a technical spec from the ticket at the input path.
+        name: spec-drafter       # identity in logs, window titles, mermaid
+      reviewer: spec-reviewer    # persona reviewer alongside the inline writer
+      input: $ticket
+      writer_produces: SPEC.md
+      reviewer_produces: review.json
+      verdict_field: status
+      bind: spec
+```
+
 ## Invariants & gotchas
 
 - **Every `$ref` must resolve to a `bind:` declared upstream.** Compile fails otherwise.
@@ -298,18 +326,18 @@ flow:
 - **`revise_with` is required whenever `retry_from` is set** (and vice versa in `aggregate`). Empty `{}` is rejected — at least one of `prompt:` or `inputs:` must be set.
 - **`revise_with.inputs[]` entries are `$`-prefixed bind refs** (e.g. `[$sec, $api]`), not literal paths.
 - **Compound `review_loop`'s reviewer subflow's last item MUST be `aggregate`**, AND that terminal `aggregate` MUST declare `bind:` (the loop reads the verdict via that bind).
-- **`reviewer_produces` + `verdict_field`** are required iff `reviewer` is an agent name (string); forbidden iff `reviewer` is a subflow.
-- **`human_gate` interactive-mode fields** (`agent`, `input`, `prompt`) are all-or-nothing. Plain y/N is `human_gate: {}` with no other fields.
+- **`reviewer_produces` + `verdict_field`** are required iff `reviewer` is a single agent (persona name string or inline `{ prompt, name }`); forbidden iff `reviewer` is a subflow.
+- **`human_gate` interactive mode**: `input` + `prompt` are required with `interactive: true`; `agent` is optional (omit it for a general all-tools gate). Plain y/N is `human_gate: {}` with no other fields.
 - **`step.on_fail` requires `step.produces`** — the gate reads its verdict from the step's output file.
 - **`aggregate` retry-mechanism fields** (`max_retries`, `on_max_exceeded`, `revise_with`) all require `retry_from`. Set `retry_from` to make `aggregate` a retry gate, or remove them all.
-- **`extra_args` REPLACES `default_extra_args` for that step/gate** — it does not concatenate. `extra_args: []` is an explicit opt-out (no `--model` flag, falls back to CLI's built-in default model). To use the default unchanged, **omit the field entirely**.
+- **`extra_args` REPLACES `default_extra_args` for that step/gate** — it does not concatenate. `extra_args: []` is an explicit opt-out (no `--model` flag, falls back to CLI's built-in default model). To use the default unchanged, **omit the field entirely**. Neither field may contain `--agent`/`--agents` — loom owns agent delegation; rejected at parse time.
 - **`BindName` regex**: `^[a-zA-Z_][a-zA-Z0-9_]*$` — no dashes, no leading digits.
 - **`produces:` paths must be workspace-relative** — leading `/` (absolute) or `..` (traversal) is rejected at compile.
 - **`parallel` siblings cannot share a `produces:` path** — compile-time collision check.
 - **`retry_from:` accepts step binds (with `produces:`), `branch.bind`, and `foreach.bind`.** `review_loop` and `parallel` targets are rejected at compile, as are hoisted parallel-child binds and pipeline inputs. `aggregate` is accepted but warns — aggregate is deterministic in its inputs, so retrying it alone is a no-op unless its inputs are in the retry zone.
 - **All object schemas are strict (`z.strictObject`)**: typos like `maxRetries:` (camelCase) fail with "unrecognized key" — they don't silently fall through to defaults.
 - **`branch.when` is raw JavaScript with three loom-provided file-read helpers in scope** (`readJson`, `readText`, `fileExists`). Helpers accept `$ref`, absolute, or relative literal paths. `$bind` references are stripped to the bare name at compile time (scope-aware; respects string literals). Loom does NOT validate literal paths at compile time — missing files surface as Node-stock `ENOENT` at runtime. See PRIMITIVES.md § "BranchItem" → "Notes on `when:` evaluation" for the full surface.
-- **Agents are referenced by name** — the name resolves via the layered lookup (`<cwd>/.<cli>/agents/<name>.md` first, then `~/.<cli>/agents/<name>.md`). Missing persona files fail at compile, not runtime.
+- **Persona names resolve via a cli-aware layered lookup** — claude: `<cwd>/.claude/agents/<name>.md`, then `~/.claude/agents/<name>.md`; copilot: `<cwd>/.github/agents/<name>.agent.md`, then `~/.copilot/agents/<name>.agent.md`. Missing persona files fail at compile, not runtime. claude personas must carry frontmatter `name:` equal to the reference AND a non-empty `description:` — claude registers agents by frontmatter name and refuses description-less files. copilot personas must carry a string `description:` in parseable frontmatter (empty string allowed; `name:` optional — copilot registers a name-less file under its filename stem and loads `<name>.agent.md` by stem even when its `name:` differs, live-verified on copilot 1.0.61). loom validates both at compile time.
 
 ## Source-of-truth
 

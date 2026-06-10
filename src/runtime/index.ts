@@ -6,7 +6,7 @@
 // no logic.
 
 // Agent primitives + HaltPipelineError (the cross-primitive halt signal).
-export { runAgent, HaltPipelineError, loadAgentSystemPrompt, requireFile } from './agent.js';
+export { runAgent, HaltPipelineError, requireFile } from './agent.js';
 export type { RunAgentOpts, AgentCli, AgentRole, RequireFileContext } from './agent.js';
 
 // Stream-event formatting + tool-arg extraction.

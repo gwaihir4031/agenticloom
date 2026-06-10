@@ -14,7 +14,20 @@ export const BindName = z.string().regex(/^[a-zA-Z_][a-zA-Z0-9_]*$/, {
 /** Empty `{}` is rejected to eliminate silent retry-with-no-revise. */
 export const ReviseWith = z
   .strictObject({
-    prompt: z.string().min(1).optional(),
+    // Same dash-leading rule as InlineAgent.prompt / the human_gate prompt:
+    // in prompt-only revise mode this string heads the persona retry
+    // target's -p value, and the CLI parses a dash-leading value as a flag —
+    // the spawn would die on the retry pass, after the expensive first pass
+    // already ran.
+    prompt: z
+      .string()
+      .min(1)
+      .refine((p) => !p.startsWith('-'), {
+        error:
+          "revise_with.prompt: must not start with '-' — the CLI parses a dash-leading " +
+          '-p value as a flag, killing the run on the retry pass. Begin with a word.',
+      })
+      .optional(),
     inputs: z
       .array(
         z.string().min(1).regex(/^\$/, {
@@ -60,6 +73,82 @@ export const OnFail = z.strictObject({
   revise_with: ReviseWith,
 });
 
+/** Shared schema for `default_extra_args:` / `extra_args:`. Rejects a
+ *  smuggled `--agent` or `--agents`: loom owns agent delegation. Extra args
+ *  are appended AFTER loom's own `--agent <name>` in the spawn argv, so a
+ *  user `--agent` would silently win (last flag wins) and replace the
+ *  compile-validated persona — and a user `--agents` JSON definition can
+ *  shadow a persona under the same name (the init-roster audit cannot catch
+ *  that: the name IS in the roster). */
+const ExtraArgs = z
+  .array(z.string())
+  .refine(
+    (a) =>
+      !a.some(
+        (s) =>
+          s === '--agent' ||
+          s.startsWith('--agent=') ||
+          s === '--agents' ||
+          s.startsWith('--agents='),
+      ),
+    {
+      error:
+        "extra_args: must not contain '--agent' or '--agents' — loom owns agent " +
+        'delegation (the persona comes from step:/writer:/reviewer:/agent:). A trailing ' +
+        '--agent would silently replace the compile-validated persona; an --agents JSON ' +
+        'definition can shadow a persona under the same name.',
+    },
+  );
+
+/** A general (inline) agent: no persona file, all tools. `prompt` is the agent's
+ *  task — required and static (no `$ref` interpolation; data flows via `input:` /
+ *  `inputs:`). `name` is required — the agent's identity in logs, window titles,
+ *  error messages, and mermaid nodes. The object form (vs a bare persona-name
+ *  string) is the discriminator that lets compile reject a task-less inline
+ *  agent. */
+export const InlineAgent = z.strictObject({
+  // `.refine`: the prompt heads the spawned `-p` value, and both CLIs parse a
+  // dash-leading value as a flag (`claude -p '---…'` → "error: unknown
+  // option"), so a leading '-' is a guaranteed runtime spawn failure —
+  // reject it at compile time instead.
+  prompt: z
+    .string()
+    .min(1)
+    .refine((p) => !p.startsWith('-'), {
+      error:
+        "prompt: must not start with '-' — the CLI parses a dash-leading -p value as a flag " +
+        '(a pasted frontmatter `---` or a leading markdown list breaks the spawn). Begin with a word.',
+    }),
+  name: z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/, {
+    error:
+      'name: must match /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/ (fs-safe: it names log files; ' +
+      'alphanumeric first character, then letters, digits, dots, underscores, hyphens)',
+  }),
+});
+
+/** A persona-name reference (the string arm of `AgentRef`, and
+ *  `human_gate.agent`). `.min(1)`: an empty name would otherwise surface
+ *  later as a baffling "no persona file exists at `.claude/agents/.md`"
+ *  probe error. The no-leading-dash rule mirrors the prompt guards: the
+ *  name becomes the spawn's `--agent <name>` argv value, and the CLI
+ *  parses a dash-leading value as a flag. */
+export const PersonaName = z
+  .string()
+  .min(1, {
+    error:
+      'agent name must be non-empty (where the agent is optional, omit the field entirely instead)',
+  })
+  .refine((s) => !s.startsWith('-'), {
+    error:
+      "agent name must not start with '-' — it becomes the spawn's --agent value, which the CLI parses as a flag",
+  });
+
+/** An agent reference — the value of `step:` / `review_loop.writer` /
+ *  `review_loop.reviewer`. A bare string is a persona name (the CLI loads its
+ *  agent file); an object is an inline general agent. The arms are distinct JSON
+ *  types, so the union is unambiguous. */
+export const AgentRef = z.union([PersonaName, InlineAgent]);
+
 // Hand-written interface types — mirror the Zod schema shapes so they can be
 // used as static return types of type-guard predicates (e.g. `isStep(item): i
 // is StepItemT`). The `T` suffix avoids colliding with the schema constants
@@ -85,7 +174,7 @@ export const OnFail = z.strictObject({
 // adds runtime predicates only. So these types match the BASE schema shape
 // (before refines). They're intentionally looser than what the Zod schemas
 // reject at parse time (refines add cross-field invariants TS can't express,
-// e.g. "if interactive: true then agent/input/prompt are required").
+// e.g. "if interactive: true then input/prompt are required").
 
 export interface ReviseWithT {
   prompt?: string;
@@ -101,8 +190,21 @@ export interface OnFailT {
   approve_when?: string;
 }
 
+/** Static-typing mirror of the `InlineAgent` Zod shape. Hand-written (like the
+ *  sibling `*T` interfaces) so it can be the narrowed target of `isInlineAgent`
+ *  and a stable type for downstream compile / mermaid consumers. `name` is
+ *  required — it is the agent's identity in logs, window titles, error
+ *  messages, and mermaid nodes. */
+export interface InlineAgentT {
+  prompt: string;
+  name: string;
+}
+
+/** Static-typing mirror of the `AgentRef` Zod union. */
+export type AgentRef = string | InlineAgentT;
+
 export interface StepItemT {
-  step: string;
+  step: AgentRef;
   input?: string;
   inputs?: Record<string, string>;
   bind?: string;
@@ -114,8 +216,8 @@ export interface StepItemT {
 
 export interface ReviewLoopItemT {
   review_loop: {
-    writer: string;
-    reviewer: string | FlowItem[];
+    writer: AgentRef;
+    reviewer: AgentRef | FlowItem[];
     input: string;
     max_iters?: number;
     approve_when?: string;
@@ -189,6 +291,27 @@ export const isBranch = (i: FlowItem): i is BranchItemT => 'branch' in i;
 export const isAggregate = (i: FlowItem): i is AggregateItemT => 'aggregate' in i;
 export const isForeach = (i: FlowItem): i is ForeachItemT => 'foreach' in i;
 
+/** Read helpers over `AgentRef`. Unlike the FlowItem guards above, these narrow
+ *  an agent reference (string persona vs inline object), not a `FlowItem`.
+ *  Centralized so every later compile + mermaid site resolves the union the same
+ *  way. */
+export const isInlineAgent = (ref: AgentRef): ref is InlineAgentT => typeof ref === 'object';
+
+/** Resolve an agent reference to its name: a persona name is itself; an
+ *  inline agent is its required `name`. For a persona ref the returned name
+ *  is also the spawn's `--agent` value; an inline agent's `name` is
+ *  display-only (the inline spawn passes no `--agent`). The spawn FORM is
+ *  selected by `inlinePromptOf`, never by this label. */
+export const agentLabel = (ref: AgentRef): string => (isInlineAgent(ref) ? ref.name : ref);
+
+/** Baked inline prompt of an agent reference: the inline agent's `prompt`;
+ *  undefined for a persona name. Companion to `agentLabel` — the pair
+ *  (label, inlinePrompt) is what every compile site derives from an
+ *  AgentRef; missing the prompt half at a producer site silently degrades
+ *  an inline retry re-fire into a persona lookup with no file. */
+export const inlinePromptOf = (ref: AgentRef): string | undefined =>
+  isInlineAgent(ref) ? ref.prompt : undefined;
+
 /** Raw schema body for `StepItem`, BEFORE the `z.ZodType<StepItemT>`
  *  annotation widens away the inferred type. Exported so the bidirectional
  *  drift-detection tests in `types.test.ts` can compare
@@ -198,7 +321,7 @@ export const isForeach = (i: FlowItem): i is ForeachItemT => 'foreach' in i;
  *  `StepItem` below is the public schema — pipeline parsing uses it,
  *  refines and all. */
 export const StepItemBody = z.strictObject({
-  step: z.string(),
+  step: AgentRef,
   input: ValueExpr.optional(),
   inputs: z.record(z.string(), ValueExpr).optional(),
   bind: BindName.optional(),
@@ -210,7 +333,7 @@ export const StepItemBody = z.strictObject({
   // args, including no `--model` flag, falling back to the cli's
   // built-in default model. To use the pipeline default unchanged, omit
   // the field entirely.
-  extra_args: z.array(z.string()).optional(),
+  extra_args: ExtraArgs.optional(),
   // Per-step timeout in milliseconds. When set, the runtime arms a
   // setTimeout that kills the child with SIGTERM and rejects with
   // `agent '<name>' timed out after <ms>ms` if it fires. Default 30 min
@@ -237,11 +360,16 @@ export const StepItem: z.ZodType<StepItemT> = StepItemBody.refine(
 export const ReviewLoopItemBody = z.strictObject({
   review_loop: z
     .strictObject({
-      writer: z.string(),
-      // Structural rule "subflow's last item must be aggregate" is enforced at
-      // compile time in validateReviewerSubflow (compile/validation.ts). Zod's recursive
-      // refine on a lazy cycle is awkward; the gap is intentional.
-      reviewer: z.union([z.string(), z.lazy(() => z.array(FlowItemSchema))]),
+      writer: AgentRef,
+      // Three distinct JSON types so the union is unambiguous: a string persona
+      // name, an inline `{ prompt, name }` agent (object), or a subflow
+      // (array). The structural rule "subflow's last item must be aggregate" is
+      // enforced at compile time in validateReviewerSubflow (compile/validation.ts);
+      // Zod's recursive refine on a lazy cycle is awkward, so that gap is
+      // intentional. The refines below treat string and inline-object alike as
+      // the single-reviewer arm (verdict via reviewer_produces/verdict_field);
+      // only the array arm is the subflow.
+      reviewer: z.union([PersonaName, InlineAgent, z.lazy(() => z.array(FlowItemSchema))]),
       input: ValueExpr,
       max_iters: z.number().int().positive().optional(),
       approve_when: z.string().min(1).optional(),
@@ -251,19 +379,19 @@ export const ReviewLoopItemBody = z.strictObject({
       bind: BindName.optional(),
       on_max_exceeded: z.enum(['fail', 'continue']).optional(),
     })
-    .refine((v) => typeof v.reviewer !== 'string' || v.reviewer_produces !== undefined, {
+    .refine((v) => Array.isArray(v.reviewer) || v.reviewer_produces !== undefined, {
       error:
-        "review_loop: 'reviewer_produces' is required when 'reviewer' is an agent name (string). The reviewer writes its JSON verdict to that path.",
+        "review_loop: 'reviewer_produces' is required when 'reviewer' is a single agent (a persona name or an inline agent). The reviewer writes its JSON verdict to that path.",
     })
-    .refine((v) => typeof v.reviewer === 'string' || v.reviewer_produces === undefined, {
+    .refine((v) => !Array.isArray(v.reviewer) || v.reviewer_produces === undefined, {
       error:
         "review_loop: 'reviewer_produces' must be omitted when 'reviewer' is a subflow. The subflow's own steps declare their 'produces:' paths.",
     })
-    .refine((v) => typeof v.reviewer !== 'string' || v.verdict_field !== undefined, {
+    .refine((v) => Array.isArray(v.reviewer) || v.verdict_field !== undefined, {
       error:
-        "review_loop: 'verdict_field' is required when 'reviewer' is an agent name (string). The loop reads that field from the reviewer's JSON verdict file.",
+        "review_loop: 'verdict_field' is required when 'reviewer' is a single agent (a persona name or an inline agent). The loop reads that field from the reviewer's JSON verdict file.",
     })
-    .refine((v) => typeof v.reviewer === 'string' || v.verdict_field === undefined, {
+    .refine((v) => !Array.isArray(v.reviewer) || v.verdict_field === undefined, {
       error:
         "review_loop: 'verdict_field' must be omitted when 'reviewer' is a subflow. The terminal aggregate inside the subflow performs its own verdict extraction; the loop receives the aggregate's pre-extracted overall verdict string.",
     }),
@@ -278,31 +406,53 @@ export const HumanGateItemBody = z.strictObject({
     .strictObject({
       // `interactive` is a literal-true-or-absent flag, not a boolean: there
       // is no `interactive: false` state. The plain y/N path is "no
-      // interactive field at all"; the four interactive-mode fields
-      // (interactive/agent/input/prompt) are required together or absent
-      // together. `extra_args:` is optional even with interactive set; when
-      // omitted the gate uses the pipeline default. See refines below.
+      // interactive field at all". Interactive mode requires `input:` and
+      // `prompt:` together; `agent:` is optional. Present → a persona gate
+      // (delegated to the cli via `--agent`). Absent → a general gate: the
+      // gate's already-mandatory `prompt:` is the agent's task, spawned with
+      // all tools and no persona. (A general agent is expressed here by
+      // omitting `agent:`, not by an inline object, because the gate prompt
+      // already supplies the task.) `extra_args:` is optional even with
+      // interactive set; when omitted the gate uses the pipeline default.
+      // See refines below.
       interactive: z.literal(true).optional(),
-      agent: z.string().optional(),
+      agent: PersonaName.optional(),
       input: ValueExpr.optional(),
-      prompt: z.string().optional(),
+      // `.min(1)`: for a general gate (agent: omitted) the prompt is the
+      // agent's ENTIRE task — an empty string would spawn a persona-less
+      // agent with no task at all. InlineAgent.prompt enforces the same.
+      prompt: z
+        .string()
+        .min(1, {
+          error:
+            "human_gate: 'prompt:' must be non-empty — it is the gate's initial message and, for a general gate (no agent:), the agent's entire task",
+        })
+        // Same dash-leading rule as InlineAgent.prompt: the gate prompt heads
+        // the interactive spawn's message argv value (claude: positional;
+        // copilot: the --interactive value).
+        .refine((p) => !p.startsWith('-'), {
+          error:
+            "human_gate: 'prompt:' must not start with '-' — the CLI parses a dash-leading argv value as a flag. Begin with a word.",
+        })
+        .optional(),
       // Per-gate cli args override (REPLACES `default_extra_args:`, doesn't
       // concatenate — matches `StepItem.extra_args`). Only meaningful in
       // interactive mode (plain y/N spawns no child). Note: `extra_args: []`
       // is an explicit opt-OUT — the gate's argv has zero extra flags
       // including no `--model`, so the cli uses its built-in default model.
       // To use the pipeline default unchanged, omit the field entirely.
-      extra_args: z.array(z.string()).optional(),
+      extra_args: ExtraArgs.optional(),
     })
     .refine(
       (v) => {
         if (v.interactive !== true) return true;
-        return v.agent !== undefined && v.input !== undefined && v.prompt !== undefined;
+        return v.input !== undefined && v.prompt !== undefined;
       },
       {
         error:
-          "human_gate: when 'interactive: true' is set, 'agent:', 'input:', and 'prompt:' are all required. " +
-          'Together they specify which agent to spawn, the artifact bind it edits, and its initial message.',
+          "human_gate: when 'interactive: true' is set, 'input:' and 'prompt:' are required. " +
+          "'input:' is the artifact bind the agent edits; 'prompt:' is its initial message (and, for a general gate, its task). " +
+          "'agent:' is optional — omit it for a general gate spawned with all tools and no persona.",
       },
     )
     .refine(
@@ -432,7 +582,7 @@ export const FlowItemSchema: z.ZodType<FlowItem> = z.lazy(() =>
 export const Pipeline = z.strictObject({
   pipeline: z.string(),
   cli: z.enum(['claude', 'copilot']),
-  default_extra_args: z.array(z.string()).optional(),
+  default_extra_args: ExtraArgs.optional(),
   inputs: z.array(BindName).default([]),
   flow: z.array(FlowItemSchema),
 });

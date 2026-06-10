@@ -8,6 +8,7 @@ import {
   isBranch,
   isAggregate,
   isForeach,
+  agentLabel,
 } from './types.js';
 
 /** Per-emit fresh-id factory. Returns `n1`, `n2`, ... — always a valid
@@ -73,7 +74,10 @@ function walkItem(
 ): Walked {
   if (isStep(item)) {
     const id = fresh();
-    lines.push(`${indent}${id}(["${escapeLabel(item.step)}"])`);
+    // Label the node by the resolved agent reference: a persona name is itself;
+    // an inline agent is its required `name`. The node id (`fresh()`) stays the
+    // Mermaid identifier; this is only the visible label.
+    lines.push(`${indent}${id}(["${escapeLabel(agentLabel(item.step))}"])`);
     if (item.bind !== undefined) bindNodes.set(item.bind, id);
     if (item.on_fail !== undefined) {
       const target = bindNodes.get(item.on_fail.retry_from);
@@ -104,20 +108,21 @@ function walkItem(
     lines.push(`${indent}subgraph ${loopId}["${title}"]`);
     const inner = indent + '    ';
     const writerId = fresh();
-    lines.push(`${inner}${writerId}(["${escapeLabel(r.writer)}"])`);
+    lines.push(`${inner}${writerId}(["${escapeLabel(agentLabel(r.writer))}"])`);
 
-    if (typeof r.reviewer === 'string') {
-      // Single-reviewer form. Emit reviewer node, forward + back edges.
+    if (!Array.isArray(r.reviewer)) {
+      // Single-reviewer form (persona name or inline agent). Emit reviewer node,
+      // forward + back edges.
       const reviewerId = fresh();
-      lines.push(`${inner}${reviewerId}(["${escapeLabel(r.reviewer)}"])`);
+      lines.push(`${inner}${reviewerId}(["${escapeLabel(agentLabel(r.reviewer))}"])`);
       lines.push(`${inner}${writerId} -->|"writer_produces"| ${reviewerId}`);
       lines.push(`${inner}${reviewerId} -.->|"on fail"| ${writerId}`);
     } else {
-      // Compound form. Walk the reviewer subflow inside the subgraph; the
-      // last item's tails feed the loop's on-fail back-edge to the writer.
-      // The schema (validateReviewerSubflow in compile/validation.ts) guarantees the
-      // last item is an aggregate, but mermaid doesn't enforce that —
-      // whatever tails the subflow exposes back-edge to the writer.
+      // Compound form (subflow array). Walk the reviewer subflow inside the
+      // subgraph; the last item's tails feed the loop's on-fail back-edge to the
+      // writer. The schema (validateReviewerSubflow in compile/validation.ts)
+      // guarantees the last item is an aggregate, but mermaid doesn't enforce
+      // that — whatever tails the subflow exposes back-edge to the writer.
       const subflow = emitSequence(r.reviewer, lines, fresh, inner, bindNodes);
       // Writer feeds the subflow's first item(s); use writer_produces label
       // for the first hop (matches the single-form semantics — writer's
@@ -152,10 +157,12 @@ function walkItem(
   if (isHumanGate(item)) {
     const h = item.human_gate;
     const id = fresh();
-    // Schema refine guarantees `agent` is set when `interactive: true`.
+    // A persona gate labels with its agent name; a general gate (interactive
+    // with `agent:` omitted) has no persona, so it falls back to the
+    // 'human-gate' label.
     const label =
       h.interactive === true
-        ? `human_gate (interactive): ${escapeLabel(h.agent!)}`
+        ? `human_gate (interactive): ${escapeLabel(h.agent ?? 'human-gate')}`
         : `human_gate (y/N)`;
     lines.push(`${indent}${id}{{"${label}"}}`);
     return { heads: [id], tails: [id] };

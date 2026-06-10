@@ -271,6 +271,244 @@ flow:
   });
 });
 
+describe('emit shape — interactive human_gate persona probe (cli-aware leaf)', () => {
+  it('resolves the copilot .agent.md leaf for an interactive human_gate agent', () => {
+    // The inline human_gate persona probe (its own emit branch) must use the
+    // same cli-aware leaf as the flow-walking check: for copilot it resolves
+    // `.github/agents/<agent>.agent.md`. validateAgentFilesExist does not walk
+    // human_gate agents, so a human_gate-only flow exercises the inline probe
+    // specifically. With the persona at exactly that leaf, compile succeeds.
+    const yamlPath = setupFixture({
+      agents: ['gate-agent'],
+      cli: 'copilot',
+      yaml: `
+pipeline: copilot-gate-ok
+cli: copilot
+inputs: [x]
+flow:
+  - human_gate:
+      interactive: true
+      agent: gate-agent
+      input: $x
+      prompt: review
+`,
+    });
+    const emitted = compile(yamlPath);
+    expect(emitted).toMatch(/await humanGate\({[\s\S]*?agent: "gate-agent"/);
+  });
+
+  it('rejects an interactive copilot human_gate whose persona sits at the .md leaf', () => {
+    // A `<agent>.md` in `.github/agents/` is not the file copilot opens, so
+    // the inline probe must reject it and name the `.agent.md` path it wants.
+    mkdirSync('.github/agents', { recursive: true });
+    writeFileSync('.github/agents/gate-agent.md', '---\nname: gate-agent\n---\nbody\n');
+    const yamlPath = setupFixture({
+      yaml: `
+pipeline: copilot-gate-wrong-leaf
+cli: copilot
+inputs: [x]
+flow:
+  - human_gate:
+      interactive: true
+      agent: gate-agent
+      input: $x
+      prompt: review
+`,
+    });
+    expect(() => compile(yamlPath)).toThrow(
+      /human_gate interactive mode references agent 'gate-agent'[\s\S]*\.github\/agents\/gate-agent\.agent\.md/,
+    );
+  });
+
+  it('resolves the copilot .agent.md leaf for a human_gate nested in a branch arm', () => {
+    // The flow-walking validator does not probe human_gate agents, so a gate
+    // buried in a branch arm is checked only by the inline emit() probe. It
+    // resolves the copilot leaf only if `cli` was threaded into the branch
+    // arm's recursive emit() call — this pins that threading, not just the
+    // top-level probe the sibling tests cover.
+    const yamlPath = setupFixture({
+      agents: ['gate-agent'],
+      cli: 'copilot',
+      yaml: `
+pipeline: copilot-gate-in-branch
+cli: copilot
+inputs: [x]
+flow:
+  - branch:
+      when: 'true'
+      then:
+        - human_gate:
+            interactive: true
+            agent: gate-agent
+            input: $x
+            prompt: review
+`,
+    });
+    const emitted = compile(yamlPath);
+    expect(emitted).toMatch(/await humanGate\({[\s\S]*?agent: "gate-agent"/);
+  });
+
+  it('rejects a copilot human_gate nested in a branch arm whose persona sits at the .md leaf', () => {
+    // Same nested position, wrong leaf: the branch-arm inline probe must
+    // still demand the copilot `.agent.md` file, proving the threaded cli
+    // (not a hard-coded claude default) drives the nested check.
+    mkdirSync('.github/agents', { recursive: true });
+    writeFileSync('.github/agents/gate-agent.md', '---\nname: gate-agent\n---\nbody\n');
+    const yamlPath = setupFixture({
+      yaml: `
+pipeline: copilot-gate-in-branch-wrong-leaf
+cli: copilot
+inputs: [x]
+flow:
+  - branch:
+      when: 'true'
+      then:
+        - human_gate:
+            interactive: true
+            agent: gate-agent
+            input: $x
+            prompt: review
+`,
+    });
+    expect(() => compile(yamlPath)).toThrow(
+      /human_gate interactive mode references agent 'gate-agent'[\s\S]*\.github\/agents\/gate-agent\.agent\.md/,
+    );
+  });
+
+  it('resolves the copilot .agent.md leaf for a human_gate nested in a foreach body', () => {
+    // A foreach body is a separate recursive emit() call site from the branch
+    // arm the sibling tests pin. A gate inside it is checked only by the
+    // inline emit() probe, which sees the copilot leaf only if `cli` was
+    // forwarded into the foreach-body recursive emit() — a copilot persona at
+    // the .agent.md leaf resolving here proves that second site forwards the
+    // threaded cli rather than defaulting to claude.
+    const yamlPath = setupFixture({
+      agents: ['gate-agent'],
+      cli: 'copilot',
+      yaml: `
+pipeline: copilot-gate-in-foreach
+cli: copilot
+inputs: [plan]
+flow:
+  - foreach:
+      over: $plan
+      as: task
+      body:
+        - human_gate:
+            interactive: true
+            agent: gate-agent
+            input: $task
+            prompt: review
+`,
+    });
+    const emitted = compile(yamlPath);
+    expect(emitted).toMatch(/await humanGate\({[\s\S]*?agent: "gate-agent"/);
+  });
+
+  it('rejects an interactive claude human_gate whose persona frontmatter name mismatches', () => {
+    // The gate probe shares validatePersonaFile with the flow-walking check,
+    // so claude's frontmatter-name guard applies to gate personas too: a
+    // mismatched name: would make `--agent gate-agent` silently run
+    // persona-less.
+    mkdirSync('.claude/agents', { recursive: true });
+    writeFileSync('.claude/agents/gate-agent.md', '---\nname: other-name\n---\nbody\n');
+    const yamlPath = setupFixture({
+      yaml: `
+pipeline: claude-gate-fm-mismatch
+cli: claude
+inputs: [x]
+flow:
+  - human_gate:
+      interactive: true
+      agent: gate-agent
+      input: $x
+      prompt: review
+`,
+    });
+    expect(() => compile(yamlPath)).toThrow(
+      /human_gate interactive mode[\s\S]*declares frontmatter name: 'other-name' but the pipeline references 'gate-agent'/,
+    );
+  });
+});
+
+describe('emit shape — general (omitted-agent) human_gate', () => {
+  it('omits the agent field for a general gate while keeping every other field', () => {
+    // A general gate omits `agent:`; the emitted humanGate({...}) carries no
+    // `agent:` field but still emits interactive/cli/agentDirs/extraArgs/
+    // input/prompt. No persona file is created — the probe must be skipped.
+    const yamlPath = setupFixture({
+      yaml: `
+pipeline: general-gate
+cli: claude
+default_extra_args: ["--model", "sonnet"]
+inputs: [x]
+flow:
+  - human_gate:
+      interactive: true
+      input: $x
+      prompt: iterate
+`,
+    });
+    const emitted = compile(yamlPath);
+    // Every always-emitted field is present.
+    expect(emitted).toMatch(/await humanGate\({[\s\S]*?interactive: true/);
+    expect(emitted).toMatch(/await humanGate\({[\s\S]*?cli: CLI/);
+    expect(emitted).toMatch(/await humanGate\({[\s\S]*?agentDirs: AGENT_DIRS/);
+    expect(emitted).toMatch(/await humanGate\({[\s\S]*?extraArgs: DEFAULT_EXTRA_ARGS/);
+    expect(emitted).toMatch(/await humanGate\({[\s\S]*?prompt: "iterate"/);
+    // ...but the `agent:` field is absent. `agentDirs:` is not a false match —
+    // the literal `agent: ` requires the colon immediately after `agent`.
+    expect(emitted).not.toMatch(/await humanGate\({[\s\S]*?agent: /);
+  });
+
+  it('compiles a general gate nested in a branch arm with no persona file (probe skipped)', () => {
+    // The persona probe (validatePersonaFile) runs only when `agent` is
+    // present, at every emit() site including the recursive branch-arm one.
+    // A general gate references no persona file, so compile must not probe —
+    // it would otherwise throw a missing-persona error for a file that was
+    // never meant to exist. No agents are created here.
+    const yamlPath = setupFixture({
+      yaml: `
+pipeline: general-gate-in-branch
+cli: copilot
+inputs: [x]
+flow:
+  - branch:
+      when: 'true'
+      then:
+        - human_gate:
+            interactive: true
+            input: $x
+            prompt: review
+`,
+    });
+    expect(() => compile(yamlPath)).not.toThrow();
+  });
+
+  it('keeps the agent field for a persona gate (contrast with the general form)', () => {
+    // Parity guard for the persona path: when `agent:` is present the emit
+    // still carries `agent: <name>`, byte-identical to the pre-general-gate
+    // behavior. Paired with the general-gate test above so the persona-vs-
+    // general split is asserted from both sides.
+    const yamlPath = setupFixture({
+      agents: ['gate-agent'],
+      yaml: `
+pipeline: persona-gate
+cli: claude
+inputs: [x]
+flow:
+  - human_gate:
+      interactive: true
+      agent: gate-agent
+      input: $x
+      prompt: iterate
+`,
+    });
+    const emitted = compile(yamlPath);
+    expect(emitted).toMatch(/await humanGate\({[\s\S]*?agent: "gate-agent"/);
+  });
+});
+
 describe('emit shape — step timeout', () => {
   it('threads timeout into the options bag when set', () => {
     const yamlPath = setupFixture({
@@ -336,8 +574,14 @@ flow:
   });
 
   it('emits per-cli AGENT_DIRS for copilot pipelines', () => {
+    // cli: 'copilot' makes setupFixture write the persona to the copilot
+    // project layer at its cli-aware leaf — `.github/agents/a.agent.md`
+    // (GitHub Copilot CLI's documented location + `.agent.md` leaf). That
+    // is the exact file the compile-time existence check now probes, so
+    // compile succeeds and we can assert the emitted per-cli AGENT_DIRS.
     const yamlPath = setupFixture({
       agents: ['a'],
+      cli: 'copilot',
       yaml: `
 pipeline: copilot-prologue
 cli: copilot
@@ -348,14 +592,6 @@ flow:
     produces: out.md
 `,
     });
-    // copilot pipeline references the same agent name 'a' but resolves it
-    // against `.github/agents/` by convention (GitHub Copilot CLI's
-    // documented project-level location). setupFixture wrote the persona
-    // to `.claude/agents/a.md` — that doesn't satisfy the copilot layered
-    // probe, so we need to also drop the agent file in the copilot dir
-    // for compile to succeed.
-    mkdirSync('.github/agents', { recursive: true });
-    writeFileSync('.github/agents/a.md', '---\nname: a\n---\nbody\n');
     const emitted = compile(yamlPath);
     expect(emitted).toMatch(/const CLI = "copilot";/);
     expect(emitted).toMatch(
@@ -4530,5 +4766,725 @@ flow:
     expect(emitted).toContain('} else {');
     expect(emitted).not.toContain('runThen_');
     expect(emitted).not.toContain('let ');
+  });
+});
+
+describe('emit shape — inline-agent step', () => {
+  // An inline `step:` (object form) resolves to its required `name` — used as
+  // the runAgent name — and ALWAYS bakes its prompt into the opts bag as
+  // `inlinePrompt:`. Persona-name steps emit byte-identically (no inlinePrompt).
+
+  it('uses the inline name as the runAgent name and bakes inlinePrompt', () => {
+    // No `agents:` — an inline agent references no persona file.
+    const yamlPath = setupFixture({
+      yaml: `
+pipeline: p
+cli: claude
+inputs: [x]
+flow:
+  - step:
+      prompt: Review the diff and emit a verdict.
+      name: reviewer
+    input: $x
+    produces: out.json
+`,
+    });
+    const emitted = compile(yamlPath);
+    expect(emitted).toMatch(/runAgent\("reviewer",/);
+    expect(emitted).toMatch(/inlinePrompt: "Review the diff and emit a verdict\."/);
+  });
+
+  it('uses the inline name as the runAgent name even when a bind is set', () => {
+    // The bind is the emit-internal variable name; the label is always the
+    // inline agent's required `name`.
+    const yamlPath = setupFixture({
+      yaml: `
+pipeline: p
+cli: claude
+inputs: [x]
+flow:
+  - step:
+      prompt: Do the thing.
+      name: doer
+    bind: myStep
+    input: $x
+    produces: out.json
+`,
+    });
+    const emitted = compile(yamlPath);
+    expect(emitted).toMatch(/const myStep = await runAgent\("doer",/);
+    expect(emitted).toMatch(/inlinePrompt: "Do the thing\."/);
+  });
+
+  it('uses the inline name as the runAgent name for a bindless step', () => {
+    // A bindless step gets a synthesized `_N` variable from fresh(); the
+    // label stays the inline agent's required `name`, never the variable.
+    const yamlPath = setupFixture({
+      agents: ['persona-pre'],
+      yaml: `
+pipeline: p
+cli: claude
+inputs: [x]
+flow:
+  - step: persona-pre
+    input: $x
+    produces: pre.md
+  - step:
+      prompt: Do the thing.
+      name: doer
+    input: $x
+    produces: out.json
+`,
+    });
+    const emitted = compile(yamlPath);
+    expect(emitted).toMatch(/runAgent\("doer",/);
+    expect(emitted).toMatch(/inlinePrompt: "Do the thing\."/);
+  });
+
+  it('uses the inline name as the runAgent name inside a parallel block', () => {
+    // A bindless parallel child gets a synthesized `_N` destructuring name
+    // from resultNameFor; that emit-internal variable must never leak into
+    // the runAgent name — the label is exactly the inline agent's `name`.
+    const yamlPath = setupFixture({
+      agents: ['persona-a'],
+      yaml: `
+pipeline: p
+cli: claude
+inputs: [x]
+flow:
+  - parallel:
+      - step: persona-a
+        input: $x
+        produces: a.md
+      - step:
+          prompt: Scan for issues.
+          name: par-scanner
+        input: $x
+        produces: scan.json
+`,
+    });
+    const emitted = compile(yamlPath);
+    expect(emitted).toMatch(/runAgent\("par-scanner",/);
+    expect(emitted).not.toMatch(/runAgent\("_\d+",/);
+    expect(emitted).toMatch(/inlinePrompt: "Scan for issues\."/);
+  });
+
+  it('emits a persona-name step byte-identically — no inlinePrompt clause', () => {
+    // Parity guard: a persona step carries no inlinePrompt; its emit is the
+    // same shape as before the AgentRef retype.
+    const yamlPath = setupFixture({
+      agents: ['ac-writer'],
+      yaml: `
+pipeline: p
+cli: claude
+inputs: [x]
+flow:
+  - step: ac-writer
+    input: $x
+    produces: out.md
+`,
+    });
+    const emitted = compile(yamlPath);
+    expect(emitted).toMatch(/runAgent\("ac-writer",/);
+    expect(emitted).not.toMatch(/inlinePrompt:/);
+  });
+
+  it('compiles an inline step with no persona file on disk (existence check is skipped)', () => {
+    // validateAgentFilesExist only checks string (persona) steps; an inline
+    // agent has no file to find. No `agents:` are created, so a persona step
+    // named 'standalone' would fail compile — the inline form must not.
+    const yamlPath = setupFixture({
+      yaml: `
+pipeline: p
+cli: claude
+inputs: [x]
+flow:
+  - step:
+      prompt: Do the thing.
+      name: standalone
+    input: $x
+    produces: out.json
+`,
+    });
+    expect(() => compile(yamlPath)).not.toThrow();
+    const emitted = compile(yamlPath);
+    expect(emitted).toMatch(/runAgent\("standalone",/);
+  });
+
+  it('re-bakes the inline prompt in the aggregate parse-retry rewrite closure', () => {
+    // When an inline producer feeds an aggregate, the per-input rewrite
+    // closure must re-fire the producer via its inline spawn form (the baked
+    // prompt is the agent's identity) instead of degrading to a persona
+    // `--agent <label>` lookup with no file. The closure carries the resolved
+    // label as the runAgent name AND the baked inlinePrompt.
+    const yamlPath = setupFixture({
+      yaml: `
+pipeline: p
+cli: claude
+inputs: [x]
+flow:
+  - step:
+      prompt: Produce the artifact.
+      name: producer
+    input: $x
+    produces: out.json
+    bind: r
+  - aggregate:
+      inputs: { r: $r }
+      verdict_field: status
+`,
+    });
+    const emitted = compile(yamlPath);
+    // The closure re-fires the producer by its resolved label, threading
+    // correctivePrompt as the input and the producer's producesPath.
+    expect(emitted).toMatch(
+      /rewriteProducerFiles:[\s\S]+runAgent\("producer", correctivePrompt, "out\.json"/,
+    );
+    // The same closure bakes the inline prompt so the retry spawn is inline.
+    expect(emitted).toMatch(/rewriteProducerFiles:[\s\S]+inlinePrompt: "Produce the artifact\."/);
+  });
+
+  it('re-bakes the inline prompt in the rewrite closure for a pre-cursor producer (--resume-from)', () => {
+    // Under --resume-from the inline producer is rewritten to a path-literal
+    // bind-assignment, so the aggregate's rewrite closure is fed by
+    // emitPreCursorItem's declare (agentName + inlinePrompt), not the main
+    // pass's. The closure must still carry the inline label as the runAgent
+    // name AND the baked prompt — dropping either would degrade the
+    // parse-retry re-fire to a persona `--agent <label>` lookup with no file.
+    const yamlPath = setupFixture({
+      agents: ['mid-agent'],
+      yaml: `
+pipeline: p
+cli: claude
+inputs: [x]
+flow:
+  - step:
+      prompt: Produce the artifact.
+      name: producer
+    input: $x
+    produces: out.json
+    bind: r
+  - step: mid-agent
+    input: $x
+    produces: mid.json
+    bind: mid
+  - aggregate:
+      inputs: { r: $r, mid: $mid }
+      verdict_field: status
+`,
+    });
+    const emitted = compile(yamlPath, { resumeFrom: 'mid' });
+    // The pre-cursor producer is rewritten — a path-literal bind, no spawn...
+    expect(emitted).toMatch(/const r = "out\.json";/);
+    // ...yet its rewrite closure still re-fires by the inline label with the
+    // baked prompt, mirroring the main-pass closure shape above.
+    expect(emitted).toMatch(
+      /rewriteProducerFiles:[\s\S]+runAgent\("producer", correctivePrompt, "out\.json"/,
+    );
+    expect(emitted).toMatch(/rewriteProducerFiles:[\s\S]+inlinePrompt: "Produce the artifact\."/);
+  });
+
+  it('re-bakes the inline prompt when an on_fail retry re-emits the retry_from target', () => {
+    // The retry_from target is an inline producer; the step-gate retry
+    // callback re-emits it through emitRunAgentExpr, so the inline prompt is
+    // re-baked automatically rather than degrading to a persona lookup.
+    const yamlPath = setupFixture({
+      agents: ['reviewer'],
+      yaml: `
+pipeline: p
+cli: claude
+inputs: [x]
+flow:
+  - step:
+      prompt: Write the tests.
+      name: tdd
+    input: $x
+    produces: tests.json
+    bind: tests
+  - step: reviewer
+    input: $tests
+    produces: review.json
+    bind: review
+    on_fail:
+      verdict_field: status
+      retry_from: tests
+      revise_with:
+        prompt: Address the feedback.
+`,
+    });
+    const emitted = compile(yamlPath);
+    // Inside the retry callback, the retry_from target re-fires by its inline
+    // label and carries the baked prompt.
+    expect(emitted).toMatch(
+      /retry: async \(currentVerdict\) => \{[\s\S]+runAgent\("tdd",[\s\S]*?inlinePrompt: "Write the tests\."/,
+    );
+  });
+
+  it('re-fires inline parallel children with name + inlinePrompt inside an aggregate-gate retry callback', () => {
+    // Aggregate-gate carve-out: the retry callback re-fires the feeding
+    // parallel's children via emitParallelRetry. Inline children must re-fire
+    // by their inline name with the prompt re-baked — a bare-label re-fire
+    // would degrade the retry to a persona `--agent <name>` lookup with no
+    // file, and the runtime roster audit would kill the pipeline mid-recovery.
+    const yamlPath = setupFixture({
+      agents: ['writer'],
+      yaml: `
+pipeline: p
+cli: claude
+inputs: [x]
+flow:
+  - step: writer
+    input: $x
+    produces: out.md
+    bind: writerOut
+  - parallel:
+      - step:
+          prompt: Scan for security issues.
+          name: sec-scanner
+        input: $writerOut
+        produces: sec.json
+        bind: sec
+      - step:
+          prompt: Scan for api drift.
+          name: api-scanner
+        input: $writerOut
+        produces: api.json
+        bind: api
+  - aggregate:
+      inputs: { security: $sec, api: $api }
+      verdict_field: status
+      bind: overall
+      retry_from: writerOut
+      revise_with:
+        prompt: Retry.
+`,
+    });
+    const emitted = compile(yamlPath);
+    // Slice the retry callback (same anchors as the carve-out test in
+    // retry-gate.test.ts) so the assertions pin the RE-FIRE emit, not the
+    // main-pass parallel emit, which carries the same call shape.
+    const startIdx = emitted.indexOf('retry: async (currentVerdict) => {');
+    expect(startIdx).toBeGreaterThan(-1);
+    const endMarker = 'return overall;';
+    const endIdx = emitted.indexOf(endMarker, startIdx);
+    expect(endIdx).toBeGreaterThan(-1);
+    const retryBody = emitted.slice(startIdx, endIdx + endMarker.length);
+    // Line-bound matches ([^\n]*, not [\s\S]*?): the gate re-exec inside the
+    // same callback re-emits rewriteProducerFiles closures that ALSO carry
+    // these inlinePrompt strings, so a multi-line lazy match would pass even
+    // with the re-fire lines stripped of their prompts.
+    expect(retryBody).toMatch(
+      /sec = await runAgent\("sec-scanner",[^\n]*inlinePrompt: "Scan for security issues\."/,
+    );
+    expect(retryBody).toMatch(
+      /api = await runAgent\("api-scanner",[^\n]*inlinePrompt: "Scan for api drift\."/,
+    );
+  });
+
+  it('re-bakes the inline prompt in the rewrite closure for a pre-cursor parallel-hoisted producer (--resume-from)', () => {
+    // Variant of the pre-cursor test above where the inline producer is a
+    // PARALLEL CHILD: under --resume-from the aggregate's rewrite closure is
+    // fed by emitPreCursorItem's hoist-mirror declare (a separate declare
+    // site from the top-level-step one), which must carry the inline child's
+    // agentName + inlinePrompt for the parse-retry re-fire to stay inline.
+    const yamlPath = setupFixture({
+      agents: ['sibling', 'mid-agent'],
+      yaml: `
+pipeline: p
+cli: claude
+inputs: [x]
+flow:
+  - parallel:
+      - step:
+          prompt: Produce the artifact.
+          name: producer
+        input: $x
+        produces: x.json
+        bind: r
+      - step: sibling
+        input: $x
+        produces: sib.md
+        bind: sibOut
+  - step: mid-agent
+    input: $x
+    produces: mid.json
+    bind: mid
+  - aggregate:
+      inputs: { r: $r, mid: $mid }
+      verdict_field: status
+`,
+    });
+    const emitted = compile(yamlPath, { resumeFrom: 'mid' });
+    // The pre-cursor parallel is rewritten to hoist-mirror path literals —
+    // no spawn for the inline child outside the rewrite closure.
+    expect(emitted).toMatch(/const r = "x\.json";/);
+    expect(emitted).not.toMatch(/await parallel\(/);
+    // ...yet the closure still re-fires by the inline label with the baked
+    // prompt, mirroring the main-pass closure shape.
+    expect(emitted).toMatch(
+      /rewriteProducerFiles:[\s\S]+runAgent\("producer", correctivePrompt, "x\.json"/,
+    );
+    expect(emitted).toMatch(/rewriteProducerFiles:[\s\S]+inlinePrompt: "Produce the artifact\."/);
+  });
+
+  it('re-fires an inline on_fail gate by name + inlinePrompt in the gate re-exec line', () => {
+    // The gate ITSELF is the inline step. The retry callback's final line
+    // re-invokes the gate (`return await runAgent(...)`) — that re-exec must
+    // carry the inline name + re-baked prompt. The gate's label must also
+    // resolve through agentLabel everywhere it interpolates (gateAgent:, the
+    // revise scaffold's "gate '<label>' rejected" line) — an unresolved
+    // AgentRef object would stringify as "[object Object]".
+    const yamlPath = setupFixture({
+      agents: ['fbmaker', 'tdd'],
+      yaml: `
+pipeline: p
+cli: claude
+inputs: [x]
+flow:
+  - step: fbmaker
+    input: $x
+    produces: fb.md
+    bind: fb
+  - step: tdd
+    input: $x
+    produces: tests.json
+    bind: tests
+  - step:
+      prompt: Review the tests and emit a verdict.
+      name: gatekeeper
+    input: $tests
+    produces: review.json
+    bind: review
+    on_fail:
+      verdict_field: status
+      retry_from: tests
+      revise_with:
+        inputs: [$fb]
+`,
+    });
+    const emitted = compile(yamlPath);
+    // Slice from the retry callback so the assertion pins the gate RE-EXEC
+    // (the `return await runAgent(...)` line), not the main-pass gate emit.
+    const retryIdx = emitted.indexOf('retry: async (currentVerdict)');
+    expect(retryIdx).toBeGreaterThan(-1);
+    const retryPass = emitted.slice(retryIdx);
+    expect(retryPass).toMatch(
+      /return await runAgent\("gatekeeper",[^\n]*inlinePrompt: "Review the tests and emit a verdict\."/,
+    );
+    // The retryGateZone opts carry the resolved inline name as the gate label.
+    expect(emitted).toContain('gateAgent: "gatekeeper"');
+    // No interpolation site (gateAgent:, revise scaffold, error labels) may
+    // stringify the raw inline AgentRef object.
+    expect(emitted).not.toContain('[object Object]');
+  });
+
+  it('re-fires an inline intermediate zone member with name + inlinePrompt in the retry callback', () => {
+    // The inline step sits BETWEEN the retry_from target and the gate — the
+    // intermediate-member branch of buildRetryBody (not the target's
+    // prompt-override branch, not the gate re-exec) re-emits it, and must
+    // re-bake the inline prompt like every other re-emit path.
+    const yamlPath = setupFixture({
+      agents: ['first', 'gate'],
+      yaml: `
+pipeline: p
+cli: claude
+inputs: [x]
+flow:
+  - step: first
+    input: $x
+    produces: a.md
+    bind: firstOut
+  - step:
+      prompt: Transform the draft.
+      name: mid-inline
+    input: $firstOut
+    produces: b.md
+    bind: midOut
+  - step: gate
+    input: $midOut
+    produces: g.json
+    bind: gateOut
+    on_fail:
+      verdict_field: status
+      retry_from: firstOut
+      revise_with:
+        prompt: Address the feedback.
+`,
+    });
+    const emitted = compile(yamlPath);
+    // Slice from the retry callback so the assertion pins the intermediate
+    // member's RE-FIRE, not its main-pass emit (same call shape).
+    const retryIdx = emitted.indexOf('retry: async (currentVerdict)');
+    expect(retryIdx).toBeGreaterThan(-1);
+    const retryPass = emitted.slice(retryIdx);
+    expect(retryPass).toMatch(
+      /midOut = await runAgent\("mid-inline",[^\n]*inlinePrompt: "Transform the draft\."/,
+    );
+  });
+
+  it('re-bakes the inline prompt in the rewrite closure for a parallel-hoisted producer (main pass)', () => {
+    // Variant of the main-pass rewrite test above where the inline producer
+    // is a PARALLEL CHILD: the aggregate's rewrite closure is fed by the
+    // hoisted copy of the child's ProducerInfo (the parallel emit pulls it
+    // back out of the child scope), which must preserve agentName +
+    // inlinePrompt across the hoist. The hoist's placeholder fallback can't
+    // fire for step children — resultNameFor pre-assigns their bind, so the
+    // child scope always holds the real info under the destructured name.
+    const yamlPath = setupFixture({
+      agents: ['sibling'],
+      yaml: `
+pipeline: p
+cli: claude
+inputs: [x]
+flow:
+  - parallel:
+      - step:
+          prompt: Produce the artifact.
+          name: producer
+        input: $x
+        produces: x.json
+        bind: r
+      - step: sibling
+        input: $x
+        produces: sib.md
+        bind: sibOut
+  - aggregate:
+      inputs: { r: $r }
+      verdict_field: status
+`,
+    });
+    const emitted = compile(yamlPath);
+    expect(emitted).toMatch(
+      /rewriteProducerFiles:[\s\S]+runAgent\("producer", correctivePrompt, "x\.json"/,
+    );
+    expect(emitted).toMatch(/rewriteProducerFiles:[\s\S]+inlinePrompt: "Produce the artifact\."/);
+  });
+});
+
+describe('emit shape — inline-agent review_loop writer/reviewer', () => {
+  // An inline `writer:` or single `reviewer:` (object form) resolves to its
+  // required `name` — used as the reviewLoop `writer:` / `reviewer:` string —
+  // plus a baked `writerInlinePrompt:` / `reviewerInlinePrompt:`. Persona
+  // writer+reviewer emit byte-identically (no inline-prompt fields).
+
+  it('bakes an inline named writer as writer label + writerInlinePrompt (persona reviewer)', () => {
+    const yamlPath = setupFixture({
+      agents: ['r'],
+      yaml: `
+pipeline: p
+cli: claude
+inputs: [x]
+flow:
+  - review_loop:
+      writer:
+        prompt: Draft the spec.
+        name: drafter
+      reviewer: r
+      input: $x
+      writer_produces: out.md
+      reviewer_produces: review.json
+      verdict_field: status
+`,
+    });
+    const emitted = compile(yamlPath);
+    expect(emitted).toMatch(/writer: "drafter",/);
+    expect(emitted).toMatch(/writerInlinePrompt: "Draft the spec\.",/);
+    // The persona reviewer carries no inline prompt.
+    expect(emitted).toMatch(/reviewer: "r",/);
+    expect(emitted).not.toMatch(/reviewerInlinePrompt:/);
+  });
+
+  it('uses the inline writer name as the writer label even when the loop has a bind', () => {
+    // The loop bind is the emit-internal variable; the writer label is always
+    // the inline agent's required `name`.
+    const yamlPath = setupFixture({
+      agents: ['r'],
+      yaml: `
+pipeline: p
+cli: claude
+inputs: [x]
+flow:
+  - review_loop:
+      writer:
+        prompt: Draft the spec.
+        name: drafter
+      reviewer: r
+      input: $x
+      bind: spec
+      writer_produces: out.md
+      reviewer_produces: review.json
+      verdict_field: status
+`,
+    });
+    const emitted = compile(yamlPath);
+    expect(emitted).toMatch(/writer: "drafter",/);
+    expect(emitted).toMatch(/writerInlinePrompt: "Draft the spec\.",/);
+  });
+
+  it('bakes an inline named single reviewer as reviewer label + reviewerInlinePrompt (persona writer)', () => {
+    const yamlPath = setupFixture({
+      agents: ['w'],
+      yaml: `
+pipeline: p
+cli: claude
+inputs: [x]
+flow:
+  - review_loop:
+      writer: w
+      reviewer:
+        prompt: Audit the draft.
+        name: auditor
+      input: $x
+      writer_produces: out.md
+      reviewer_produces: review.json
+      verdict_field: status
+`,
+    });
+    const emitted = compile(yamlPath);
+    expect(emitted).toMatch(/reviewer: "auditor",/);
+    expect(emitted).toMatch(/reviewerInlinePrompt: "Audit the draft\.",/);
+    // The persona writer carries no inline prompt.
+    expect(emitted).toMatch(/writer: "w",/);
+    expect(emitted).not.toMatch(/writerInlinePrompt:/);
+  });
+
+  it('bakes both inline writer and inline reviewer prompts (no persona files needed)', () => {
+    // Neither role references a persona file — validateAgentFilesExist skips
+    // inline agents on both the writer and single-reviewer positions, so a
+    // fixture with no `agents:` still compiles.
+    const yamlPath = setupFixture({
+      yaml: `
+pipeline: p
+cli: claude
+inputs: [x]
+flow:
+  - review_loop:
+      writer:
+        prompt: Draft the spec.
+        name: drafter
+      reviewer:
+        prompt: Audit the draft.
+        name: auditor
+      input: $x
+      writer_produces: out.md
+      reviewer_produces: review.json
+      verdict_field: status
+`,
+    });
+    expect(() => compile(yamlPath)).not.toThrow();
+    const emitted = compile(yamlPath);
+    expect(emitted).toMatch(/writer: "drafter",/);
+    expect(emitted).toMatch(/writerInlinePrompt: "Draft the spec\.",/);
+    expect(emitted).toMatch(/reviewer: "auditor",/);
+    expect(emitted).toMatch(/reviewerInlinePrompt: "Audit the draft\.",/);
+  });
+
+  it('emits a persona writer + persona reviewer byte-identically — no inline-prompt fields', () => {
+    // Parity guard: the inline-prompt fields are gated on inline-ness, so an
+    // all-persona single-reviewer loop emits the same shape as before the
+    // AgentRef retype.
+    const yamlPath = setupFixture({
+      agents: ['w', 'r'],
+      yaml: `
+pipeline: p
+cli: claude
+inputs: [x]
+flow:
+  - review_loop:
+      writer: w
+      reviewer: r
+      input: $x
+      writer_produces: out.md
+      reviewer_produces: review.json
+      verdict_field: status
+`,
+    });
+    const emitted = compile(yamlPath);
+    expect(emitted).toMatch(/writer: "w",/);
+    expect(emitted).toMatch(/reviewer: "r",/);
+    expect(emitted).not.toMatch(/writerInlinePrompt:/);
+    expect(emitted).not.toMatch(/reviewerInlinePrompt:/);
+  });
+
+  it('bakes an inline writer prompt on the compound (subflow) reviewer path', () => {
+    // The compound path emits the writer label + writerInlinePrompt the same
+    // way the single path does; the subflow is unchanged and carries no single
+    // reviewerInlinePrompt.
+    const yamlPath = setupFixture({
+      agents: ['sec', 'api'],
+      yaml: `
+pipeline: p
+cli: claude
+inputs: [x]
+flow:
+  - review_loop:
+      writer:
+        prompt: Draft the spec.
+        name: drafter
+      input: $x
+      writer_produces: out.md
+      bind: spec
+      reviewer:
+        - step: sec
+          input: $spec
+          produces: sec.json
+          bind: secOut
+        - step: api
+          input: $spec
+          produces: api.json
+          bind: apiOut
+        - aggregate:
+            inputs:
+              security: $secOut
+              api: $apiOut
+            verdict_field: status
+            bind: overall
+`,
+    });
+    const emitted = compile(yamlPath);
+    expect(emitted).toContain("kind: 'compound'");
+    expect(emitted).toMatch(/writer: "drafter",/);
+    expect(emitted).toMatch(/writerInlinePrompt: "Draft the spec\.",/);
+    expect(emitted).not.toMatch(/reviewerInlinePrompt:/);
+  });
+
+  it('resolves an inline reviewer step to its label in the compound reviewerPaths slot', () => {
+    // The compound path hands the writer a `reviewerPaths` array on revise; each
+    // entry's `agentName` is resolved through agentLabel, so an inline reviewer
+    // step inside the subflow contributes its resolved label (here its `name`),
+    // not the raw inline object. With an inline writer too, the whole loop needs
+    // no persona files.
+    const yamlPath = setupFixture({
+      yaml: `
+pipeline: p
+cli: claude
+inputs: [x]
+flow:
+  - review_loop:
+      writer:
+        prompt: Draft the spec.
+        name: drafter
+      input: $x
+      writer_produces: out.md
+      bind: spec
+      reviewer:
+        - step:
+            prompt: Audit the draft for security issues.
+            name: secReviewer
+          input: $spec
+          produces: sec.json
+          bind: secOut
+        - aggregate:
+            inputs:
+              security: $secOut
+            verdict_field: status
+            bind: overall
+`,
+    });
+    const emitted = compile(yamlPath);
+    expect(emitted).toContain("kind: 'compound'");
+    // The reviewerPaths entry carries the inline reviewer step's resolved label,
+    // not the inline object — exercises collectReviewerPaths' agentLabel call.
+    expect(emitted).toMatch(/reviewerPaths: \[\{ agentName: "secReviewer", path: secOut \}\]/);
   });
 });

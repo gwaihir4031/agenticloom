@@ -7,10 +7,27 @@ import {
   isBranch,
   isAggregate,
   isForeach,
+  agentLabel,
+  inlinePromptOf,
 } from '../types.js';
 import { ensureTerminalBindForArm, val, resultNameFor, getBindName } from './flow-helpers.js';
-import { validateReviewerSubflow, validatePath, firstExisting } from './validation.js';
-import { ProducerInfo, declare, registerPath, mergeChildIntoParent } from './scope.js';
+import {
+  validateReviewerSubflow,
+  validatePath,
+  validatePersonaFile,
+  readReviewerArm,
+} from './validation.js';
+// Type-only: `AgentCli` is a string union, erased at emit; keeps emit-walker's
+// module graph free of runtime/agent.ts's heavy deps (same posture as
+// validation.ts, whose helpers this file already shares).
+import type { AgentCli } from '../runtime/agent.js';
+import {
+  ProducerInfo,
+  declare,
+  registerPath,
+  mergeChildIntoParent,
+  stepProducerInfo,
+} from './scope.js';
 import { inputExprFor, checkConsume, collectReviewerPaths, substituteBindRefs } from './inputs.js';
 import {
   readStepRetryGate,
@@ -105,35 +122,23 @@ export function emitPreCursorItem(
 ): string[] {
   if (isStep(item)) {
     if (item.bind === undefined) return [];
-    declare(
-      item.bind,
-      {
-        kind: 'step',
-        fileBound: item.produces !== undefined,
-        location: `step '${item.step}'`,
-        fileField: 'produces',
-        agentName: item.step,
-        producesPath: item.produces,
-        extraArgs: item.extra_args,
-        timeout: item.timeout,
-      },
-      scope,
-      currentScopeId,
-    );
+    const resolvedLabel = agentLabel(item.step);
+    declare(item.bind, stepProducerInfo(item, `step '${resolvedLabel}'`), scope, currentScopeId);
     const rhs = item.produces ? JSON.stringify(item.produces) : 'undefined';
     return [`${pad}const ${item.bind} = ${rhs};`];
   }
   if (isReviewLoop(item)) {
     const r = item.review_loop;
     if (r.bind === undefined) return [];
+    const resolvedWriter = agentLabel(r.writer);
     declare(
       r.bind,
       {
         kind: 'review_loop',
         fileBound: true,
-        location: `review_loop writer='${r.writer}'`,
+        location: `review_loop writer='${resolvedWriter}'`,
         fileField: 'writer_produces',
-        agentName: r.writer,
+        agentName: resolvedWriter,
       },
       scope,
       currentScopeId,
@@ -174,17 +179,11 @@ export function emitPreCursorItem(
     for (const child of item.parallel) {
       if (isStep(child)) {
         if (child.bind === undefined) continue;
+        const childLabel = agentLabel(child.step);
         declare(
           child.bind,
           {
-            kind: 'step',
-            fileBound: child.produces !== undefined,
-            location: `step '${child.step}' (hoisted from parallel)`,
-            fileField: 'produces',
-            agentName: child.step,
-            producesPath: child.produces,
-            extraArgs: child.extra_args,
-            timeout: child.timeout,
+            ...stepProducerInfo(child, `step '${childLabel}' (hoisted from parallel)`),
             hoistedFromParallel: true,
           },
           scope,
@@ -195,14 +194,15 @@ export function emitPreCursorItem(
       } else if (isReviewLoop(child)) {
         const r = child.review_loop;
         if (r.bind === undefined) continue;
+        const resolvedWriter = agentLabel(r.writer);
         declare(
           r.bind,
           {
             kind: 'review_loop',
             fileBound: true,
-            location: `review_loop writer='${r.writer}' (hoisted from parallel)`,
+            location: `review_loop writer='${resolvedWriter}' (hoisted from parallel)`,
             fileField: 'writer_produces',
-            agentName: r.writer,
+            agentName: resolvedWriter,
             hoistedFromParallel: true,
           },
           scope,
@@ -368,12 +368,21 @@ export function emitPreCursorItem(
   return [];
 }
 
+/** Per-compile constants threaded through the emit recursion as one value.
+ *  Everything here is invariant across the whole walk — recursion never
+ *  varies it — so new pipeline-level constants join this object instead of
+ *  growing every recursive call site by another positional param. */
+export interface EmitCtx {
+  readonly agentDirs: readonly string[];
+  readonly cli: AgentCli;
+}
+
 export function emit(
   items: FlowItem[],
   pad: string,
   scope: Map<string, ProducerInfo>,
   fresh: () => string,
-  agentDirs: string[],
+  ctx: EmitCtx,
   nextScopeId: () => number,
   currentScopeId: number,
   pathScope?: Map<string, string>,
@@ -500,7 +509,13 @@ export function emit(
     }
     if (isStep(item)) {
       const v = item.bind ?? fresh();
-      const stepLabel = `step '${item.step}'`;
+      // Resolve the step's agent reference to a label once: a persona name is
+      // itself; an inline agent is its required `name`. Synthesized `_N` binds
+      // (resultNameFor) are emit-internal variable names and never become
+      // labels. Drives the runAgent name, the ProducerInfo label, and every
+      // diagnostic in this branch.
+      const resolvedLabel = agentLabel(item.step);
+      const stepLabel = `step '${resolvedLabel}'`;
       // Run consume-side checks for their side effects (declarations errors,
       // file-bound validation). String-building of the runAgent call itself
       // is delegated to `emitRunAgentExpr` (in emit-call.ts) so the on_fail
@@ -516,21 +531,7 @@ export function emit(
         validatePath(item.produces, 'produces', stepLabel);
         registerPath(item.produces, 'produces', stepLabel, pathScope);
       }
-      declare(
-        v,
-        {
-          kind: 'step',
-          fileBound: item.produces !== undefined,
-          location: stepLabel,
-          fileField: 'produces',
-          agentName: item.step,
-          producesPath: item.produces,
-          extraArgs: item.extra_args,
-          timeout: item.timeout,
-        },
-        scope,
-        currentScopeId,
-      );
+      declare(v, stepProducerInfo(item, stepLabel), scope, currentScopeId);
 
       // retry_from: compile-time scope resolution. Resolved AFTER declaring
       // the gate's own bind so self-reference is detectable, and BEFORE
@@ -616,7 +617,13 @@ export function emit(
     } else if (isReviewLoop(item)) {
       const r = item.review_loop;
       const v = r.bind ?? fresh();
-      const label = `review_loop writer='${r.writer}'`;
+      // Resolve the writer's agent reference to a label once: a persona name is
+      // itself; an inline agent is its required `name`. When the writer is
+      // inline, its baked prompt threads to the runtime as `writerInlinePrompt`;
+      // persona writers leave it undefined and take runAgent's `--agent` path.
+      const writerLabel = agentLabel(r.writer);
+      const writerInlinePrompt = inlinePromptOf(r.writer);
+      const label = `review_loop writer='${writerLabel}'`;
       checkConsume(r.input, `${label}.input`, scope);
       validatePath(r.writer_produces, 'writer_produces', label);
       registerPath(r.writer_produces, 'writer_produces', label, pathScope);
@@ -631,15 +638,52 @@ export function emit(
         fileBound: true,
         location: label,
         fileField: 'writer_produces',
-        agentName: r.writer,
+        agentName: writerLabel,
       };
 
-      if (typeof r.reviewer === 'string') {
-        // Schema refines guarantee reviewer_produces + verdict_field are set
-        // when reviewer is a string. Read once with `!` so the rest of this
-        // branch stays narrowed.
-        const reviewerProduces = r.reviewer_produces!;
-        const verdictField = r.verdict_field!;
+      // Read the reviewer union as a discriminated arm once; the single arm
+      // carries reviewer_produces/verdict_field as plain strings (the schema
+      // refines' cross-field guarantees, enforced structurally — see
+      // readReviewerArm). Everything below branches on the arm's kind.
+      const reviewerArm = readReviewerArm(r, label);
+
+      // Both reviewer forms emit the same reviewLoop({ ... }) scaffold —
+      // `kind:` is the only header line that differs, and only the reviewer
+      // wiring in the middle is branch-specific. writer: carries the resolved
+      // LABEL string; writerInlinePrompt: is emitted only for an inline
+      // writer (the runtime's inline-prompt field). For a persona writer the
+      // label is the bare name and the inline field is absent, so this is
+      // byte-identical to the pre-inline emit.
+      const lines = [
+        `${pad}const ${v} = await reviewLoop({`,
+        `${pad}  kind: '${reviewerArm.kind === 'subflow' ? 'compound' : 'single'}',`,
+        `${pad}  cli: CLI,`,
+        `${pad}  agentDirs: AGENT_DIRS,`,
+        `${pad}  defaultExtraArgs: DEFAULT_EXTRA_ARGS,`,
+        `${pad}  writer: ${JSON.stringify(writerLabel)},`,
+      ];
+      if (writerInlinePrompt !== undefined)
+        lines.push(`${pad}  writerInlinePrompt: ${JSON.stringify(writerInlinePrompt)},`);
+
+      // Single-only verdict-extraction fields (`reviewerProduces:` +
+      // `verdictField:`). They sit between the shared writerProduces and
+      // approveWhen lines below, so the single arm stashes them here rather
+      // than pushing onto `lines` inside the split. The compound form emits
+      // neither — the aggregate inside the subflow already extracts the
+      // verdict; the loop only consumes the aggregate's pre-extracted string.
+      // The compound runtime interface (CompoundReviewerOpts) does not
+      // declare verdictField, and schema-side `verdict_field:` is forbidden
+      // on the YAML for the compound form (a refine in types.ts catches it).
+      const verdictExtractionLines: string[] = [];
+
+      // An inline-object reviewer routes through the single arm (see
+      // readReviewerArm), where its verdict comes from the arm's
+      // reviewerProduces/verdictField exactly as a persona's does.
+      if (reviewerArm.kind === 'single') {
+        const { reviewerProduces, verdictField } = reviewerArm;
+        // Resolve the reviewer's agent reference the same way as the writer.
+        const reviewerLabel = agentLabel(reviewerArm.reviewer);
+        const reviewerInlinePrompt = inlinePromptOf(reviewerArm.reviewer);
         validatePath(reviewerProduces, 'reviewer_produces', label);
         // Intra-block self-collision: each role has its own file. Same path
         // across roles means one overwrites the other between iterations or
@@ -654,27 +698,17 @@ export function emit(
         registerPath(reviewerProduces, 'reviewer_produces', label, pathScope);
 
         declare(v, loopProducerInfo, scope, currentScopeId);
-        const lines = [
-          `${pad}const ${v} = await reviewLoop({`,
-          `${pad}  kind: 'single',`,
-          `${pad}  cli: CLI,`,
-          `${pad}  agentDirs: AGENT_DIRS,`,
-          `${pad}  defaultExtraArgs: DEFAULT_EXTRA_ARGS,`,
-          `${pad}  writer: ${JSON.stringify(r.writer)},`,
-          `${pad}  reviewer: ${JSON.stringify(r.reviewer)},`,
-          `${pad}  input: ${inputExprFor(r.input, scope)},`,
-          `${pad}  maxIters: ${r.max_iters ?? 3},`,
-          `${pad}  writerProduces: ${JSON.stringify(r.writer_produces)},`,
+        // reviewer: mirrors writer: — the resolved label, with the inline
+        // prompt emitted only for an inline reviewer.
+        lines.push(`${pad}  reviewer: ${JSON.stringify(reviewerLabel)},`);
+        if (reviewerInlinePrompt !== undefined)
+          lines.push(`${pad}  reviewerInlinePrompt: ${JSON.stringify(reviewerInlinePrompt)},`);
+        verdictExtractionLines.push(
           `${pad}  reviewerProduces: ${JSON.stringify(reviewerProduces)},`,
           `${pad}  verdictField: ${JSON.stringify(verdictField)},`,
-        ];
-        if (r.approve_when) lines.push(`${pad}  approveWhen: ${JSON.stringify(r.approve_when)},`);
-        if (r.on_max_exceeded)
-          lines.push(`${pad}  onMaxExceeded: ${JSON.stringify(r.on_max_exceeded)},`);
-        lines.push(`${pad}});`);
-        out.push(...lines);
+        );
       } else {
-        const subflow = r.reviewer;
+        const subflow = reviewerArm.subflow;
         validateReviewerSubflow(subflow, label);
 
         // Snapshot the OUTER scope BEFORE declaring the loop's bind in either
@@ -707,7 +741,7 @@ export function emit(
           pad + '    ',
           subScope,
           fresh,
-          agentDirs,
+          ctx,
           nextScopeId,
           subflowScopeId,
           subPathScope,
@@ -754,58 +788,52 @@ export function emit(
           )
           .join(', ');
 
-        const lines = [
-          `${pad}const ${v} = await reviewLoop({`,
-          `${pad}  kind: 'compound',`,
-          `${pad}  cli: CLI,`,
-          `${pad}  agentDirs: AGENT_DIRS,`,
-          `${pad}  defaultExtraArgs: DEFAULT_EXTRA_ARGS,`,
-          `${pad}  writer: ${JSON.stringify(r.writer)},`,
+        // The compound reviewer is a subflow whose inner steps carry their
+        // own inline handling, so there is no single reviewerInlinePrompt
+        // here — only the closure wiring is compound-specific.
+        lines.push(
           `${pad}  reviewerSubflow: async (${r.bind ?? v}) => {`,
           ...subBody,
           `${pad}    return { verdict: ${aggBind}, reviewerPaths: [${pathEntries}] };`,
           `${pad}  },`,
-          `${pad}  input: ${inputExprFor(r.input, scope)},`,
-          `${pad}  maxIters: ${r.max_iters ?? 3},`,
-          `${pad}  writerProduces: ${JSON.stringify(r.writer_produces)},`,
-        ];
-        // No `verdictField:` on the compound branch — the aggregate inside
-        // the subflow already extracts the verdict; the loop only consumes
-        // the aggregate's pre-extracted string. The compound runtime
-        // interface (CompoundReviewerOpts) does not declare verdictField.
-        // Schema-side `verdict_field:` is forbidden on the YAML for the
-        // compound form (a refine in types.ts catches it).
-        if (r.approve_when) lines.push(`${pad}  approveWhen: ${JSON.stringify(r.approve_when)},`);
-        if (r.on_max_exceeded)
-          lines.push(`${pad}  onMaxExceeded: ${JSON.stringify(r.on_max_exceeded)},`);
-        lines.push(`${pad}});`);
-        out.push(...lines);
+        );
       }
+
+      lines.push(
+        `${pad}  input: ${inputExprFor(r.input, scope)},`,
+        `${pad}  maxIters: ${r.max_iters ?? 3},`,
+        `${pad}  writerProduces: ${JSON.stringify(r.writer_produces)},`,
+        ...verdictExtractionLines,
+      );
+      if (r.approve_when) lines.push(`${pad}  approveWhen: ${JSON.stringify(r.approve_when)},`);
+      if (r.on_max_exceeded)
+        lines.push(`${pad}  onMaxExceeded: ${JSON.stringify(r.on_max_exceeded)},`);
+      lines.push(`${pad}});`);
+      out.push(...lines);
     } else if (isHumanGate(item)) {
       const h = item.human_gate;
       if (h.interactive === true) {
-        // Schema refine guarantees agent/input/prompt are defined together
-        // with `interactive: true`. Pin the narrowing once so the rest of
-        // this branch sees the non-undefined values without `!` repeated.
-        const agent = h.agent!;
+        // Schema refine guarantees input/prompt are defined together with
+        // `interactive: true`. `agent` is optional: present for a persona
+        // gate (delegated to the cli via `--agent`), absent for a general
+        // gate (the gate's mandatory `prompt:` is the agent's task, spawned
+        // with all tools and no persona).
         const input = h.input!;
         const prompt = h.prompt!;
-        // Compile-time check: the agent must have a persona file in at
-        // least one layer of agentDirs. Same layered probe as the
-        // flow-walking check (validateAgentFilesExist) but inlined here
-        // because human_gate has its own emit branch and the agent name
-        // is read from h.agent.
-        const { found, attempted } = firstExisting(agentDirs, `${agent}.md`);
-        if (found === null) {
-          throw new Error(
-            `Compile error: human_gate interactive mode references agent '${agent}' ` +
-              `but no persona file exists at either layer:\n` +
-              attempted.map((p) => `  ${p}`).join('\n') +
-              '\n' +
-              `Create the file at either path or fix the agent name.`,
-          );
+        const agent = h.agent;
+        const gateLabel =
+          agent !== undefined ? `human_gate (agent '${agent}')` : 'human_gate (general)';
+        if (agent !== undefined) {
+          // Persona gate: the agent must resolve exactly like a flow step's —
+          // the same shared probe as the flow-walking check
+          // (validateAgentFilesExist), called here because human_gate has its
+          // own emit branch. Covers the layered cli-aware existence check AND
+          // claude's frontmatter-name check, so a gate persona that claude
+          // would not register fails at compile time too. A general gate
+          // (agent omitted) spawns no persona, so there is nothing to probe.
+          validatePersonaFile(ctx.agentDirs, ctx.cli, agent, 'human_gate interactive mode');
         }
-        checkConsume(input, `human_gate (agent '${agent}').input`, scope);
+        checkConsume(input, `${gateLabel}.input`, scope);
         // `input:` resolves to the artifact PATH (a string identifier referring
         // to the path the producer wrote). The runtime auto-appends "The
         // artifact is at: <path>" to the agent's initial message — so we emit
@@ -823,7 +851,10 @@ export function emit(
           h.extra_args !== undefined ? JSON.stringify(h.extra_args) : 'DEFAULT_EXTRA_ARGS';
         out.push(`${pad}await humanGate({`);
         out.push(`${pad}  interactive: true,`);
-        out.push(`${pad}  agent: ${JSON.stringify(agent)},`);
+        // Persona gate emits the agent name (delegated via `--agent`); a
+        // general gate omits the field entirely so the runtime spawns with
+        // no persona and all tools.
+        if (agent !== undefined) out.push(`${pad}  agent: ${JSON.stringify(agent)},`);
         out.push(`${pad}  cli: CLI,`);
         out.push(`${pad}  agentDirs: AGENT_DIRS,`);
         out.push(`${pad}  extraArgs: ${extraArgsExpr},`);
@@ -909,8 +940,16 @@ export function emit(
           // its default — mirrors `timeoutExpr` in the step-emit branch above.
           const closureTimeout =
             producerInfo.timeout !== undefined ? `, timeout: ${producerInfo.timeout}` : '';
+          // Re-bake an inline producer's prompt so the parse-retry re-fire uses
+          // the inline spawn form (the baked prompt is the agent's identity)
+          // instead of degrading to a persona `--agent <label>` lookup with no
+          // file. Empty for persona producers — byte-identical to before.
+          const closureInlinePrompt =
+            producerInfo.inlinePrompt !== undefined
+              ? `, inlinePrompt: ${JSON.stringify(producerInfo.inlinePrompt)}`
+              : '';
           rewriteEntries.push(
-            `${JSON.stringify(k)}: (correctivePrompt) => runAgent(${JSON.stringify(producerInfo.agentName)}, correctivePrompt, ${JSON.stringify(producerInfo.producesPath)}, { cli: CLI, agentDirs: AGENT_DIRS, extraArgs: ${closureExtraArgs}${closureTimeout} }).then(() => undefined)`,
+            `${JSON.stringify(k)}: (correctivePrompt) => runAgent(${JSON.stringify(producerInfo.agentName)}, correctivePrompt, ${JSON.stringify(producerInfo.producesPath)}, { cli: CLI, agentDirs: AGENT_DIRS, extraArgs: ${closureExtraArgs}${closureTimeout}${closureInlinePrompt} }).then(() => undefined)`,
           );
         }
       }
@@ -1038,7 +1077,7 @@ export function emit(
             pad + '    ',
             childScope,
             fresh,
-            agentDirs,
+            ctx,
             nextScopeId,
             childScopeId,
             childPathScope,
@@ -1145,7 +1184,7 @@ export function emit(
             pad + '  ',
             new Map(scope),
             fresh,
-            agentDirs,
+            ctx,
             nextScopeId,
             thenScopeId,
             thenScope,
@@ -1161,7 +1200,7 @@ export function emit(
               pad + '  ',
               new Map(scope),
               fresh,
-              agentDirs,
+              ctx,
               nextScopeId,
               elseScopeId!,
               elseScope,
@@ -1272,7 +1311,7 @@ export function emit(
             pad + '  ',
             new Map(scope),
             fresh,
-            agentDirs,
+            ctx,
             nextScopeId,
             thenScopeId,
             thenScope,
@@ -1302,7 +1341,7 @@ export function emit(
               pad + '  ',
               new Map(scope),
               fresh,
-              agentDirs,
+              ctx,
               nextScopeId,
               elseScopeId!,
               elseScope,
@@ -1455,7 +1494,7 @@ export function emit(
         pad + '  ',
         bodyScope,
         fresh,
-        agentDirs,
+        ctx,
         nextScopeId,
         bodyScopeId,
         bodyPathScope,

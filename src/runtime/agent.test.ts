@@ -54,11 +54,13 @@ vi.mock('readline', () => ({
   },
 }));
 
-// Mock fs — loom reads agent persona files at `<agentDirs[i]>/<name>.md`.
-// `promptFileBody = null` simulates "persona file missing on disk" (a
-// runtime contract violation that the runtime asserts against loudly).
-// `fakeFs` is the per-test path → content map used by runAgent's pre-spawn
-// inputPaths check, post-spawn producesPath existence check, and requireFile.
+// Mock fs. After --agent delegation, runAgent no longer reads persona files
+// (the CLI resolves them by walking up from the spawn cwd); the persona-path
+// branch below is retained as a regression guard — if a body-inline were ever
+// reintroduced, the mock would serve `promptFileBody` into the -p value and
+// the 'no persona-file body' test would catch it. `fakeFs` is the per-test
+// path → content map used by runAgent's pre-spawn inputPaths check, post-spawn
+// producesPath existence check, and requireFile.
 let promptFileBody: string | null = '---\nname: test-agent\n---\nSYS PROMPT BODY\n';
 let fakeFs: Record<string, string> = {};
 const looksLikePersonaPath = (p: string): boolean => /(?:^|\/)agents\/[^/]+\.md$/.test(p);
@@ -124,6 +126,59 @@ describe('runAgent', () => {
   it('throws when opts is missing (contract violation)', async () => {
     const { runAgent } = await import('./agent.js');
     await expect(runAgent('a', 'prompt')).rejects.toThrow(/opts is required/);
+  });
+
+  it('rejects a dash-leading assembled prompt before spawning (persona form)', async () => {
+    // On the persona form the -p value IS the task, and the task can carry a
+    // dash-leading literal `input:` or a runtime pipeline-input value
+    // (`loom run p.yaml x=--flag`) that compile cannot see. The CLI would
+    // parse that head as a flag, so runAgent must fail loud pre-spawn.
+    const { runAgent } = await import('./agent.js');
+    await expect(
+      runAgent('ac-writer', '--flag-looking runtime input', undefined, {
+        cli: 'claude',
+        agentDirs: ['.claude/agents/', '~/.claude/agents/'],
+        extraArgs: [],
+      }),
+    ).rejects.toThrow(/begins with '-'/);
+    expect(spawnMock).not.toHaveBeenCalled();
+  });
+
+  it('allows a dash-leading task on the inline form (the inline prompt heads the -p value)', async () => {
+    // The guard checks the ASSEMBLED head, not the raw task: with inlinePrompt
+    // set, the task rides after the blank-line/---/blank-line separator, so a
+    // dash-leading task never reaches argv position 0 of the -p value.
+    spawnMock.mockImplementation(() => makeFakeRunAgentChild());
+    const { runAgent } = await import('./agent.js');
+    await runAgent('inline-agent', '--flag-looking runtime input', undefined, {
+      cli: 'claude',
+      agentDirs: ['.claude/agents/', '~/.claude/agents/'],
+      extraArgs: [],
+      inlinePrompt: 'You are a careful reviewer.',
+    });
+    expect(spawnMock).toHaveBeenCalledTimes(1);
+    const args = spawnMock.mock.calls[0][1] as string[];
+    expect(args[args.indexOf('-p') + 1]).toBe(
+      'You are a careful reviewer.\n\n---\n\n--flag-looking runtime input',
+    );
+  });
+
+  it('rejects an empty-string inlinePrompt before spawning (contract violation)', async () => {
+    // PRESENCE of inlinePrompt selects the inline spawn form, so '' would
+    // spawn an agent whose entire identity is the separator + task with the
+    // persona path (and its tools: scoping) silently skipped. The YAML
+    // boundary rejects it (InlineAgent.prompt min-length 1); a value reaching
+    // runAgent means an emit or embedding bug, so it must fail loud pre-spawn.
+    const { runAgent } = await import('./agent.js');
+    await expect(
+      runAgent('inline-empty', 'the user task', undefined, {
+        cli: 'claude',
+        agentDirs: ['.claude/agents/', '~/.claude/agents/'],
+        extraArgs: [],
+        inlinePrompt: '',
+      }),
+    ).rejects.toThrow(/empty string/);
+    expect(spawnMock).not.toHaveBeenCalled();
   });
 
   it('dispatches to claude binary with stream-json flags', async () => {
@@ -869,32 +924,346 @@ describe('runAgent', () => {
     expect(prompt).toContain(`Write your output to: ${nodePath.resolve('out.json')}`);
   });
 
-  it('strips frontmatter from persona file before prepending', async () => {
-    promptFileBody = '---\nname: test\n---\nPERSONA BODY';
+  it('persona spawn delegates via --agent <name> on claude (arg after --agent is the name)', async () => {
     spawnMock.mockImplementation(() => makeFakeRunAgentChild());
     const { runAgent } = await import('./agent.js');
-    await runAgent('a', 'user prompt', undefined, {
+    await runAgent('ac-writer', 'prompt', undefined, {
+      cli: 'claude',
+      agentDirs: ['.claude/agents/', '~/.claude/agents/'],
+      extraArgs: [],
+    });
+    const args = spawnMock.mock.calls[0][1] as string[];
+    expect(args).toContain('--agent');
+    expect(args[args.indexOf('--agent') + 1]).toBe('ac-writer');
+  });
+
+  it('persona spawn delegates via --agent <name> on copilot', async () => {
+    spawnMock.mockImplementation(() => makeFakeRunAgentChild());
+    const { runAgent } = await import('./agent.js');
+    await runAgent('ac-writer', 'prompt', undefined, {
+      cli: 'copilot',
+      agentDirs: ['.github/agents/', '~/.copilot/agents/'],
+      extraArgs: [],
+    });
+    const args = spawnMock.mock.calls[0][1] as string[];
+    expect(args).toContain('--agent');
+    expect(args[args.indexOf('--agent') + 1]).toBe('ac-writer');
+  });
+
+  it('persona spawn -p value is the task alone — no persona-file body inlined', async () => {
+    // --agent delegation hands persona resolution to the CLI, so runAgent no
+    // longer reads the file. The persona-path fs branch is intact, so the mock
+    // would still serve 'SYS PROMPT BODY' into the -p value if the code
+    // regressed to reading it — the absence assertion is therefore non-vacuous.
+    promptFileBody = '---\nname: test-agent\n---\nSYS PROMPT BODY\n';
+    spawnMock.mockImplementation(() => makeFakeRunAgentChild());
+    const { runAgent } = await import('./agent.js');
+    await runAgent('a', 'the user task', undefined, {
       cli: 'claude',
       agentDirs: ['.claude/agents/', '~/.claude/agents/'],
       extraArgs: [],
     });
     const args = spawnMock.mock.calls[0][1] as string[];
     const prompt = args[args.indexOf('-p') + 1];
-    expect(prompt).toContain('PERSONA BODY');
-    expect(prompt).not.toMatch(/^---/);
-    expect(prompt).toContain('---\n\nuser prompt');
+    expect(prompt).toBe('the user task');
+    expect(prompt).not.toContain('SYS PROMPT BODY');
   });
 
-  it('throws when persona file missing (contract violation)', async () => {
-    promptFileBody = null;
+  it('inline-prompt spawn omits --agent and prepends the baked prompt + separator', async () => {
+    spawnMock.mockImplementation(() => makeFakeRunAgentChild());
     const { runAgent } = await import('./agent.js');
-    await expect(
-      runAgent('a', 'prompt', undefined, {
+    await runAgent('inline-0', 'the user task', undefined, {
+      cli: 'claude',
+      agentDirs: ['.claude/agents/', '~/.claude/agents/'],
+      extraArgs: [],
+      inlinePrompt: 'INLINE SYSTEM PROMPT',
+    });
+    const args = spawnMock.mock.calls[0][1] as string[];
+    expect(args).not.toContain('--agent');
+    const prompt = args[args.indexOf('-p') + 1];
+    expect(prompt.startsWith('INLINE SYSTEM PROMPT\n\n---\n\n')).toBe(true);
+    expect(prompt).toContain('the user task');
+  });
+
+  it('inline-prompt spawn on copilot omits --agent and retains the base all-tools flags', async () => {
+    // The discriminator drives the copilot base argv too: no --agent is added,
+    // and copilot's existing --allow-all-tools/--no-color stay, so "all tools"
+    // is the resulting effect on the inline path.
+    spawnMock.mockImplementation(() => makeFakeRunAgentChild());
+    const { runAgent } = await import('./agent.js');
+    await runAgent('inline-1', 'the user task', undefined, {
+      cli: 'copilot',
+      agentDirs: ['.github/agents/', '~/.copilot/agents/'],
+      extraArgs: [],
+      inlinePrompt: 'INLINE SYSTEM PROMPT',
+    });
+    const args = spawnMock.mock.calls[0][1] as string[];
+    expect(args).not.toContain('--agent');
+    expect(args).toContain('--allow-all-tools');
+    expect(args).toContain('--no-color');
+    const prompt = args[args.indexOf('-p') + 1];
+    expect(prompt.startsWith('INLINE SYSTEM PROMPT\n\n---\n\n')).toBe(true);
+    expect(prompt).toContain('the user task');
+  });
+
+  it('inline-prompt spawn appends the role postscript after the inline assembly', async () => {
+    // The role postscript appends to the assembled prompt in BOTH spawn forms;
+    // on the inline path it must land AFTER the inlinePrompt + separator + task,
+    // not displace the inline assembly.
+    fakeFs['out.json'] = '{}';
+    spawnMock.mockImplementation(() => makeFakeRunAgentChild());
+    const { runAgent } = await import('./agent.js');
+    await runAgent('inline-2', 'do this', 'out.json', {
+      cli: 'claude',
+      agentDirs: ['.claude/agents/', '~/.claude/agents/'],
+      extraArgs: [],
+      inlinePrompt: 'INLINE SYSTEM PROMPT',
+    });
+    const args = spawnMock.mock.calls[0][1] as string[];
+    const prompt = args[args.indexOf('-p') + 1];
+    expect(prompt).toBe(
+      `INLINE SYSTEM PROMPT\n\n---\n\ndo this\n\nWrite your output to: ${nodePath.resolve('out.json')}\nOverwrite if the file already exists.`,
+    );
+  });
+
+  describe('persona init-event roster verification (claude)', () => {
+    // claude (observed on 2.1.170) exits 0 with is_error:false and no stderr
+    // when `--agent <name>` doesn't resolve — the run silently proceeds
+    // persona-less with the full default toolset, so the exit handler alone
+    // can never catch a dropped persona. The init event's `agents` array is
+    // the roster claude actually loaded; a persona spawn whose requested name
+    // is missing from a PRESENT roster must reject mid-stream and kill the
+    // child. Enforcement is roster-gated (an init without an `agents` array —
+    // older CLIs — stays tolerated) and persona-gated (inline spawns pass no
+    // --agent, so there is nothing to verify).
+
+    const initWithAgents = (agents: unknown): string =>
+      JSON.stringify({ type: 'system', subtype: 'init', session_id: 's1', agents });
+
+    const resultEvent = JSON.stringify({
+      type: 'result',
+      num_turns: 1,
+      total_cost_usd: 0.001,
+      stop_reason: 'end_turn',
+    });
+
+    // makeFakeRunAgentChild's kill is an inert stub; wrap it so the test can
+    // observe the SIGTERM the enforcement branch sends.
+    const makeKillObservableChild = (
+      stdoutLines: string[],
+    ): { child: ReturnType<typeof makeFakeRunAgentChild>; wasKilled: () => boolean } => {
+      const child = makeFakeRunAgentChild({ stdoutLines });
+      let killed = false;
+      const inertKill = child.kill;
+      child.kill = (sig?: string) => {
+        killed = sig === 'SIGTERM';
+        inertKill(sig);
+      };
+      return { child, wasKilled: () => killed };
+    };
+
+    it('rejects and kills the child when the roster omits the requested agent', async () => {
+      const { child, wasKilled } = makeKillObservableChild([
+        initWithAgents(['other-agent', 'another']),
+        resultEvent,
+      ]);
+      spawnMock.mockImplementation(() => child);
+      const { runAgent } = await import('./agent.js');
+      const err = await runAgent('ac-writer', 'prompt', undefined, {
         cli: 'claude',
         agentDirs: ['.claude/agents/', '~/.claude/agents/'],
         extraArgs: [],
-      }),
-    ).rejects.toThrow(/persona file is missing|This should have been caught at compile time/);
+      }).catch((e) => e as Error);
+      expect(err).toBeInstanceOf(Error);
+      expect((err as Error).message).toContain("claude did not load agent 'ac-writer'");
+      expect((err as Error).message).toContain('persona-less');
+      // The actionable parts: the loaded roster and the spawn cwd hint.
+      // expectedCwd mirrors production's `LOOM_INVOCATION_CWD ?? process.cwd()`
+      // expression, so this assertion can only pin the fallback branch (the
+      // env var is unset here); the env branch is pinned against a distinct
+      // literal in the next test.
+      expect((err as Error).message).toContain('[other-agent, another]');
+      const expectedCwd = process.env.LOOM_INVOCATION_CWD ?? process.cwd();
+      expect((err as Error).message).toContain(`visible from ${expectedCwd}`);
+      expect(wasKilled()).toBe(true);
+    });
+
+    it('renders the LOOM_INVOCATION_CWD value in the visible-from hint when the env var is set', async () => {
+      // Asserting against a distinct literal (not production's ?? expression)
+      // makes the env branch falsifiable: a regression that resolved the hint
+      // from process.cwd() alone would render the vitest cwd and fail here.
+      // Save/restore mirrors the 'spawn cwd threading' block's env handling.
+      const originalInvocationCwd = process.env.LOOM_INVOCATION_CWD;
+      process.env.LOOM_INVOCATION_CWD = '/distinct/invocation/dir';
+      try {
+        const { child } = makeKillObservableChild([initWithAgents(['other-agent']), resultEvent]);
+        spawnMock.mockImplementation(() => child);
+        const { runAgent } = await import('./agent.js');
+        const err = await runAgent('ac-writer', 'prompt', undefined, {
+          cli: 'claude',
+          agentDirs: ['.claude/agents/', '~/.claude/agents/'],
+          extraArgs: [],
+        }).catch((e) => e as Error);
+        expect(err).toBeInstanceOf(Error);
+        expect((err as Error).message).toContain('visible from /distinct/invocation/dir');
+      } finally {
+        if (originalInvocationCwd === undefined) delete process.env.LOOM_INVOCATION_CWD;
+        else process.env.LOOM_INVOCATION_CWD = originalInvocationCwd;
+      }
+    });
+
+    it("renders '(none)' when claude loaded an empty roster (bare dir)", async () => {
+      const { child, wasKilled } = makeKillObservableChild([initWithAgents([]), resultEvent]);
+      spawnMock.mockImplementation(() => child);
+      const { runAgent } = await import('./agent.js');
+      const err = await runAgent('ac-writer', 'prompt', undefined, {
+        cli: 'claude',
+        agentDirs: ['.claude/agents/', '~/.claude/agents/'],
+        extraArgs: [],
+      }).catch((e) => e as Error);
+      expect((err as Error).message).toContain('Agents claude loaded: (none).');
+      expect(wasKilled()).toBe(true);
+    });
+
+    it("reports an unrecognized roster shape — not '(none)' — when entries exist but none are readable", async () => {
+      // A roster of only unreadable entries means claude DID load agents but
+      // reshaped the entry format (e.g. {id, displayName}). Rendering '(none)'
+      // here would send the user chasing a missing-persona-file problem when
+      // the real issue is a roster-format change in claude itself.
+      const { child, wasKilled } = makeKillObservableChild([
+        initWithAgents([42, { foo: 'bar' }]),
+        resultEvent,
+      ]);
+      spawnMock.mockImplementation(() => child);
+      const { runAgent } = await import('./agent.js');
+      const err = await runAgent('ac-writer', 'prompt', undefined, {
+        cli: 'claude',
+        agentDirs: ['.claude/agents/', '~/.claude/agents/'],
+        extraArgs: [],
+      }).catch((e) => e as Error);
+      expect(err).toBeInstanceOf(Error);
+      expect((err as Error).message).toMatch(/unrecognized shape/);
+      expect((err as Error).message).not.toContain('(none)');
+      expect(wasKilled()).toBe(true);
+    });
+
+    it('resolves normally when the roster lists the requested name among others', async () => {
+      const writes = captureStdoutWrites();
+      const events = [
+        initWithAgents(['other-agent', 'ac-writer']),
+        JSON.stringify({
+          type: 'stream_event',
+          event: { type: 'content_block_delta', delta: { type: 'text_delta', text: 'done' } },
+        }),
+        resultEvent,
+      ];
+      spawnMock.mockImplementation(() => makeFakeRunAgentChild({ stdoutLines: events }));
+      const { runAgent } = await import('./agent.js');
+      await expect(
+        runAgent('ac-writer', 'prompt', undefined, {
+          cli: 'claude',
+          agentDirs: ['.claude/agents/', '~/.claude/agents/'],
+          extraArgs: [],
+        }),
+      ).resolves.toBe('done');
+      // A passing roster falls THROUGH — the init event still reaches the
+      // full-mode display path and renders its session line.
+      expect(writes.join('')).toContain('(session s1)');
+    });
+
+    it('treats {name} object entries like string entries and skips garbage', async () => {
+      const events = [initWithAgents([42, { foo: 'bar' }, { name: 'ac-writer' }]), resultEvent];
+      spawnMock.mockImplementation(() => makeFakeRunAgentChild({ stdoutLines: events }));
+      const { runAgent } = await import('./agent.js');
+      await expect(
+        runAgent('ac-writer', 'prompt', undefined, {
+          cli: 'claude',
+          agentDirs: ['.claude/agents/', '~/.claude/agents/'],
+          extraArgs: [],
+        }),
+      ).resolves.toBe('');
+    });
+
+    it('renders only the readable names when a garbage-laden roster rejects the spawn', async () => {
+      // Garbage skipping is only falsifiable through a rejection: the test
+      // above resolves via its matching {name} entry, so a coercion
+      // regression (pushing String(entry) for garbage) would stay invisible
+      // there. Here no entry matches, so the spawn must reject — and the
+      // roster listing must carry exactly the readable name, with no
+      // '42' / '[object Object]' coercion artifacts.
+      const { child, wasKilled } = makeKillObservableChild([
+        initWithAgents([42, { foo: 'bar' }, 'other-agent']),
+        resultEvent,
+      ]);
+      spawnMock.mockImplementation(() => child);
+      const { runAgent } = await import('./agent.js');
+      const err = await runAgent('ac-writer', 'prompt', undefined, {
+        cli: 'claude',
+        agentDirs: ['.claude/agents/', '~/.claude/agents/'],
+        extraArgs: [],
+      }).catch((e) => e as Error);
+      expect(err).toBeInstanceOf(Error);
+      expect((err as Error).message).toContain("claude did not load agent 'ac-writer'");
+      expect((err as Error).message).toContain('Agents claude loaded: [other-agent].');
+      expect((err as Error).message).not.toContain('42');
+      expect((err as Error).message).not.toContain('object Object');
+      expect(wasKilled()).toBe(true);
+    });
+
+    it('skips the check on inline spawns (no --agent passed, nothing to verify)', async () => {
+      const events = [initWithAgents(['something-else']), resultEvent];
+      spawnMock.mockImplementation(() => makeFakeRunAgentChild({ stdoutLines: events }));
+      const { runAgent } = await import('./agent.js');
+      await expect(
+        runAgent('inline-0', 'the user task', undefined, {
+          cli: 'claude',
+          agentDirs: ['.claude/agents/', '~/.claude/agents/'],
+          extraArgs: [],
+          inlinePrompt: 'INLINE SYSTEM PROMPT',
+        }),
+      ).resolves.toBe('');
+    });
+
+    it('tolerates an init event without an agents field (older CLI)', async () => {
+      const events = [
+        JSON.stringify({ type: 'system', subtype: 'init', session_id: 's1' }),
+        resultEvent,
+      ];
+      spawnMock.mockImplementation(() => makeFakeRunAgentChild({ stdoutLines: events }));
+      const { runAgent } = await import('./agent.js');
+      await expect(
+        runAgent('ac-writer', 'prompt', undefined, {
+          cli: 'claude',
+          agentDirs: ['.claude/agents/', '~/.claude/agents/'],
+          extraArgs: [],
+        }),
+      ).resolves.toBe('');
+    });
+
+    it('tolerates a stream with no init event at all', async () => {
+      spawnMock.mockImplementation(() => makeFakeRunAgentChild({ stdoutLines: [resultEvent] }));
+      const { runAgent } = await import('./agent.js');
+      await expect(
+        runAgent('ac-writer', 'prompt', undefined, {
+          cli: 'claude',
+          agentDirs: ['.claude/agents/', '~/.claude/agents/'],
+          extraArgs: [],
+        }),
+      ).resolves.toBe('');
+    });
+
+    it('tolerates an agents field that is not an array (defensive shape gate)', async () => {
+      const events = [initWithAgents('not-an-array'), resultEvent];
+      spawnMock.mockImplementation(() => makeFakeRunAgentChild({ stdoutLines: events }));
+      const { runAgent } = await import('./agent.js');
+      await expect(
+        runAgent('ac-writer', 'prompt', undefined, {
+          cli: 'claude',
+          agentDirs: ['.claude/agents/', '~/.claude/agents/'],
+          extraArgs: [],
+        }),
+      ).resolves.toBe('');
+    });
   });
 
   describe('inputPaths pre-spawn input check', () => {
@@ -1900,5 +2269,28 @@ describe('HaltPipelineError', () => {
     expect(err).toBeInstanceOf(HaltPipelineError);
     expect(err.name).toBe('HaltPipelineError');
     expect(err.message).toBe('msg');
+  });
+});
+
+describe('persona-body reader removal', () => {
+  // Persona resolution moved onto the CLI's `--agent` delegation, so the runtime
+  // no longer reads persona files itself. The persona-body reader the runtime
+  // once exported (loadAgentSystemPrompt, backed by the private firstExisting/
+  // expandHome helpers) is dead code and must be gone from agent.ts's exports.
+  it('no longer exports loadAgentSystemPrompt from runtime/agent', async () => {
+    const mod = await import('./agent.js');
+    // Re-adding this export would re-couple the runtime to AGENT_DIRS persona
+    // reading — the exact coupling this removal sheds.
+    expect('loadAgentSystemPrompt' in mod).toBe(false);
+  });
+
+  it('keeps the surviving agent.ts exports intact (surgical removal)', async () => {
+    const mod = await import('./agent.js');
+    // Anchor for the absence assertion above: these prove the agent.js namespace
+    // genuinely loaded, so the `in` check cannot pass vacuously against a failed
+    // or empty import. They also guard that only the dead reader was removed.
+    expect('runAgent' in mod).toBe(true);
+    expect('HaltPipelineError' in mod).toBe(true);
+    expect('requireFile' in mod).toBe(true);
   });
 });

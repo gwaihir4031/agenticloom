@@ -7,6 +7,8 @@ import {
   Pipeline,
   BindName,
   ReviseWith,
+  InlineAgent,
+  AgentRef,
   isStep,
   isReviewLoop,
   isHumanGate,
@@ -14,6 +16,9 @@ import {
   isBranch,
   isAggregate,
   isForeach,
+  isInlineAgent,
+  agentLabel,
+  inlinePromptOf,
 } from './types.js';
 import type { FlowItem } from './types.js';
 
@@ -54,6 +59,19 @@ describe('Pipeline schema', () => {
     expect(
       Pipeline.safeParse({ ...validMinimal, default_extra_args: ['--model', 'sonnet'] }).success,
     ).toBe(true);
+  });
+
+  it("rejects '--agent' in default_extra_args (loom owns agent delegation)", () => {
+    // extra args land AFTER loom's own `--agent <name>` in the spawn argv, so
+    // a user --agent would silently win and replace every step's persona.
+    const result = Pipeline.safeParse({
+      ...validMinimal,
+      default_extra_args: ['--agent', 'helper'],
+    });
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error.issues[0].message).toMatch(/must not contain '--agent'/);
+    }
   });
 
   it('defaults inputs to []', () => {
@@ -132,6 +150,24 @@ describe('StepItem schema', () => {
     expect(StepItem.safeParse({ step: 'a', extra_args: ['--model', 'haiku'] }).success).toBe(true);
   });
 
+  it("rejects '--agent' in extra_args, in both flag forms", () => {
+    expect(StepItem.safeParse({ step: 'a', extra_args: ['--agent', 'helper'] }).success).toBe(
+      false,
+    );
+    expect(StepItem.safeParse({ step: 'a', extra_args: ['--agent=helper'] }).success).toBe(false);
+  });
+
+  it("rejects '--agents' (inline JSON agent definitions) in extra_args", () => {
+    // --agents can shadow a compile-validated persona under the same name;
+    // the init-roster audit cannot catch it (the name IS in the roster).
+    expect(
+      StepItem.safeParse({ step: 'a', extra_args: ['--agents', '{"a": {"prompt": "x"}}'] }).success,
+    ).toBe(false);
+    expect(
+      StepItem.safeParse({ step: 'a', extra_args: ['--agents={"a": {"prompt": "x"}}'] }).success,
+    ).toBe(false);
+  });
+
   it('rejects unknown keys (strict mode)', () => {
     expect(StepItem.safeParse({ step: 'a', unknown_key: 'x' }).success).toBe(false);
   });
@@ -191,7 +227,7 @@ describe('ReviewLoopItem schema', () => {
     expect(result.success).toBe(false);
     if (!result.success) {
       expect(result.error.issues[0].message).toMatch(
-        /'reviewer_produces' is required when 'reviewer' is an agent name/,
+        /'reviewer_produces' is required when 'reviewer' is a single agent/,
       );
     }
   });
@@ -202,7 +238,7 @@ describe('ReviewLoopItem schema', () => {
     expect(result.success).toBe(false);
     if (!result.success) {
       expect(result.error.issues[0].message).toMatch(
-        /'verdict_field' is required when 'reviewer' is an agent name/,
+        /'verdict_field' is required when 'reviewer' is a single agent/,
       );
     }
   });
@@ -349,16 +385,13 @@ describe('HumanGateItem schema', () => {
     expect(HumanGateItem.safeParse(valid).success).toBe(true);
   });
 
-  it('rejects interactive: true missing agent', () => {
+  it('accepts interactive: true with agent omitted (general gate)', () => {
+    // A general gate omits `agent:`; the gate's required `prompt:` is the
+    // agent's task and it spawns with all tools and no persona.
     const result = HumanGateItem.safeParse({
       human_gate: { interactive: true, input: '$x', prompt: 'iterate' },
     });
-    expect(result.success).toBe(false);
-    if (!result.success) {
-      expect(result.error.issues[0].message).toMatch(
-        /'agent:', 'input:', and 'prompt:' are all required/,
-      );
-    }
+    expect(result.success).toBe(true);
   });
 
   it('rejects interactive: true missing input', () => {
@@ -373,6 +406,51 @@ describe('HumanGateItem schema', () => {
       human_gate: { interactive: true, agent: 'a', input: '$x' },
     });
     expect(result.success).toBe(false);
+  });
+
+  it('rejects an empty prompt on a general gate (prompt is the entire task)', () => {
+    const result = HumanGateItem.safeParse({
+      human_gate: { interactive: true, input: '$x', prompt: '' },
+    });
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error.issues[0].message).toMatch(/must be non-empty/);
+    }
+  });
+
+  it('rejects an empty prompt on a persona gate', () => {
+    const result = HumanGateItem.safeParse({
+      human_gate: { interactive: true, agent: 'a', input: '$x', prompt: '' },
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it('rejects a prompt starting with a dash (CLI would parse the argv value as a flag)', () => {
+    const result = HumanGateItem.safeParse({
+      human_gate: { interactive: true, input: '$x', prompt: '- iterate with me' },
+    });
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error.issues[0].message).toMatch(/must not start with '-'/);
+    }
+  });
+
+  it("rejects agent: '' (omit the field entirely for a general gate)", () => {
+    const result = HumanGateItem.safeParse({
+      human_gate: { interactive: true, agent: '', input: '$x', prompt: 'iterate' },
+    });
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error.issues[0].message).toMatch(/omit the field/);
+    }
+  });
+
+  it('rejects a dash-leading gate agent name', () => {
+    expect(
+      HumanGateItem.safeParse({
+        human_gate: { interactive: true, agent: '-a', input: '$x', prompt: 'iterate' },
+      }).success,
+    ).toBe(false);
   });
 
   it('rejects interactive: false (literal-true-only)', () => {
@@ -411,6 +489,33 @@ describe('HumanGateItem schema', () => {
       },
     };
     expect(HumanGateItem.safeParse(valid).success).toBe(true);
+  });
+
+  it('accepts a general gate (agent omitted) with an extra_args override', () => {
+    // The relaxed first refine makes `agent:` optional. A general gate still
+    // carries interactive's required input/prompt and may add a per-gate
+    // extra_args override — only the persona name is dropped.
+    const valid = {
+      human_gate: {
+        interactive: true,
+        input: '$x',
+        prompt: 'iterate',
+        extra_args: ['--model', 'haiku'],
+      },
+    };
+    expect(HumanGateItem.safeParse(valid).success).toBe(true);
+  });
+
+  it("rejects '--agent' in a gate's extra_args", () => {
+    const result = HumanGateItem.safeParse({
+      human_gate: {
+        interactive: true,
+        input: '$x',
+        prompt: 'iterate',
+        extra_args: ['--agent', 'helper'],
+      },
+    });
+    expect(result.success).toBe(false);
   });
 
   it('rejects extra_args in plain mode (without interactive)', () => {
@@ -799,6 +904,18 @@ describe('ReviseWith schema', () => {
         /at least one of 'prompt'.*or 'inputs'/,
       );
     }
+  });
+
+  it('rejects a revise prompt starting with a dash (CLI would parse the -p value as a flag)', () => {
+    // In prompt-only revise mode this string heads the persona retry
+    // target's -p value — a dash-leading value kills the spawn on the retry
+    // pass, after the expensive first pass already ran.
+    const result = ReviseWith.safeParse({ prompt: '--- corrected instructions ---\nFix it.' });
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error.issues[0].message).toMatch(/must not start with '-'/);
+    }
+    expect(ReviseWith.safeParse({ prompt: 'Fix it - per the review.' }).success).toBe(true);
   });
 
   it('rejects revise_with with empty prompt string', () => {
@@ -1353,4 +1470,372 @@ describe('FlowItem variant discriminators are unique', () => {
       }
     });
   }
+});
+
+// ============================================================================
+// Inline-agent grammar — InlineAgent / AgentRef schemas + read helpers
+// ============================================================================
+//
+// An agent reference is either a bare persona-name string (the CLI loads its
+// agent file) or an inline-agent object. The object form is the discriminator
+// that lets a later compile pass reject a task-less inline agent. These blocks
+// pin the schema's accept/reject surface and the pure read helpers
+// (isInlineAgent / agentLabel / inlinePromptOf) that every later compile +
+// mermaid site resolves the union through.
+
+describe('InlineAgent schema', () => {
+  it('accepts an inline agent with prompt and a valid name', () => {
+    // The name regex is broader than BindName: a digit may lead, and '.' / '-'
+    // are allowed in non-leading positions (an fs-safe identity for logs /
+    // windows / mermaid nodes).
+    expect(InlineAgent.safeParse({ prompt: 'p', name: 'code-reviewer.v2' }).success).toBe(true);
+  });
+
+  it('rejects an inline agent missing name', () => {
+    expect(InlineAgent.safeParse({ prompt: 'do the thing' }).success).toBe(false);
+  });
+
+  it('rejects an inline agent missing prompt', () => {
+    expect(InlineAgent.safeParse({ name: 'x' }).success).toBe(false);
+  });
+
+  it('rejects an inline agent with an empty prompt string', () => {
+    expect(InlineAgent.safeParse({ prompt: '', name: 'x' }).success).toBe(false);
+  });
+
+  it('rejects a prompt starting with a dash (CLI would parse the -p value as a flag)', () => {
+    // A pasted persona file (leading frontmatter '---') and a leading markdown
+    // list ('- check x') are the two realistic shapes; both die at spawn with
+    // the CLI's "unknown option" parse error, so compile rejects them early.
+    const frontmatter = InlineAgent.safeParse({ prompt: '---\nname: x\n---\nbody', name: 'n' });
+    expect(frontmatter.success).toBe(false);
+    if (!frontmatter.success) {
+      expect(frontmatter.error.issues[0].message).toMatch(/must not start with '-'/);
+    }
+    expect(InlineAgent.safeParse({ prompt: '- review the spec', name: 'n' }).success).toBe(false);
+    // A dash later in the prompt is fine — only the leading byte breaks argv parsing.
+    expect(InlineAgent.safeParse({ prompt: 'review - then report', name: 'n' }).success).toBe(true);
+  });
+
+  it('rejects a name with a leading underscore', () => {
+    // Diverges from BindName (which permits a leading underscore): the label
+    // regex requires an alphanumeric first character. The message must be the
+    // custom fs-safe one — 'fs-safe' is the discriminating fragment, since
+    // zod's DEFAULT regex message also says "must match pattern /.../".
+    const result = InlineAgent.safeParse({ prompt: 'p', name: '_internal' });
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error.issues[0].message).toMatch(/must match .*fs-safe/);
+    }
+  });
+
+  it('rejects a name containing whitespace', () => {
+    expect(InlineAgent.safeParse({ prompt: 'p', name: 'has space' }).success).toBe(false);
+  });
+
+  it('rejects an empty name string', () => {
+    expect(InlineAgent.safeParse({ prompt: 'p', name: '' }).success).toBe(false);
+  });
+
+  it('rejects unknown keys (strict mode)', () => {
+    expect(InlineAgent.safeParse({ prompt: 'p', name: 'n', unknown_key: 'x' }).success).toBe(false);
+  });
+});
+
+describe('AgentRef schema', () => {
+  it('accepts a bare persona-name string', () => {
+    expect(AgentRef.safeParse('code-reviewer').success).toBe(true);
+  });
+
+  it('accepts an inline-agent object', () => {
+    expect(AgentRef.safeParse({ prompt: 'do the thing', name: 'doer' }).success).toBe(true);
+  });
+
+  it('rejects an object that satisfies neither arm (missing prompt)', () => {
+    // The object arm is InlineAgent, not "any object": a prompt-less object
+    // fails the string arm and the InlineAgent arm both.
+    expect(AgentRef.safeParse({ name: 'x' }).success).toBe(false);
+  });
+
+  it('rejects an empty persona-name string', () => {
+    // Without min(1) this surfaced later as "no persona file exists at
+    // `.claude/agents/.md`" — a probe error that never names the real problem.
+    expect(AgentRef.safeParse('').success).toBe(false);
+    expect(StepItem.safeParse({ step: '' }).success).toBe(false);
+  });
+
+  it('rejects a dash-leading persona name (it becomes the --agent argv value)', () => {
+    const result = StepItem.safeParse({ step: '-dash' });
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error.issues.some((i) => /--agent value/.test(i.message))).toBe(true);
+    }
+    expect(
+      ReviewLoopItem.safeParse({
+        review_loop: {
+          writer: '-w',
+          reviewer: 'r',
+          input: '$x',
+          writer_produces: 'out.md',
+          reviewer_produces: 'review.json',
+          verdict_field: 'status',
+        },
+      }).success,
+    ).toBe(false);
+  });
+});
+
+describe('AgentRef read helpers — isInlineAgent', () => {
+  it('returns false for a persona-name string', () => {
+    expect(isInlineAgent('code-reviewer')).toBe(false);
+  });
+
+  it('returns true for an inline-agent object', () => {
+    expect(isInlineAgent({ prompt: 'p', name: 'n' })).toBe(true);
+  });
+});
+
+describe('AgentRef read helpers — agentLabel', () => {
+  it('returns the persona name itself for a string ref', () => {
+    expect(agentLabel('persona')).toBe('persona');
+  });
+
+  it('returns the required name for an inline agent', () => {
+    expect(agentLabel({ prompt: 'p', name: 'n' })).toBe('n');
+  });
+});
+
+describe('AgentRef read helpers — inlinePromptOf', () => {
+  it('returns undefined for a persona-name string', () => {
+    expect(inlinePromptOf('persona')).toBeUndefined();
+  });
+
+  it('returns the baked prompt for an inline agent', () => {
+    expect(inlinePromptOf({ prompt: 'Review the diff.', name: 'reviewer' })).toBe(
+      'Review the diff.',
+    );
+  });
+});
+
+// ============================================================================
+// StepItem.step retype — AgentRef accepted end-to-end through StepItem
+// ============================================================================
+//
+// `StepItem.step` is now an `AgentRef` (persona-name string OR inline-agent
+// object), not a bare `z.string()`. The InlineAgent/AgentRef blocks above pin
+// the union in isolation; these pin the union THROUGH `StepItem`, which is the
+// surface a pipeline author actually parses. The inline-object accept/reject
+// cases are the load-bearing ones — before the retype, `step: { prompt: ... }`
+// failed StepItem's `z.string()` arm outright.
+
+describe('StepItem.step accepts the AgentRef union', () => {
+  it('still accepts a persona-name string step after the retype', () => {
+    // Parity arm: the string branch of AgentRef must keep parsing exactly as
+    // the old `z.string()` did, so all-persona pipelines are unaffected.
+    expect(StepItem.safeParse({ step: 'code-reviewer' }).success).toBe(true);
+  });
+
+  it('accepts an inline-agent object step (prompt + name)', () => {
+    expect(
+      StepItem.safeParse({ step: { prompt: 'Review the diff.', name: 'reviewer' } }).success,
+    ).toBe(true);
+  });
+
+  it('rejects an inline-agent object step missing name', () => {
+    // `name` is required on inline agents — it is the agent's identity in
+    // logs, window titles, error messages, and mermaid nodes.
+    expect(StepItem.safeParse({ step: { prompt: 'Review the diff.' } }).success).toBe(false);
+  });
+
+  it('rejects an inline-agent object step with no prompt', () => {
+    // The object arm is InlineAgent, which requires `prompt`. A prompt-less
+    // object satisfies neither the string arm nor the InlineAgent arm.
+    expect(StepItem.safeParse({ step: { name: 'reviewer' } }).success).toBe(false);
+  });
+
+  it('rejects an inline-agent object step with an empty prompt', () => {
+    expect(StepItem.safeParse({ step: { prompt: '', name: 'reviewer' } }).success).toBe(false);
+  });
+
+  it('rejects an inline-agent object step with an unknown key (InlineAgent is strict)', () => {
+    // The strictObject inside the union still rejects unknown keys when the
+    // step is the inline form — the retype widened the field, not its rigor.
+    expect(StepItem.safeParse({ step: { prompt: 'p', name: 'n', persona: 'x' } }).success).toBe(
+      false,
+    );
+  });
+
+  it('preserves the inline object on parse alongside the other step fields', () => {
+    // Downstream emit reads `item.step` as the object (isInlineAgent / the
+    // baked prompt), so the union must survive the parse without collapsing
+    // the inline form to a string. Co-occurring produces/bind must not disturb
+    // it.
+    const parsed = StepItem.parse({
+      step: { prompt: 'Produce the artifact.', name: 'producer' },
+      produces: 'out.json',
+      bind: 'r',
+    });
+    expect(parsed.step).toEqual({ prompt: 'Produce the artifact.', name: 'producer' });
+  });
+});
+
+// ============================================================================
+// review_loop.writer / reviewer retype — AgentRef accepted through ReviewLoopItem
+// ============================================================================
+//
+// `review_loop.writer` is now an `AgentRef` (persona-name string OR inline-agent
+// object), and `reviewer` is a three-arm union (string / inline-agent object /
+// subflow array). The single-reviewer refines (reviewer_produces + verdict_field
+// required) fire for an inline-object reviewer exactly as they do for a string
+// reviewer — only the subflow array arm is exempt. The InlineAgent/AgentRef
+// blocks above pin the union in isolation; these pin it THROUGH ReviewLoopItem,
+// the surface a pipeline author parses. Before the retype, `writer: { prompt }`
+// failed the bare `z.string()` and an inline-object `reviewer:` matched no arm.
+
+describe('review_loop.writer accepts the AgentRef union', () => {
+  const base = {
+    reviewer: 'r',
+    input: '$x',
+    writer_produces: 'out.md',
+    reviewer_produces: 'review.json',
+    verdict_field: 'status',
+  };
+
+  it('still accepts a persona-name string writer after the retype', () => {
+    // Parity arm: the string branch must keep parsing exactly as the old
+    // `z.string()` did, so all-persona review loops are unaffected.
+    expect(ReviewLoopItem.safeParse({ review_loop: { ...base, writer: 'w' } }).success).toBe(true);
+  });
+
+  it('accepts an inline-agent object writer (prompt + name)', () => {
+    expect(
+      ReviewLoopItem.safeParse({
+        review_loop: { ...base, writer: { prompt: 'Draft the spec.', name: 'drafter' } },
+      }).success,
+    ).toBe(true);
+  });
+
+  it('rejects an inline-agent object writer missing name', () => {
+    // `name` is required on inline agents — it is the agent's identity in
+    // logs, window titles, error messages, and mermaid nodes.
+    expect(
+      ReviewLoopItem.safeParse({
+        review_loop: { ...base, writer: { prompt: 'Draft the spec.' } },
+      }).success,
+    ).toBe(false);
+  });
+
+  it('rejects an inline-agent object writer with no prompt', () => {
+    // The object arm is InlineAgent, which requires `prompt`. A name-only
+    // object satisfies neither the string arm nor the InlineAgent arm — the
+    // union widened to admit inline agents, not arbitrary objects.
+    expect(
+      ReviewLoopItem.safeParse({
+        review_loop: { ...base, writer: { name: 'drafter' } },
+      }).success,
+    ).toBe(false);
+  });
+
+  it('rejects an inline-agent object writer with an empty prompt', () => {
+    expect(
+      ReviewLoopItem.safeParse({
+        review_loop: { ...base, writer: { prompt: '', name: 'drafter' } },
+      }).success,
+    ).toBe(false);
+  });
+
+  it('preserves the inline writer object on parse alongside the other fields', () => {
+    // Downstream emit reads `r.writer` as the object (isInlineAgent / the baked
+    // prompt), so the union must survive the parse without collapsing to a string.
+    const parsed = ReviewLoopItem.parse({
+      review_loop: { ...base, writer: { prompt: 'Draft the spec.', name: 'drafter' } },
+    });
+    expect(parsed.review_loop.writer).toEqual({ prompt: 'Draft the spec.', name: 'drafter' });
+  });
+});
+
+describe('review_loop.reviewer accepts the inline-agent arm', () => {
+  const base = {
+    writer: 'w',
+    input: '$x',
+    writer_produces: 'out.md',
+    reviewer_produces: 'review.json',
+    verdict_field: 'status',
+  };
+
+  it('still accepts a persona-name string reviewer after the retype', () => {
+    expect(ReviewLoopItem.safeParse({ review_loop: { ...base, reviewer: 'r' } }).success).toBe(
+      true,
+    );
+  });
+
+  it('accepts an inline-agent object reviewer with reviewer_produces + verdict_field', () => {
+    expect(
+      ReviewLoopItem.safeParse({
+        review_loop: { ...base, reviewer: { prompt: 'Audit the draft.', name: 'auditor' } },
+      }).success,
+    ).toBe(true);
+  });
+
+  it('rejects an inline-agent object reviewer missing name', () => {
+    // `name` is required on inline agents — it is the agent's identity in
+    // logs, window titles, error messages, and mermaid nodes.
+    expect(
+      ReviewLoopItem.safeParse({
+        review_loop: { ...base, reviewer: { prompt: 'Audit the draft.' } },
+      }).success,
+    ).toBe(false);
+  });
+
+  it('accepts a subflow-array reviewer (third arm, unchanged)', () => {
+    // Parity arm: the array branch is still the subflow form and still parses
+    // without reviewer_produces / verdict_field.
+    expect(
+      ReviewLoopItem.safeParse({
+        review_loop: {
+          writer: 'w',
+          reviewer: [{ aggregate: { inputs: { a: '$a' }, verdict_field: 'status' } }],
+          input: '$x',
+          writer_produces: 'out.md',
+        },
+      }).success,
+    ).toBe(true);
+  });
+
+  it('rejects an inline reviewer missing reviewer_produces (single-agent rule applies to inline)', () => {
+    // An inline-object reviewer follows the STRING-reviewer rules, not the
+    // subflow rules: the refine discriminates on Array.isArray(reviewer) (false
+    // for an inline object), so reviewer_produces is required just as for a
+    // persona-name reviewer.
+    const { reviewer_produces, ...rest } = base;
+    const result = ReviewLoopItem.safeParse({
+      review_loop: { ...rest, reviewer: { prompt: 'Audit the draft.', name: 'auditor' } },
+    });
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error.issues[0].message).toMatch(
+        /'reviewer_produces' is required when 'reviewer' is a single agent/,
+      );
+    }
+  });
+
+  it('rejects an inline reviewer missing verdict_field (single-agent rule applies to inline)', () => {
+    const { verdict_field, ...rest } = base;
+    const result = ReviewLoopItem.safeParse({
+      review_loop: { ...rest, reviewer: { prompt: 'Audit the draft.', name: 'auditor' } },
+    });
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error.issues[0].message).toMatch(
+        /'verdict_field' is required when 'reviewer' is a single agent/,
+      );
+    }
+  });
+
+  it('preserves the inline reviewer object on parse', () => {
+    const parsed = ReviewLoopItem.parse({
+      review_loop: { ...base, reviewer: { prompt: 'Audit the draft.', name: 'auditor' } },
+    });
+    expect(parsed.review_loop.reviewer).toEqual({ prompt: 'Audit the draft.', name: 'auditor' });
+  });
 });

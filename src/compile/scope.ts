@@ -1,3 +1,4 @@
+import { StepItemT, agentLabel, inlinePromptOf } from '../types.js';
 import { escapeTplLit } from './flow-helpers.js';
 
 /** What `bind:` resolves to when consumed downstream.
@@ -97,8 +98,17 @@ export interface ProducerInfo {
   fileField: string;
   /** Upstream agent name for the input-context wrap. Used to tell the
    *  consumer who wrote the file it's about to read. For aggregates and
-   *  pipeline inputs no real agent exists — use a synthetic label. */
+   *  pipeline inputs no real agent exists — use a synthetic label. For a
+   *  `step:` producer this is the resolved agent label: a persona name is
+   *  itself; an inline agent is its required `name`. */
   agentName: string;
+  /** Baked inline-agent prompt — set only when this producer's `step:` is the
+   *  inline (object) form. Threaded into the aggregate parse-retry rewrite
+   *  closure so an inline producer re-fires via its inline spawn form (the
+   *  baked prompt is the agent's identity) instead of degrading to a persona
+   *  `--agent <label>` lookup that has no file. Undefined for persona-name
+   *  producers and every non-step kind. */
+  inlinePrompt?: string;
   /** Set only when `kind === 'parallel'`. Names of the child binds declared
    *  inside the parallel block, used to make `$-ref` error messages
    *  actionable ("use $aBind, $bBind, ..." instead of a generic "no
@@ -178,6 +188,33 @@ export interface ProducerInfo {
    *  is set, the bind name doubles as the dir name; this field still gets
    *  populated so the retry callback's emit doesn't need to re-derive it. */
   foreachSyntheticName?: string;
+}
+
+/** Build the `kind: 'step'` producer fields derived from the step item
+ *  itself; `location` is the only display-context field the caller owns
+ *  (the parallel hoist appends its suffix and the `hoistedFromParallel`
+ *  marker). Fusing the AgentRef-derived pair (agentName, inlinePrompt) at
+ *  one site keeps the pair's invariant — inlinePrompt present ⇔ inline
+ *  step — structural instead of conventional: a construction site cannot
+ *  take the label and forget the baked prompt. The retry-closure fields
+ *  (producesPath, extraArgs, timeout) ride along for the same reason —
+ *  forgetting any of them silently changes how the aggregate parse-retry
+ *  re-fires the producer. */
+export function stepProducerInfo(
+  item: StepItemT,
+  location: string,
+): Omit<ProducerInfo, 'declarationScope'> {
+  return {
+    kind: 'step',
+    fileBound: item.produces !== undefined,
+    location,
+    fileField: 'produces',
+    agentName: agentLabel(item.step),
+    inlinePrompt: inlinePromptOf(item.step),
+    producesPath: item.produces,
+    extraArgs: item.extra_args,
+    timeout: item.timeout,
+  };
 }
 
 /** Throw if `name` is already declared in this scope; otherwise record it.

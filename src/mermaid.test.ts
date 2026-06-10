@@ -366,6 +366,28 @@ flow:
     );
     expect(out).toMatch(/n\d+\{\{"human_gate \(interactive\): ac-writer"\}\}/);
   });
+
+  it('renders a general interactive gate (agent omitted) with the human-gate label', () => {
+    // A general gate has no persona, so the node label falls back to
+    // 'human-gate' rather than asserting an agent name that does not exist.
+    const out = emitMermaid(
+      spec(`
+pipeline: p
+cli: claude
+inputs: [x]
+flow:
+  - step: pre
+    input: $x
+    produces: out.md
+    bind: o
+  - human_gate:
+      interactive: true
+      input: $o
+      prompt: "iterate"
+`),
+    );
+    expect(out).toMatch(/n\d+\{\{"human_gate \(interactive\): human-gate"\}\}/);
+  });
 });
 
 describe('emitMermaid — foreach', () => {
@@ -622,5 +644,163 @@ flow:
     expect(out).toMatch(/unresolved_n\d+_nonexistent\{\{"⚠ unresolved: \$nonexistent"\}\}/);
     // And the back-edge points at the sink, not nothing.
     expect(out).toMatch(/n\d+ -\.->\|retry × 2\| unresolved_n\d+_nonexistent/);
+  });
+});
+
+describe('emitMermaid — inline-agent step node label', () => {
+  // An inline `step:` (object form) labels its node by its required `name`.
+  // The node id stays a fresh `n*` Mermaid identifier; only the visible label
+  // changes.
+
+  it('labels an inline step by its name', () => {
+    const out = emitMermaid(
+      spec(`
+pipeline: p
+cli: claude
+inputs: [x]
+flow:
+  - step:
+      prompt: Review the diff.
+      name: my-reviewer
+    input: $x
+    produces: out.md
+`),
+    );
+    expect(out).toMatch(/n\d+\(\["my-reviewer"\]\)/);
+  });
+
+  it('labels an inline step by its name even when a bind is set', () => {
+    // The bind is the emit-internal variable name; the label is always the
+    // inline agent's required `name`.
+    const out = emitMermaid(
+      spec(`
+pipeline: p
+cli: claude
+inputs: [x]
+flow:
+  - step:
+      prompt: Review the diff.
+      name: my-reviewer
+    bind: stepBind
+    input: $x
+    produces: out.md
+`),
+    );
+    expect(out).toMatch(/n\d+\(\["my-reviewer"\]\)/);
+    expect(out).not.toMatch(/n\d+\(\["stepBind"\]\)/);
+  });
+
+  it('labels an inline parallel child by its name', () => {
+    const out = emitMermaid(
+      spec(`
+pipeline: p
+cli: claude
+inputs: []
+flow:
+  - parallel:
+      - step: persona-a
+        produces: a.md
+      - step:
+          prompt: Do the thing.
+          name: par-doer
+        produces: b.md
+`),
+    );
+    expect(out).toMatch(/n\d+\(\["par-doer"\]\)/);
+  });
+});
+
+describe('emitMermaid — inline-agent review_loop writer/reviewer node labels', () => {
+  // The writer node and a single reviewer node label by the resolved agent
+  // reference: a persona name is itself; an inline agent is its required
+  // `name`. Persona names route through agentLabel unchanged.
+
+  it('labels an inline writer node by its name', () => {
+    const out = emitMermaid(
+      spec(`
+pipeline: p
+cli: claude
+inputs: [x]
+flow:
+  - review_loop:
+      writer:
+        prompt: Draft the spec.
+        name: drafter
+      reviewer: r
+      input: $x
+      writer_produces: out.md
+      reviewer_produces: rev.json
+      verdict_field: status
+`),
+    );
+    expect(out).toMatch(/n\d+\(\["drafter"\]\)/);
+  });
+
+  it('labels an inline writer node by its name even when the loop has a bind', () => {
+    // The loop bind is the emit-internal variable; the writer label is always
+    // the inline agent's required `name`.
+    const out = emitMermaid(
+      spec(`
+pipeline: p
+cli: claude
+inputs: [x]
+flow:
+  - review_loop:
+      writer:
+        prompt: Draft the spec.
+        name: drafter
+      reviewer: r
+      input: $x
+      bind: spec
+      writer_produces: out.md
+      reviewer_produces: rev.json
+      verdict_field: status
+`),
+    );
+    expect(out).toMatch(/n\d+\(\["drafter"\]\)/);
+    expect(out).not.toMatch(/n\d+\(\["spec"\]\)/);
+  });
+
+  it('labels an inline single reviewer node by its name', () => {
+    const out = emitMermaid(
+      spec(`
+pipeline: p
+cli: claude
+inputs: [x]
+flow:
+  - review_loop:
+      writer: w
+      reviewer:
+        prompt: Audit the draft.
+        name: auditor
+      input: $x
+      writer_produces: out.md
+      reviewer_produces: rev.json
+      verdict_field: status
+`),
+    );
+    expect(out).toMatch(/n\d+\(\["auditor"\]\)/);
+  });
+
+  it('renders persona writer + reviewer node labels byte-identically', () => {
+    // Parity guard: persona names resolve to themselves through agentLabel, so
+    // the node labels match the pre-retype output.
+    const out = emitMermaid(
+      spec(`
+pipeline: p
+cli: claude
+inputs: [x]
+flow:
+  - review_loop:
+      writer: w
+      reviewer: r
+      input: $x
+      writer_produces: out.md
+      reviewer_produces: rev.json
+      verdict_field: status
+`),
+    );
+    expect(out).toMatch(/n\d+\(\["w"\]\)/);
+    expect(out).toMatch(/n\d+\(\["r"\]\)/);
   });
 });

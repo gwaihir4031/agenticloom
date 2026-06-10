@@ -8,6 +8,8 @@ import {
   isBranch,
   isAggregate,
   isForeach,
+  agentLabel,
+  inlinePromptOf,
 } from '../types.js';
 import { ProducerInfo } from './scope.js';
 import { inputExprFor, multiInputExpr, computeInputPaths, substituteBindRefs } from './inputs.js';
@@ -161,8 +163,19 @@ export function emitRunAgentExpr(
     // check," matching the absence).
     inputPathsClause = inputPaths.length > 0 ? `, inputPaths: [${inputPaths.join(', ')}]` : '';
   }
-  const optsExpr = `{ cli: CLI, agentDirs: AGENT_DIRS, extraArgs: ${extraArgsExpr}${timeoutExpr}${inputPathsClause} }`;
-  return `await runAgent(${JSON.stringify(it.step)}, ${inputExpr}${producesArg}, ${optsExpr})`;
+  // Resolve the agent reference to its runAgent name. A persona name emits
+  // byte-identically to a plain string (JSON.stringify of the string). An
+  // inline agent emits its required `name` and ALWAYS carries `inlinePrompt:`
+  // in opts: the baked prompt is the agent's identity, independent of any
+  // promptOverride (which only swaps the INPUT arg). Routing every re-emit
+  // (on_fail retry via buildRetryBody, parallel-child re-fire via
+  // emitParallelRetry) through here re-bakes the inline prompt automatically.
+  const agentArg = JSON.stringify(agentLabel(it.step));
+  const inlinePrompt = inlinePromptOf(it.step);
+  const inlinePromptClause =
+    inlinePrompt !== undefined ? `, inlinePrompt: ${JSON.stringify(inlinePrompt)}` : '';
+  const optsExpr = `{ cli: CLI, agentDirs: AGENT_DIRS, extraArgs: ${extraArgsExpr}${timeoutExpr}${inputPathsClause}${inlinePromptClause} }`;
+  return `await runAgent(${agentArg}, ${inputExpr}${producesArg}, ${optsExpr})`;
 }
 
 /** Build the inner field lines of an `await aggregate({...})` emit — the

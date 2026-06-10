@@ -168,7 +168,7 @@ export function compile(yamlPath: string, options?: CompileOptions): string {
   const projectLayer = AGENT_DIR_DEFAULTS[spec.cli].project;
   const globalLayer = AGENT_DIR_DEFAULTS[spec.cli].global;
   const agentDirs: string[] = [projectLayer, globalLayer];
-  validateAgentFilesExist(spec.flow, agentDirs, `pipeline '${spec.pipeline}'`);
+  validateAgentFilesExist(spec.flow, agentDirs, spec.cli, `pipeline '${spec.pipeline}'`);
 
   // Allocate the top-level scope ID before declaring inputs so inputs
   // and the top-level emit body share the same `declarationScope` —
@@ -245,7 +245,7 @@ export function compile(yamlPath: string, options?: CompileOptions): string {
       '  ',
       scope,
       fresh,
-      agentDirs,
+      { agentDirs, cli: spec.cli },
       nextScopeId,
       topScopeId,
       undefined,

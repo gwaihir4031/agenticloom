@@ -46,13 +46,12 @@ vi.mock('readline', () => ({
   },
 }));
 
-// Mock fs — reviewLoop reads writer/reviewer persona files via
-// loadAgentSystemPrompt and reads the reviewer verdict via readAgentFile.
-// fakeFs is keyed both by bare filename (the literal YAML form) and
-// absolute (the absolutified bind form).
-let promptFileBody: string | null = '---\nname: test-agent\n---\nSYS PROMPT BODY\n';
+// Mock fs — runAgent verifies each writer/reviewer produces-path exists after
+// its spawn, and readAgentFile reads the reviewer's verdict from disk; fakeFs
+// backs both, keyed by bare filename (the literal YAML form) and absolute (the
+// absolutified bind form). Persona files are resolved by the CLI via --agent,
+// not read by the runtime, so none are mocked here.
 let fakeFs: Record<string, string> = {};
-const looksLikePersonaPath = (p: string): boolean => /(?:^|\/)agents\/[^/]+\.md$/.test(p);
 const fakeFsLookup = (p: string): string | undefined => {
   if (Object.prototype.hasOwnProperty.call(fakeFs, p)) return fakeFs[p];
   if (nodePath.isAbsolute(p)) {
@@ -63,12 +62,8 @@ const fakeFsLookup = (p: string): string | undefined => {
 };
 
 vi.mock('fs', () => ({
-  existsSync: (p: string) => {
-    if (looksLikePersonaPath(p)) return promptFileBody !== null;
-    return fakeFsLookup(p) !== undefined;
-  },
+  existsSync: (p: string) => fakeFsLookup(p) !== undefined,
   readFileSync: (p: string, _enc?: string) => {
-    if (looksLikePersonaPath(p)) return promptFileBody ?? '';
     const v = fakeFsLookup(p);
     if (v !== undefined) return v;
     const err = new Error(
@@ -84,7 +79,6 @@ beforeEach(async () => {
   spawnMock.mockReset();
   readlineCloseMock.mockReset();
   questionAnswer = 'y';
-  promptFileBody = '---\nname: test-agent\n---\nSYS PROMPT BODY\n';
   fakeFs = {};
 });
 
@@ -369,6 +363,191 @@ describe('reviewLoop (single reviewer)', () => {
     expect(thrown!.message).toMatch(
       /^review_loop 'spec-writer' exhausted max_iters=2 without approval\.\nLast verdict: 'needs_revision' \(verdict_field='status', approve_when='pass'\)\.$/,
     );
+  });
+
+  // Inline-agent prompt threading. When an inline prompt is set for an agent,
+  // its runAgent spawns take the inline form — no `--agent` flag, and the baked
+  // prompt is prepended to the task with a blank-line/---/blank-line separator
+  // (the separator is runAgent's inline contract; asserted here to prove THIS
+  // prompt was threaded, not merely that some inline form was taken). When unset, the
+  // agent keeps the persona form (`--agent <label>`). The writer field lives on
+  // both opts shapes; the reviewer field is single-only.
+  it('spawns the writer inline (no --agent, prompt prepended) when writerInlinePrompt is set', async () => {
+    installFileWritingSpawnMock([JSON.stringify({ status: 'pass' })]);
+    const { reviewLoop } = await import('./review-loop.js');
+    await reviewLoop({
+      kind: 'single',
+      cli: 'claude',
+      agentDirs: ['.claude/agents/', '~/.claude/agents/'],
+      defaultExtraArgs: [],
+      writer: 'w',
+      reviewer: 'r',
+      writerInlinePrompt: 'WRITER INLINE IDENTITY',
+      input: 'input',
+      writerProduces: 'out.md',
+      reviewerProduces: 'review.json',
+      verdictField: 'status',
+    });
+    const writerArgs = spawnMock.mock.calls[0][1] as string[];
+    expect(writerArgs).not.toContain('--agent');
+    const writerPrompt = writerArgs.find((a: string) => a.includes('Write your artifact'));
+    expect(writerPrompt).toMatch(/^WRITER INLINE IDENTITY\n\n---\n\n/);
+  });
+
+  it('spawns the writer with --agent <writer label> when writerInlinePrompt is undefined', async () => {
+    installFileWritingSpawnMock([JSON.stringify({ status: 'pass' })]);
+    const { reviewLoop } = await import('./review-loop.js');
+    await reviewLoop({
+      kind: 'single',
+      cli: 'claude',
+      agentDirs: ['.claude/agents/', '~/.claude/agents/'],
+      defaultExtraArgs: [],
+      writer: 'w',
+      reviewer: 'r',
+      // writerInlinePrompt omitted — persona form.
+      input: 'input',
+      writerProduces: 'out.md',
+      reviewerProduces: 'review.json',
+      verdictField: 'status',
+    });
+    const writerArgs = spawnMock.mock.calls[0][1] as string[];
+    const agentIdx = writerArgs.indexOf('--agent');
+    expect(agentIdx).toBeGreaterThanOrEqual(0);
+    expect(writerArgs[agentIdx + 1]).toBe('w');
+  });
+
+  it('spawns the reviewer inline (no --agent, prompt prepended) when reviewerInlinePrompt is set', async () => {
+    installFileWritingSpawnMock([JSON.stringify({ status: 'pass' })]);
+    const { reviewLoop } = await import('./review-loop.js');
+    await reviewLoop({
+      kind: 'single',
+      cli: 'claude',
+      agentDirs: ['.claude/agents/', '~/.claude/agents/'],
+      defaultExtraArgs: [],
+      writer: 'w',
+      reviewer: 'r',
+      reviewerInlinePrompt: 'REVIEWER INLINE IDENTITY',
+      input: 'input',
+      writerProduces: 'out.md',
+      reviewerProduces: 'review.json',
+      verdictField: 'status',
+    });
+    const reviewerArgs = spawnMock.mock.calls[1][1] as string[];
+    expect(reviewerArgs).not.toContain('--agent');
+    const reviewerPrompt = reviewerArgs.find((a: string) => a.includes('Write your review to:'));
+    expect(reviewerPrompt).toMatch(/^REVIEWER INLINE IDENTITY\n\n---\n\n/);
+  });
+
+  it('spawns the reviewer with --agent <reviewer label> when reviewerInlinePrompt is undefined', async () => {
+    installFileWritingSpawnMock([JSON.stringify({ status: 'pass' })]);
+    const { reviewLoop } = await import('./review-loop.js');
+    await reviewLoop({
+      kind: 'single',
+      cli: 'claude',
+      agentDirs: ['.claude/agents/', '~/.claude/agents/'],
+      defaultExtraArgs: [],
+      writer: 'w',
+      reviewer: 'r',
+      // reviewerInlinePrompt omitted — persona form.
+      input: 'input',
+      writerProduces: 'out.md',
+      reviewerProduces: 'review.json',
+      verdictField: 'status',
+    });
+    const reviewerArgs = spawnMock.mock.calls[1][1] as string[];
+    const agentIdx = reviewerArgs.indexOf('--agent');
+    expect(agentIdx).toBeGreaterThanOrEqual(0);
+    expect(reviewerArgs[agentIdx + 1]).toBe('r');
+  });
+
+  it('threads writerInlinePrompt through the revise writer spawn, not just the initial draft', async () => {
+    // The inline prompt rides the shared writerOpts bag, so every writer spawn
+    // (initial draft + each revise) takes the inline form, not only the first.
+    installFileWritingSpawnMock([
+      JSON.stringify({ status: 'fail' }),
+      JSON.stringify({ status: 'pass' }),
+    ]);
+    const { reviewLoop } = await import('./review-loop.js');
+    await reviewLoop({
+      kind: 'single',
+      cli: 'claude',
+      agentDirs: ['.claude/agents/', '~/.claude/agents/'],
+      defaultExtraArgs: [],
+      writer: 'w',
+      reviewer: 'r',
+      writerInlinePrompt: 'WRITER INLINE IDENTITY',
+      input: 'input',
+      writerProduces: 'out.md',
+      reviewerProduces: 'review.json',
+      verdictField: 'status',
+      maxIters: 3,
+    });
+    // calls: 0 writer(initial), 1 reviewer(fail), 2 writer(revise), 3 reviewer(pass).
+    const reviseArgs = spawnMock.mock.calls[2][1] as string[];
+    expect(reviseArgs).not.toContain('--agent');
+    const revisePrompt = reviseArgs.find((a: string) => a.includes('Write your artifact'));
+    expect(revisePrompt).toMatch(/^WRITER INLINE IDENTITY\n\n---\n\nYour previous draft is at:/);
+  });
+
+  it('threads reviewerInlinePrompt through the second reviewer spawn, not just iteration 1', async () => {
+    // The reviewer twin of the writer-revise test above: the inline prompt
+    // rides the shared reviewerOpts bag, so the post-revise re-review spawn
+    // takes the inline form too, not only the iteration-1 review.
+    installFileWritingSpawnMock([
+      JSON.stringify({ status: 'fail' }),
+      JSON.stringify({ status: 'pass' }),
+    ]);
+    const { reviewLoop } = await import('./review-loop.js');
+    await reviewLoop({
+      kind: 'single',
+      cli: 'claude',
+      agentDirs: ['.claude/agents/', '~/.claude/agents/'],
+      defaultExtraArgs: [],
+      writer: 'w',
+      reviewer: 'r',
+      reviewerInlinePrompt: 'REVIEWER INLINE IDENTITY',
+      input: 'input',
+      writerProduces: 'out.md',
+      reviewerProduces: 'review.json',
+      verdictField: 'status',
+      maxIters: 3,
+    });
+    // calls: 0 writer(initial), 1 reviewer(fail), 2 writer(revise), 3 reviewer(pass).
+    const secondReviewerArgs = spawnMock.mock.calls[3][1] as string[];
+    expect(secondReviewerArgs).not.toContain('--agent');
+    const secondReviewerPrompt = secondReviewerArgs.find((a: string) =>
+      a.includes('Write your review to:'),
+    );
+    expect(secondReviewerPrompt).toMatch(/^REVIEWER INLINE IDENTITY\n\n---\n\n/);
+  });
+
+  it('routes the writer and reviewer inline prompts to their own spawns without cross-leak', async () => {
+    installFileWritingSpawnMock([JSON.stringify({ status: 'pass' })]);
+    const { reviewLoop } = await import('./review-loop.js');
+    await reviewLoop({
+      kind: 'single',
+      cli: 'claude',
+      agentDirs: ['.claude/agents/', '~/.claude/agents/'],
+      defaultExtraArgs: [],
+      writer: 'w',
+      reviewer: 'r',
+      writerInlinePrompt: 'WRITER-ONLY-IDENTITY',
+      reviewerInlinePrompt: 'REVIEWER-ONLY-IDENTITY',
+      input: 'input',
+      writerProduces: 'out.md',
+      reviewerProduces: 'review.json',
+      verdictField: 'status',
+    });
+    const writerPrompt = (spawnMock.mock.calls[0][1] as string[]).find((a: string) =>
+      a.includes('Write your artifact'),
+    );
+    const reviewerPrompt = (spawnMock.mock.calls[1][1] as string[]).find((a: string) =>
+      a.includes('Write your review to:'),
+    );
+    expect(writerPrompt).toMatch(/^WRITER-ONLY-IDENTITY\n\n---\n\n/);
+    expect(writerPrompt).not.toContain('REVIEWER-ONLY-IDENTITY');
+    expect(reviewerPrompt).toMatch(/^REVIEWER-ONLY-IDENTITY\n\n---\n\n/);
+    expect(reviewerPrompt).not.toContain('WRITER-ONLY-IDENTITY');
   });
 });
 
@@ -660,5 +839,64 @@ describe('reviewLoop (compound reviewer)', () => {
     expect(thrown!.message).toMatch(
       /^review_loop 'spec-writer' exhausted max_iters=2 without approval\.\nLast verdict: 'needs_revision' \(approve_when='pass'\); the verdict was extracted by the inner aggregate\.$/,
     );
+  });
+
+  it('spawns the compound writer inline (no --agent, prompt prepended) when writerInlinePrompt is set', async () => {
+    // writerInlinePrompt is read off the union, so the compound shape honors it
+    // too — the writer spawn drops `--agent` and prepends the baked prompt.
+    const subflow = vi.fn(async () => ({
+      verdict: 'pass',
+      reviewerPaths: [{ agentName: 'r1', path: 'r1.json' }],
+    }));
+    const { reviewLoop } = await import('./review-loop.js');
+    await reviewLoop({
+      kind: 'compound',
+      cli: 'claude',
+      agentDirs: ['.claude/agents/', '~/.claude/agents/'],
+      defaultExtraArgs: [],
+      writer: 'w',
+      writerInlinePrompt: 'COMPOUND WRITER INLINE',
+      reviewerSubflow: subflow,
+      input: 'input',
+      writerProduces: 'out.md',
+    });
+    const writerArgs = spawnMock.mock.calls[0][1] as string[];
+    expect(writerArgs).not.toContain('--agent');
+    const writerPrompt = writerArgs.find((a: string) => a.includes('Write your artifact'));
+    expect(writerPrompt).toMatch(/^COMPOUND WRITER INLINE\n\n---\n\n/);
+  });
+
+  it('threads writerInlinePrompt through the compound revise writer spawn, not just the initial draft', async () => {
+    // The compound revise call site is a distinct runAgent invocation from the
+    // initial draft; it reuses the same shared writerOpts bag, so the revise
+    // spawn must take the inline form too (no --agent, baked prompt prepended to
+    // the compound revise prompt).
+    let subCallCount = 0;
+    const subflow = vi.fn(async () => {
+      subCallCount++;
+      return {
+        verdict: subCallCount === 1 ? 'fail' : 'pass',
+        reviewerPaths: [{ agentName: 'r', path: 'r.json' }],
+      };
+    });
+    const { reviewLoop } = await import('./review-loop.js');
+    await reviewLoop({
+      kind: 'compound',
+      cli: 'claude',
+      agentDirs: ['.claude/agents/', '~/.claude/agents/'],
+      defaultExtraArgs: [],
+      writer: 'w',
+      writerInlinePrompt: 'COMPOUND WRITER INLINE',
+      reviewerSubflow: subflow,
+      input: 'input',
+      writerProduces: 'out.md',
+      maxIters: 3,
+    });
+    // Compound mode spawns only the writer (the reviewer is the subflow
+    // callback): call 0 is the initial draft, call 1 is the revise.
+    const reviseArgs = spawnMock.mock.calls[1][1] as string[];
+    expect(reviseArgs).not.toContain('--agent');
+    const revisePrompt = reviseArgs.find((a: string) => a.includes('Your previous draft is at:'));
+    expect(revisePrompt).toMatch(/^COMPOUND WRITER INLINE\n\n---\n\nYour previous draft is at:/);
   });
 });

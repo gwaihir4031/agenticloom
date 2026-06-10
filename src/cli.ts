@@ -501,20 +501,22 @@ export function sweepOrphanTmpDirs(): void {
 }
 
 /** Rewrite the emitted `const AGENT_DIRS = [...]` line so the project
- *  layer (index 0) is absolute when the source path was relative. The
- *  compiled pipeline is spawned with `cwd = workspaceCwd`, so the
- *  runtime's `loadAgentSystemPrompt` would resolve a relative project-
- *  layer dir against the workspace dir (where no `.claude/agents/`
- *  exists). Compile-time validation already ran from invocation cwd
- *  and confirmed every referenced persona file is present somewhere in
- *  the layered set; pinning the project literal to its absolute form
- *  preserves that resolution after the chdir.
+ *  layer (index 0) is absolute when the source path was relative.
+ *  `AGENT_DIRS` is authored against the invocation cwd, but the compiled
+ *  pipeline is spawned with `cwd = workspaceCwd`; pinning the project
+ *  literal to its absolute form keeps the emitted constant a correct,
+ *  cwd-independent reference across that chdir. The runtime itself
+ *  delegates persona resolution to the CLI's `--agent` and no longer reads
+ *  `AGENT_DIRS` (see `RunAgentOpts.agentDirs` in `runtime/agent.ts`); the
+ *  live reader of this rewrite is the `loom run` trip-wire below, which
+ *  asserts every entry is absolute-or-tilde before spawning. Compile-time
+ *  validation separately confirmed (from the invocation cwd, before this
+ *  emit exists) that every referenced persona file is present.
  *
- *  The global layer (`~/.<cli>/agents/`, index 1) stays tilde-prefixed
- *  — `expandHome` in the runtime handles tilde expansion lazily, which
- *  keeps the compiled `.ts` portable across machines (the global layer
- *  is anchored to whatever home dir the script eventually runs against,
- *  not the build machine's home dir).
+ *  The global layer (`~/.<cli>/agents/`, index 1) stays tilde-prefixed,
+ *  which keeps the compiled `.ts` portable across machines (the global
+ *  layer is anchored to whatever home dir the script eventually runs
+ *  against, not the build machine's home dir).
  *
  *  Convention: `agentDirs[0]` is the project layer (cwd-relative or
  *  absolute), and entries 1+ are home-relative (tilde-prefixed). The
@@ -524,7 +526,7 @@ export function sweepOrphanTmpDirs(): void {
  *
  *  Pass-through cases for the project layer:
  *   - Absolute path (`/home/me/agents/` or `C:\...\` on Windows).
- *   - `~/`-prefixed path — the runtime's `expandHome` handles it.
+ *   - `~/`-prefixed path — already home-anchored, so it is left as-is.
  *   - Anything not matching the expected emit shape — passes through
  *     unchanged.
  *
@@ -551,8 +553,8 @@ export function absolutifyAgentDirsInEmit(emit: string, invocationCwd: string): 
     }
     const rewritten = parsed.map((dir, idx) => {
       // Only the project layer (index 0) needs absolutification.
-      // The global layer (index 1+) is tilde-prefixed and handled by
-      // the runtime's expandHome.
+      // The global layer (index 1+) is tilde-prefixed and stays portable
+      // across machines.
       if (idx !== 0) return dir;
       if (path.isAbsolute(dir) || dir.startsWith('~/') || dir === '~') return dir;
       const absolute = path.resolve(invocationCwd, dir);
@@ -808,10 +810,11 @@ export async function main(): Promise<number> {
     // runtime so resolution works regardless of the user's cwd / node_modules
     // layout (the cwd is theirs, not loom's, and may have no loom in scope).
     // Also rewrite the emitted `AGENT_DIRS` constant's project layer to
-    // absolute, since the child runs from the workspace cwd and the runtime
-    // resolves a relative layer entry relative to whatever cwd it's invoked
-    // in. The global (tilde-prefixed) entry stays portable and is expanded
-    // by the runtime's expandHome at lookup time.
+    // absolute: it is authored against the invocation cwd, but the child is
+    // spawned from the workspace cwd, so pinning it absolute keeps the
+    // constant a correct reference after that chdir. The trip-wire below
+    // then asserts every entry is absolute-or-tilde before spawning. The
+    // global (tilde-prefixed) entry stays portable across machines.
     const emit = compile(pipelinePath, { runtimeImport: runtimeUrl, resumeFrom });
     const rewritten = absolutifyAgentDirsInEmit(emit, invocationCwd);
     // Trip-wire: absolutifyAgentDirsInEmit silently no-ops if the regex

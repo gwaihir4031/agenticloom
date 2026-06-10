@@ -3,7 +3,6 @@ import * as path from 'path';
 import * as readline from 'readline';
 import { StringDecoder } from 'string_decoder';
 import { formatDuration, activateAltScreen, deactivateAltScreen } from '../RollingWindow.js';
-import { loadAgentSystemPrompt } from './agent.js';
 import type { AgentCli } from './agent.js';
 
 /** Options for the interactive `human_gate` mode. The plain y/N mode takes
@@ -23,11 +22,12 @@ export interface InteractiveGateOpts {
    *  and `copilot`; the schema enum enforces this at compile time. */
   cli: AgentCli;
   /** Layered persona-file lookup directories — project layer first, global
-   *  layer second. Each entry is a directory; the agent's persona file
-   *  resolves to the first existing `<dir>/<agent>.md` (with `~/` expanded
-   *  per dir at lookup time). Layer convention is owned by the compiler
-   *  (see `src/compile/index.ts:AGENT_DIR_DEFAULTS` for per-cli paths);
-   *  the runtime is a dumb iterator. */
+   *  layer second. Layer convention is owned by the compiler (see
+   *  `src/compile/index.ts:AGENT_DIR_DEFAULTS` for per-cli paths). Persona
+   *  resolution at spawn time is delegated to the cli via `--agent <name>`
+   *  (the cli resolves the persona file itself), so the runtime no longer
+   *  reads this list; it remains in the options bag because the compiler
+   *  still emits it. */
   agentDirs: string[];
   /** Extra args to pass to the spawned cli. Compile emits the pipeline-level
    *  `DEFAULT_EXTRA_ARGS` constant here by default; the YAML can override
@@ -37,9 +37,12 @@ export interface InteractiveGateOpts {
    *  this interface because the runtime always receives a concrete array
    *  from the emit; the optional/fallback shape lives at compile time. */
   extraArgs: string[];
-  /** Agent name; resolves to the first `<dir>/<agent>.md` that exists when
-   *  iterating `agentDirs` in order. */
-  agent: string;
+  /** Persona agent name. When present, passed to the cli as `--agent
+   *  <name>`, which resolves the matching persona file natively. Omitted
+   *  for a general gate: the cli spawns with all tools and no persona, and
+   *  the gate `prompt:` alone is the agent's task. Log, error, and collapse
+   *  messages fall back to the 'human-gate' label when this is absent. */
+  agent?: string;
   /** Path to the artifact the agent edits. Loom auto-appends "The artifact
    *  is at: <input>" to the agent's initial message. Absolute or relative;
    *  relative paths are resolved against the runtime cwd (the workspace
@@ -80,20 +83,30 @@ async function confirmYesOrThrow(): Promise<void> {
   if (!/^y/i.test(ans)) throw new Error('Pipeline halted by human gate.');
 }
 
+/** Display label for a gate's agent: the persona name, else the fixed
+ *  general-gate label. Single owner of the fallback so the announcement,
+ *  TTY/exit errors, and the scrollback collapse tag can never disagree on
+ *  the gate's identity. */
+const gateAgentLabel = (agent: string | undefined): string => agent ?? 'human-gate';
+
 /** Spawn the interactive agent session for a `human_gate` with
- *  `interactive: true`. Branches by cli: claude takes `--agent <name>` plus
- *  the initial message as a positional argv; copilot takes
- *  `-i/--interactive <prompt>` — the analog of claude's argv form.
- *  copilot has no per-agent system-prompt flag, so the agent's persona
- *  body (frontmatter-stripped, with `---` separator) is baked into the
- *  `--interactive` prompt value before the loom-built initial message.
+ *  `interactive: true`. A persona gate (`opts.agent` present) delegates
+ *  persona resolution natively via `--agent <name>` on both clis: claude
+ *  takes `--agent <name>` plus the initial message as a positional argv;
+ *  copilot takes `--agent <name>` plus `-i/--interactive <prompt>` to open
+ *  its TUI with the prompt pre-loaded as turn 1. Neither path bakes the
+ *  persona body into the prompt — the cli reads the persona file itself, so
+ *  the prompt value is the loom-built initial message alone. A general gate
+ *  (`opts.agent` omitted) drops `--agent` on both clis and runs with all
+ *  tools and no persona; the gate prompt alone is the agent's task.
  *
  *  TTY check first: if stdin or stdout isn't a TTY (e.g. CI, piped script,
  *  non-`-it` docker), throw with a clear remediation — silent fall-back
  *  would hide the gate's purpose, and compile-time refusal would add
  *  friction to every local run. */
 async function spawnInteractiveAgent(opts: InteractiveGateOpts): Promise<void> {
-  requireTTYForHumanGate(`interactive mode for agent '${opts.agent}'`);
+  const agentLabel = gateAgentLabel(opts.agent);
+  requireTTYForHumanGate(`interactive mode for agent '${agentLabel}'`);
 
   // The full initial message: loom-built prompt + the auto-appended path
   // pointer the spec calls for. Emitted exactly once (the compile-side YAML
@@ -115,21 +128,7 @@ async function spawnInteractiveAgent(opts: InteractiveGateOpts): Promise<void> {
   const inputAbs = path.resolve(opts.input);
   const initialMessage = `${opts.prompt}\n\nThe artifact is at: ${inputAbs}`;
 
-  // Pre-build the copilot --interactive prompt BEFORE spawn. If
-  // `readFileSync` were to throw (EACCES/EIO etc.) inside the Promise
-  // executor below, the spawn would have already succeeded — the
-  // synchronous reject would leave the child alive and the SIGINT handler
-  // registered. Building here moves any FS failure to a point where no
-  // child or handler exists yet.
-  const copilotInteractivePrompt: string | null =
-    opts.cli === 'copilot'
-      ? (() => {
-          const sys = loadAgentSystemPrompt(opts.agent, opts.agentDirs);
-          return (sys === '' ? '' : `${sys}\n\n---\n\n`) + initialMessage;
-        })()
-      : null;
-
-  console.log(`⏸  HUMAN GATE: interactive session with ${opts.agent}`);
+  console.log(`⏸  HUMAN GATE: interactive session with ${agentLabel}`);
 
   // Stderr capture for both clis. The alt-screen wrapper below makes the
   // spawned cli's chat output ephemeral — but it also wipes any diagnostic
@@ -184,29 +183,34 @@ async function spawnInteractiveAgent(opts: InteractiveGateOpts): Promise<void> {
       // `process.cwd()` fallback covers direct runtime imports (tests,
       // external embedders) where no cli was in the loop.
       const childCwd = process.env.LOOM_INVOCATION_CWD ?? process.cwd();
+      // `--agent <name>` is emitted only for a persona gate; a general gate
+      // (`opts.agent` omitted) drops it so the cli spawns with all tools and
+      // no persona, the gate prompt alone driving the session.
+      const agentFlag = opts.agent !== undefined ? ['--agent', opts.agent] : [];
       if (opts.cli === 'claude') {
         // `claude --agent <name> "<prompt>"` opens the REPL with the prompt
-        // pre-loaded as the first user turn. extra_args from the pipeline
-        // header flow through. Stdio shape rationale lives in the
-        // stderr-capture block above.
-        const args = ['--agent', opts.agent, ...opts.extraArgs, initialMessage];
+        // pre-loaded as the first user turn (a general gate omits `--agent`).
+        // extra_args from the pipeline header flow through. Stdio shape
+        // rationale lives in the stderr-capture block above.
+        const args = [...agentFlag, ...opts.extraArgs, initialMessage];
         child = spawn('claude', args, { stdio: ['inherit', 'inherit', 'pipe'], cwd: childCwd });
       } else if (opts.cli === 'copilot') {
-        // `copilot --interactive <prompt>` opens the TUI with the prompt
-        // pre-loaded as turn 1 — the documented analog of claude's
-        // `--agent <name> "<msg>"` shape. The persona body is baked into
-        // the prompt value (copilot has no per-agent system-prompt flag).
-        // Piping to stdin enters non-interactive scripting mode
-        // (equivalent to `-p <text>`) and exits without opening the TUI,
-        // which is why the TUI must be opened via the `--interactive`
-        // flag instead.
-        const args = [...opts.extraArgs, '--interactive', copilotInteractivePrompt!];
+        // `copilot --agent <name> --interactive <prompt>` resolves the persona
+        // natively (the same delegation as the claude path) and opens the TUI
+        // with the prompt pre-loaded as turn 1 (a general gate omits `--agent`
+        // and opens the TUI with all tools). The `--interactive` value is the
+        // loom-built initial message alone — the cli reads the persona file
+        // itself, so nothing is baked in. Piping to stdin enters
+        // non-interactive scripting mode (equivalent to `-p <text>`) and exits
+        // without opening the TUI, which is why the TUI must be opened via the
+        // `--interactive` flag instead.
+        const args = [...agentFlag, ...opts.extraArgs, '--interactive', initialMessage];
         child = spawn('copilot', args, { stdio: ['inherit', 'inherit', 'pipe'], cwd: childCwd });
       } else {
         // Unreachable — schema enum is ['claude', 'copilot']. Defensive only.
         reject(
           new Error(
-            `human_gate interactive mode: cli '${opts.cli}' is not supported (agent '${opts.agent}'). ` +
+            `human_gate interactive mode: cli '${opts.cli}' is not supported (agent '${agentLabel}'). ` +
               `Loom currently supports 'claude' and 'copilot'. (Schema validation should have caught this.)`,
           ),
         );
@@ -272,7 +276,7 @@ async function spawnInteractiveAgent(opts: InteractiveGateOpts): Promise<void> {
       child.on('exit', (code) => {
         process.off('SIGINT', onSigint);
         if (interruptedBySigint) {
-          reject(new Error(`${opts.cli} (${opts.agent}) interrupted by Ctrl-C`));
+          reject(new Error(`${opts.cli} (${agentLabel}) interrupted by Ctrl-C`));
           return;
         }
         if (code === 0 || code === null) {
@@ -283,7 +287,7 @@ async function spawnInteractiveAgent(opts: InteractiveGateOpts): Promise<void> {
           resolve();
           return;
         }
-        reject(new Error(`${opts.cli} (${opts.agent}) exited with code ${code}`));
+        reject(new Error(`${opts.cli} (${agentLabel}) exited with code ${code}`));
       });
     });
   } finally {
@@ -310,12 +314,14 @@ async function spawnInteractiveAgent(opts: InteractiveGateOpts): Promise<void> {
  *    prompt on stdin. Used for the "pause for external work" case where the
  *    user has done something outside the pipeline and wants to confirm.
  *
- *  - Interactive (`humanGate({ interactive: true, agent, input, prompt })`):
- *    spawns the named agent with the artifact path injected into its initial
+ *  - Interactive (`humanGate({ interactive: true, input, prompt, agent? })`):
+ *    spawns an agent with the artifact path injected into its initial
  *    message; the user types directly to the agent (who can edit the
  *    artifact in place). On REPL exit, falls through to the y/N confirm.
  *    The file is the artifact; the agent's edits flow downstream because
- *    the bind points at the same path. */
+ *    the bind points at the same path. `agent` is optional: present →
+ *    a named persona (`--agent <name>`); omitted → a general gate spawned
+ *    with all tools, the gate prompt alone as the agent's task. */
 export async function humanGate(opts?: InteractiveGateOpts): Promise<void> {
   const start = Date.now();
   if (opts !== undefined && opts.interactive === true) {
@@ -332,7 +338,7 @@ export async function humanGate(opts?: InteractiveGateOpts): Promise<void> {
   const elapsed = formatDuration(Date.now() - start);
   const tag =
     opts?.interactive === true
-      ? `human gate (${opts.agent} · ${elapsed})`
+      ? `human gate (${gateAgentLabel(opts.agent)} · ${elapsed})`
       : `human gate (${elapsed})`;
   if (process.stdout.isTTY) {
     const linesToClear = opts?.interactive === true ? 2 : 1;

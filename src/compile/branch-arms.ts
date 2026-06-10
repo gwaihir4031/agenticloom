@@ -7,6 +7,7 @@ import {
   isParallel,
   isBranch,
   isAggregate,
+  agentLabel,
 } from '../types.js';
 import { ProducerInfo, BranchConsumability } from './scope.js';
 
@@ -59,14 +60,17 @@ export function classifyArmTerminal(
       // than emitting a `return undefined` that masks the bug.
       if (last.bind === undefined) {
         throw new Error(
-          `Internal compile error: classifyArmTerminal saw a terminal step '${last.step}' ` +
+          `Internal compile error: classifyArmTerminal saw a terminal step '${agentLabel(last.step)}' ` +
             `with produces: but no bind. The arm emit should have synthesized a fresh bind ` +
             `before classifying.`,
         );
       }
       return { fileBound: true, kind: 'file', path: last.bind };
     }
-    return { fileBound: false, itemLabel: `step '${last.step}'` };
+    return {
+      fileBound: false,
+      itemLabel: `step '${agentLabel(last.step)}'`,
+    };
   }
 
   if (isReviewLoop(last)) {

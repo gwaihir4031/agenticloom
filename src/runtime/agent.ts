@@ -1,6 +1,5 @@
 import { spawn } from 'child_process';
-import { existsSync, readFileSync } from 'fs';
-import { homedir } from 'os';
+import { existsSync } from 'fs';
 import * as path from 'path';
 import * as readline from 'readline';
 import { RollingWindow } from '../RollingWindow.js';
@@ -23,76 +22,6 @@ export class HaltPipelineError extends Error {
   }
 }
 
-/** Expand a leading `~/` to the user's home directory. Used by layered
- *  agent resolution and any other path that may be tilde-prefixed.
- *  Pass-through for already-absolute paths and non-tilde-prefixed input. */
-function expandHome(p: string): string {
-  if (p === '~') return homedir();
-  if (p.startsWith('~/')) return path.join(homedir(), p.slice(2));
-  return p;
-}
-
-/** Probe a layered list of directories for `<dir>/<leaf>`. Returns the
- *  first existing file path (with `~/` expanded). The `attempted` list
- *  contains every path probed up to and including the match (so on a
- *  successful hit the list has 1-to-N entries, not the full N); on
- *  miss it contains every dir in the input. Callers use `attempted` to
- *  build layer-aware error messages.
- *
- *  Not exported; `loadAgentSystemPrompt` is the only consumer in
- *  agent.ts. The compile-side `validateAgentFilesExist` defines its
- *  own local copy (see `src/compile/validation.ts`) — same pattern as `expandHome`,
- *  which is also duplicated to avoid a cross-module import that would
- *  pull runtime's heavy deps into the compile module. */
-function firstExisting(
-  dirs: string[],
-  leaf: string,
-): { found: string | null; attempted: string[] } {
-  const attempted: string[] = [];
-  for (const dir of dirs) {
-    const candidate = expandHome(path.posix.join(dir, leaf));
-    attempted.push(candidate);
-    if (existsSync(candidate)) return { found: candidate, attempted };
-  }
-  return { found: null, attempted };
-}
-
-/** Load and frontmatter-strip the agent's persona file from the first
- *  layer that contains it. `agentDirs` is the layered list (project
- *  first, global second); the runtime iterates in order and returns the
- *  body of the first match (empty string when the matched file is
- *  frontmatter-only — the bare-cli agent convention). Loud-fail listing
- *  all attempted paths when none exists — compile-time validation
- *  should have caught this, so a runtime miss is a contract violation
- *  (usually a stale `dist/`; try `npm run build`). */
-export function loadAgentSystemPrompt(agentName: string, agentDirs: string[]): string {
-  const { found, attempted } = firstExisting(agentDirs, `${agentName}.md`);
-  if (found === null) {
-    throw new Error(
-      `agent '${agentName}' persona file is missing at any of:\n` +
-        attempted.map((p) => `  ${p}`).join('\n') +
-        '\n' +
-        `This should have been caught at compile time — the runtime contract is broken. ` +
-        `If running loom from source, try \`npm run build\` to refresh dist/.`,
-    );
-  }
-  let sys: string;
-  try {
-    sys = readFileSync(found, 'utf-8');
-  } catch (e: any) {
-    // Wrap with layer context so a permission/IO error names the matched
-    // layer's path explicitly (with two layers, the bare Node error
-    // string would leave the user guessing which layer matched).
-    throw new Error(`agent '${agentName}' matched at ${found} but read failed: ${e?.message ?? e}`);
-  }
-  // Strip Claude Code subagent YAML frontmatter — metadata, not prompt
-  // content, and its leading '---' would make `claude -p` treat the
-  // whole arg as a CLI flag.
-  const fm = sys.match(/^---\r?\n[\s\S]*?\r?\n---\r?\n/);
-  if (fm) sys = sys.slice(fm[0].length);
-  return sys.trim();
-}
-
 export type AgentCli = 'claude' | 'copilot';
 export type AgentRole = 'step' | 'reviewer' | 'writer';
 
@@ -103,15 +32,27 @@ export type AgentRole = 'step' | 'reviewer' | 'writer';
 export interface RunAgentOpts {
   cli: AgentCli;
   /** Layered persona-file lookup directories — project layer first, global
-   *  layer second. Each entry is a directory; the agent's persona file
-   *  resolves to the first existing `<dir>/<agent>.md` (with `~/` expanded
-   *  per dir at lookup time). Layer convention is owned by the compiler
-   *  (see `src/compile/index.ts:AGENT_DIR_DEFAULTS` for per-cli paths);
-   *  the runtime is a dumb iterator. Must be non-empty; each entry must
-   *  be absolute or
-   *  tilde-prefixed by the time the spawned child runs (`loom run`
-   *  asserts this via the trip-wire in cli.ts). */
+   *  layer second. Layer convention is owned by the compiler (see
+   *  `src/compile/index.ts:AGENT_DIR_DEFAULTS` for per-cli paths). Persona
+   *  resolution at spawn time is delegated to the CLI via `--agent` (the CLI
+   *  walks up from the spawn cwd to find the persona file), so the runtime no
+   *  longer reads this list itself; it remains in the options bag because the
+   *  compiler still emits it. Must be non-empty; each entry must be absolute
+   *  or tilde-prefixed by the time the spawned child runs (`loom run` asserts
+   *  this via the trip-wire in cli.ts). */
   agentDirs: string[];
+  /** When set, runAgent takes the inline (general-agent) spawn form: there is
+   *  no persona file to delegate to, so this baked prompt IS the agent's
+   *  identity. It is prepended to the task (the `prompt` arg) with a
+   *  blank-line/---/blank-line separator to form the `-p` value, and the spawn
+   *  passes NO `--agent` flag (the agent runs with all tools). Its PRESENCE is
+   *  the discriminator: undefined selects the persona form, where the CLI
+   *  resolves `<name>`'s persona file via `--agent` and the `-p` value is the
+   *  task alone. Compile bakes the YAML inline `prompt:` here as static text;
+   *  persona steps leave it undefined. Must be non-empty when set — runAgent
+   *  throws on `''` (an empty identity is an emit/embedding bug; the YAML
+   *  boundary already enforces min-length 1 on InlineAgent.prompt). */
+  inlinePrompt?: string;
   extraArgs: string[];
   role?: AgentRole;
   /** Per-call timeout in milliseconds. On expiry the child receives SIGTERM
@@ -216,6 +157,36 @@ You MAY include additional top-level fields (e.g. "reviewer_notes").
 Do not emit prose to stdout; the verdict lives in the JSON file's "status" field.`;
 }
 
+/** Extract the agent names claude reported loading from an init event's
+ *  `agents` field. Returns null when the field is absent or not an array
+ *  (older CLIs don't emit it), so callers skip enforcement entirely rather
+ *  than conflating "unknown roster" with "empty roster". Entries are the
+ *  frontmatter `name:` values — bare strings today, tolerated as
+ *  `{name: string}` objects too; anything else counts as `unreadable`
+ *  rather than being silently dropped, so the rejection message can tell
+ *  "claude loaded nothing" apart from "claude reshaped the roster entries
+ *  and we can't read them anymore". */
+function loadedAgentNames(agents: unknown): { names: string[]; unreadable: number } | null {
+  if (!Array.isArray(agents)) return null;
+  const names: string[] = [];
+  let unreadable = 0;
+  for (const entry of agents) {
+    if (typeof entry === 'string') {
+      names.push(entry);
+    } else if (typeof entry === 'object' && entry !== null) {
+      const n = (entry as Record<string, unknown>).name;
+      if (typeof n === 'string') {
+        names.push(n);
+      } else {
+        unreadable++;
+      }
+    } else {
+      unreadable++;
+    }
+  }
+  return { names, unreadable };
+}
+
 /** Cap on the rolling stderr failure tail, in UTF-16 code units. The reader
  *  retains only the trailing slice so a runaway-chatty child can't blow memory,
  *  while a failed run still carries the death reason on its reject message. Same
@@ -237,12 +208,27 @@ const STDERR_TAIL_CAP = 8 * 1024;
  *  override, REPLACED not merged so per-step overrides can drop every
  *  default cleanly) + optional per-call timeout.
  *
+ *  Two spawn forms, discriminated by `opts.inlinePrompt`:
+ *  - Persona (inlinePrompt undefined): the CLI resolves `<name>`'s persona
+ *    file natively via `--agent <name>` (added to the argv) and applies its
+ *    declared `tools:`; the `-p` value is the task alone.
+ *  - Inline (inlinePrompt defined): there is no persona file, so the baked
+ *    prompt is the agent's identity — prepended to the task with a
+ *    blank-line/---/blank-line separator — and no `--agent` is passed, so the
+ *    agent runs with all tools.
+ *  In both forms `name` stays the display/log label, and the role postscript
+ *  (step/writer/reviewer) is appended to the assembled `-p` value when
+ *  `producesPath` is set.
+ *
  *  Claude path: spawns with `--output-format stream-json --verbose
  *  --include-partial-messages`; the line handler routes each JSONL event
  *  through `formatStreamEvent` for display and captures the final `result`
  *  event's telemetry (turns, cost, stop_reason) for the RollingWindow's
  *  collapse line. Text deltas accumulate into the trimmed return value when
- *  `producesPath` is unset.
+ *  `producesPath` is unset. Persona spawns additionally audit the init
+ *  event's agent roster: claude exits 0 when `--agent <name>` doesn't
+ *  resolve, so a roster that omits the requested name rejects mid-stream
+ *  (child killed) instead of letting the run continue persona-less.
  *
  *  Copilot path: streams raw stdout line-by-line through the same
  *  RollingWindow; the trimmed accumulator is the return value when
@@ -294,6 +280,20 @@ export async function runAgent(
         `pass a defined string. A failure here points to a broken compile-time substitution.`,
     );
   }
+  // Empty-string inlinePrompt is representable but invalid: PRESENCE selects
+  // the inline spawn form, so '' would spawn an agent whose entire identity is
+  // the blank-line/---/blank-line separator plus the task, with the persona
+  // path (and its tools: scoping) silently skipped. The YAML boundary rejects
+  // it (InlineAgent.prompt min-length 1), so a value reaching here is an emit
+  // or embedding bug, not author error. (`=== ''` alone is the defined-but-
+  // empty test — undefined never strict-equals the empty string.)
+  if (opts.inlinePrompt === '') {
+    throw new Error(
+      `agent '${name}': opts.inlinePrompt is an empty string — the inline spawn form requires ` +
+        `a non-empty baked prompt (the compile layer guarantees this; an empty value means an ` +
+        `emit or embedding bug). Omit inlinePrompt entirely for a persona spawn.`,
+    );
+  }
   // Pre-spawn input check: validate every declared input path exists on disk
   // BEFORE spawning; fail-fast on first miss. Catches resumed-run pre-cursor
   // file gaps and silent-empty / wrong-path drift on every run.
@@ -303,8 +303,13 @@ export async function runAgent(
     }
   }
   const role = opts.role ?? 'step';
-  const sys = loadAgentSystemPrompt(name, opts.agentDirs);
-  let fullPrompt = sys === '' ? prompt : `${sys}\n\n---\n\n${prompt}`;
+  // Persona vs inline fork (see RunAgentOpts.inlinePrompt). Persona: the CLI
+  // resolves <name>'s persona file natively via --agent (added to the argv
+  // below), so the -p value is the task alone. Inline: no persona file exists,
+  // so the baked prompt is the agent's identity, prepended to the task with the
+  // blank-line/---/blank-line separator.
+  let fullPrompt =
+    opts.inlinePrompt === undefined ? prompt : `${opts.inlinePrompt}\n\n---\n\n${prompt}`;
 
   // Absolutify the produces path against the runtime's cwd (the workspace dir
   // set up by `cli.ts` via `cwd: workspaceCwd`). The bind value returned below
@@ -328,10 +333,28 @@ export async function runAgent(
     else fullPrompt += stepPostscript(producesPathAbs);
   }
 
+  // Guard the assembled -p value's head at the spawn boundary: both CLIs
+  // parse a dash-leading -p value as a flag, so the child would die with an
+  // "unknown option" error naming the flag instead of the YAML field. Compile
+  // rejects dash-leading InlineAgent / human_gate / revise_with prompts, but
+  // on the persona form the head is the task itself, which can be a
+  // dash-leading literal `input:` or a runtime pipeline-input value
+  // (`loom run p.yaml x=--flag`) that compile cannot see.
+  if (fullPrompt.startsWith('-')) {
+    throw new Error(
+      `agent '${name}': the assembled prompt begins with '-', which the CLI would parse as a ` +
+        `flag instead of the -p value. The step's input or prompt must begin with a word — ` +
+        `see the dash-leading prompt rules in PRIMITIVES.md.`,
+    );
+  }
+
   // Per-CLI base argv. Claude gets stream-JSON args so we can render its
   // progress in real time; copilot has no equivalent flag set, so it streams
-  // raw stdout. extraArgs from per-step override (or pipeline default) flow
-  // through verbatim.
+  // raw stdout. Persona agents append `--agent <name>` so the CLI resolves the
+  // persona file and its tools natively; inline agents add nothing (their
+  // identity rides in the -p value above and they run with all tools).
+  // extraArgs from per-step override (or pipeline default) flow through verbatim.
+  const agentDelegation: string[] = opts.inlinePrompt === undefined ? ['--agent', name] : [];
   const base: Record<AgentCli, [string, string[]]> = {
     claude: [
       'claude',
@@ -344,9 +367,10 @@ export async function runAgent(
         'stream-json',
         '--verbose',
         '--include-partial-messages',
+        ...agentDelegation,
       ],
     ],
-    copilot: ['copilot', ['-p', fullPrompt, '--allow-all-tools', '--no-color']],
+    copilot: ['copilot', ['-p', fullPrompt, '--allow-all-tools', '--no-color', ...agentDelegation]],
   };
   const [bin, args] = base[opts.cli];
   const finalArgs = [...args, ...opts.extraArgs];
@@ -489,6 +513,54 @@ export async function runAgent(
           if (typeof evt !== 'object' || evt === null || Array.isArray(evt)) {
             window.feed(line + '\n');
             return;
+          }
+          // Persona-spawn init audit. claude (observed on 2.1.170) exits 0
+          // with no stderr when `--agent <name>` doesn't resolve — it silently
+          // runs the prompt persona-less with the full default toolset — so
+          // the exit handler alone can never catch a dropped persona. The init
+          // event's `agents` array names every agent claude actually loaded;
+          // when the requested name is missing from a present roster, kill the
+          // child and reject before the persona-less run does real work.
+          // Enforcement is gated on the roster being a real array (older CLIs
+          // that omit it stay tolerated) and on the persona spawn form (inline
+          // spawns pass no --agent, so there is nothing to verify). On a
+          // passing roster this branch falls through so the init event still
+          // reaches the display paths below.
+          if (evt.type === 'system' && evt.subtype === 'init' && opts.inlinePrompt === undefined) {
+            const loaded = loadedAgentNames(evt.agents);
+            if (loaded !== null && !loaded.names.includes(name)) {
+              if (settled) return;
+              settled = true;
+              cleanup();
+              child.kill('SIGTERM');
+              window.finish('error');
+              // Roster rendering distinguishes three rejection shapes: readable
+              // names present → list them (unreadable extras stay omitted, as
+              // pinned by the garbage-rendering test); nothing readable but
+              // entries present → claude likely reshaped the roster format, so
+              // say that instead of the misleading '(none)'; truly empty →
+              // '(none)'.
+              const roster =
+                loaded.names.length > 0
+                  ? `[${loaded.names.join(', ')}]`
+                  : loaded.unreadable > 0
+                    ? `(roster had ${loaded.unreadable} entr${loaded.unreadable === 1 ? 'y' : 'ies'} ` +
+                      `in an unrecognized shape — a claude update may have changed the init event format)`
+                    : '(none)';
+              reject(
+                new Error(
+                  `claude did not load agent '${name}' — the spawn would run persona-less. ` +
+                    `claude registers agents by their frontmatter 'name:' field, resolving ` +
+                    `.claude/agents/ from the spawn cwd up to the git root, plus ` +
+                    `~/.claude/agents. Check the persona file's 'name:' frontmatter matches ` +
+                    `'${name}', that the file is visible from ${agentCwd}, and that its ` +
+                    `frontmatter includes a description: (claude refuses to register agents ` +
+                    `without one). ` +
+                    `Agents claude loaded: ${roster}.`,
+                ),
+              );
+              return;
+            }
           }
           if (evt.type === 'result') {
             window.setResult({

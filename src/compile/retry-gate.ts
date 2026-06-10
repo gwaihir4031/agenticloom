@@ -10,6 +10,7 @@ import {
   isBranch,
   isAggregate,
   isForeach,
+  agentLabel,
 } from '../types.js';
 import { getBindName } from './flow-helpers.js';
 import { ProducerInfo } from './scope.js';
@@ -21,6 +22,7 @@ import { RetryGateInfo, StepRetryGate, AggregateRetryGate, normalizeReviseWith }
  *  this reader) a compile error rather than a runtime mystery. */
 export function readStepRetryGate(item: StepItemT): StepRetryGate | undefined {
   if (item.on_fail === undefined) return undefined;
+  const resolved = agentLabel(item.step);
   return {
     kind: 'step',
     retryFrom: item.on_fail.retry_from,
@@ -29,8 +31,8 @@ export function readStepRetryGate(item: StepItemT): StepRetryGate | undefined {
     verdictField: item.on_fail.verdict_field,
     approveWhen: item.on_fail.approve_when ?? 'pass',
     reviseWith: normalizeReviseWith(item.on_fail.revise_with),
-    label: `step '${item.step}'`,
-    gateAgentLabel: item.step,
+    label: `step '${resolved}'`,
+    gateAgentLabel: resolved,
   };
 }
 

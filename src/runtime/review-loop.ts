@@ -22,6 +22,14 @@ export interface SingleReviewerOpts {
   defaultExtraArgs: string[];
   writer: string;
   reviewer: string;
+  /** Optional inline (general-agent) baked prompts for the writer and reviewer.
+   *  When a field is set, that agent's `runAgent` calls take the inline spawn
+   *  form — the baked prompt becomes the agent's identity and no `--agent` flag
+   *  is passed (see `RunAgentOpts.inlinePrompt`); undefined selects the persona
+   *  form, where the CLI resolves the `writer`/`reviewer` label's persona file
+   *  via `--agent`. The label string stays the display/log name in both forms. */
+  writerInlinePrompt?: string;
+  reviewerInlinePrompt?: string;
   input: string;
   maxIters?: number;
   approveWhen?: string;
@@ -41,6 +49,11 @@ export interface CompoundReviewerOpts {
   agentDirs: string[];
   defaultExtraArgs: string[];
   writer: string;
+  /** Optional inline (general-agent) baked prompt for the writer — semantics
+   *  match `SingleReviewerOpts.writerInlinePrompt`. The compound reviewer is a
+   *  subflow (its inner reviewer steps carry their own inline handling), so
+   *  this shape has no single-reviewer inline-prompt field. */
+  writerInlinePrompt?: string;
   reviewerSubflow: (draftPath: string) => Promise<{
     verdict: string;
     reviewerPaths: ReviewerPathInfo[];
@@ -101,12 +114,23 @@ export async function reviewLoop(opts: ReviewLoopOpts): Promise<string> {
     agentDirs: opts.agentDirs,
     extraArgs: opts.defaultExtraArgs,
     role: 'writer',
+    // `writerInlinePrompt` is present on both opts shapes, so it reads off the
+    // union directly. A string routes every writer spawn (initial draft +
+    // revises) through runAgent's inline form; undefined leaves the persona
+    // `--agent` form untouched.
+    inlinePrompt: opts.writerInlinePrompt,
   };
   const reviewerOpts: RunAgentOpts = {
     cli: opts.cli,
     agentDirs: opts.agentDirs,
     extraArgs: opts.defaultExtraArgs,
     role: 'reviewer',
+    // `reviewerInlinePrompt` lives only on the single-reviewer shape — the
+    // compound reviewer is a subflow with no single reviewer — so narrow on the
+    // discriminator before reading it (a union read would not typecheck).
+    // reviewerOpts is consumed only in the single-reviewer branch below, where
+    // this resolves to the field.
+    inlinePrompt: isCompoundOpts(opts) ? undefined : opts.reviewerInlinePrompt,
   };
 
   let draft = await runAgent(opts.writer, opts.input, writerPath, writerOpts);

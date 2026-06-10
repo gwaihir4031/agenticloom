@@ -1,4 +1,4 @@
-import { FlowItem, StepItemT, isStep, isReviewLoop, isParallel } from '../types.js';
+import { FlowItem, StepItemT, isStep, isReviewLoop, isParallel, agentLabel } from '../types.js';
 import { escapeTplLit } from './flow-helpers.js';
 import { ProducerInfo, wrapPathRef } from './scope.js';
 
@@ -23,12 +23,12 @@ export function collectReviewerPaths(subflow: FlowItem[]): ReviewerPathSlot[] {
   function walk(item: FlowItem): void {
     if (isStep(item)) {
       if (item.produces && item.bind) {
-        out.push({ agentName: item.step, bindName: item.bind });
+        out.push({ agentName: agentLabel(item.step), bindName: item.bind });
       }
     } else if (isReviewLoop(item)) {
       const r = item.review_loop;
       if (r.bind) {
-        out.push({ agentName: r.writer, bindName: r.bind });
+        out.push({ agentName: agentLabel(r.writer), bindName: r.bind });
       }
     } else if (isParallel(item)) {
       for (const child of item.parallel) walk(child);
