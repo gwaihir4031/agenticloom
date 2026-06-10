@@ -126,11 +126,28 @@ export const InlineAgent = z.strictObject({
   }),
 });
 
+/** A persona-name reference (the string arm of `AgentRef`, and
+ *  `human_gate.agent`). `.min(1)`: an empty name would otherwise surface
+ *  later as a baffling "no persona file exists at `.claude/agents/.md`"
+ *  probe error. The no-leading-dash rule mirrors the prompt guards: the
+ *  name becomes the spawn's `--agent <name>` argv value, and the CLI
+ *  parses a dash-leading value as a flag. */
+export const PersonaName = z
+  .string()
+  .min(1, {
+    error:
+      'agent name must be non-empty (where the agent is optional, omit the field entirely instead)',
+  })
+  .refine((s) => !s.startsWith('-'), {
+    error:
+      "agent name must not start with '-' — it becomes the spawn's --agent value, which the CLI parses as a flag",
+  });
+
 /** An agent reference — the value of `step:` / `review_loop.writer` /
  *  `review_loop.reviewer`. A bare string is a persona name (the CLI loads its
  *  agent file); an object is an inline general agent. The arms are distinct JSON
  *  types, so the union is unambiguous. */
-export const AgentRef = z.union([z.string(), InlineAgent]);
+export const AgentRef = z.union([PersonaName, InlineAgent]);
 
 // Hand-written interface types — mirror the Zod schema shapes so they can be
 // used as static return types of type-guard predicates (e.g. `isStep(item): i
@@ -350,7 +367,7 @@ export const ReviewLoopItemBody = z.strictObject({
       // intentional. The refines below treat string and inline-object alike as
       // the single-reviewer arm (verdict via reviewer_produces/verdict_field);
       // only the array arm is the subflow.
-      reviewer: z.union([z.string(), InlineAgent, z.lazy(() => z.array(FlowItemSchema))]),
+      reviewer: z.union([PersonaName, InlineAgent, z.lazy(() => z.array(FlowItemSchema))]),
       input: ValueExpr,
       max_iters: z.number().int().positive().optional(),
       approve_when: z.string().min(1).optional(),
@@ -397,7 +414,7 @@ export const HumanGateItemBody = z.strictObject({
       // interactive set; when omitted the gate uses the pipeline default.
       // See refines below.
       interactive: z.literal(true).optional(),
-      agent: z.string().optional(),
+      agent: PersonaName.optional(),
       input: ValueExpr.optional(),
       // `.min(1)`: for a general gate (agent: omitted) the prompt is the
       // agent's ENTIRE task — an empty string would spawn a persona-less

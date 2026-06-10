@@ -435,6 +435,24 @@ describe('HumanGateItem schema', () => {
     }
   });
 
+  it("rejects agent: '' (omit the field entirely for a general gate)", () => {
+    const result = HumanGateItem.safeParse({
+      human_gate: { interactive: true, agent: '', input: '$x', prompt: 'iterate' },
+    });
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error.issues[0].message).toMatch(/omit the field/);
+    }
+  });
+
+  it('rejects a dash-leading gate agent name', () => {
+    expect(
+      HumanGateItem.safeParse({
+        human_gate: { interactive: true, agent: '-a', input: '$x', prompt: 'iterate' },
+      }).success,
+    ).toBe(false);
+  });
+
   it('rejects interactive: false (literal-true-only)', () => {
     const result = HumanGateItem.safeParse({
       human_gate: { interactive: false },
@@ -1537,6 +1555,33 @@ describe('AgentRef schema', () => {
     // The object arm is InlineAgent, not "any object": a prompt-less object
     // fails the string arm and the InlineAgent arm both.
     expect(AgentRef.safeParse({ name: 'x' }).success).toBe(false);
+  });
+
+  it('rejects an empty persona-name string', () => {
+    // Without min(1) this surfaced later as "no persona file exists at
+    // `.claude/agents/.md`" — a probe error that never names the real problem.
+    expect(AgentRef.safeParse('').success).toBe(false);
+    expect(StepItem.safeParse({ step: '' }).success).toBe(false);
+  });
+
+  it('rejects a dash-leading persona name (it becomes the --agent argv value)', () => {
+    const result = StepItem.safeParse({ step: '-dash' });
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error.issues.some((i) => /--agent value/.test(i.message))).toBe(true);
+    }
+    expect(
+      ReviewLoopItem.safeParse({
+        review_loop: {
+          writer: '-w',
+          reviewer: 'r',
+          input: '$x',
+          writer_produces: 'out.md',
+          reviewer_produces: 'review.json',
+          verdict_field: 'status',
+        },
+      }).success,
+    ).toBe(false);
   });
 });
 

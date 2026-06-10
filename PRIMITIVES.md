@@ -53,7 +53,9 @@ omitted-agent general gate, below).
 | **Persona name** | `step: code-reviewer`    | The CLI loads the native agent file and enforces its frontmatter `tools:`. | Whatever the persona declares. |
 | **Inline agent** | `step: { prompt, name }` | No file; loom bakes `prompt:` into the spawn as the task.                  | **All tools** (unscoped).      |
 
-**Persona name (string).** loom delegates identity and tool scope to the
+**Persona name (string).** Must be non-empty and must not start with
+`-` (the name becomes the spawn's `--agent` argv value, which the CLI
+would parse as a flag). loom delegates identity and tool scope to the
 CLI's native `--agent <name>` flag — it does NOT read or inline the
 persona body. The CLI loads the agent file (via the layered discovery in
 the README), enforces its `tools:`, and loom appends only its role
