@@ -16,7 +16,13 @@ import { validateReviewerSubflow, validatePath, validatePersonaFile } from './va
 // module graph free of runtime/agent.ts's heavy deps (same posture as
 // validation.ts, whose helpers this file already shares).
 import type { AgentCli } from '../runtime/agent.js';
-import { ProducerInfo, declare, registerPath, mergeChildIntoParent } from './scope.js';
+import {
+  ProducerInfo,
+  declare,
+  registerPath,
+  mergeChildIntoParent,
+  stepProducerInfo,
+} from './scope.js';
 import { inputExprFor, checkConsume, collectReviewerPaths, substituteBindRefs } from './inputs.js';
 import {
   readStepRetryGate,
@@ -112,22 +118,7 @@ export function emitPreCursorItem(
   if (isStep(item)) {
     if (item.bind === undefined) return [];
     const resolvedLabel = agentLabel(item.step);
-    declare(
-      item.bind,
-      {
-        kind: 'step',
-        fileBound: item.produces !== undefined,
-        location: `step '${resolvedLabel}'`,
-        fileField: 'produces',
-        agentName: resolvedLabel,
-        inlinePrompt: inlinePromptOf(item.step),
-        producesPath: item.produces,
-        extraArgs: item.extra_args,
-        timeout: item.timeout,
-      },
-      scope,
-      currentScopeId,
-    );
+    declare(item.bind, stepProducerInfo(item, `step '${resolvedLabel}'`), scope, currentScopeId);
     const rhs = item.produces ? JSON.stringify(item.produces) : 'undefined';
     return [`${pad}const ${item.bind} = ${rhs};`];
   }
@@ -187,15 +178,7 @@ export function emitPreCursorItem(
         declare(
           child.bind,
           {
-            kind: 'step',
-            fileBound: child.produces !== undefined,
-            location: `step '${childLabel}' (hoisted from parallel)`,
-            fileField: 'produces',
-            agentName: childLabel,
-            inlinePrompt: inlinePromptOf(child.step),
-            producesPath: child.produces,
-            extraArgs: child.extra_args,
-            timeout: child.timeout,
+            ...stepProducerInfo(child, `step '${childLabel}' (hoisted from parallel)`),
             hoistedFromParallel: true,
           },
           scope,
@@ -543,22 +526,7 @@ export function emit(
         validatePath(item.produces, 'produces', stepLabel);
         registerPath(item.produces, 'produces', stepLabel, pathScope);
       }
-      declare(
-        v,
-        {
-          kind: 'step',
-          fileBound: item.produces !== undefined,
-          location: stepLabel,
-          fileField: 'produces',
-          agentName: resolvedLabel,
-          inlinePrompt: inlinePromptOf(item.step),
-          producesPath: item.produces,
-          extraArgs: item.extra_args,
-          timeout: item.timeout,
-        },
-        scope,
-        currentScopeId,
-      );
+      declare(v, stepProducerInfo(item, stepLabel), scope, currentScopeId);
 
       // retry_from: compile-time scope resolution. Resolved AFTER declaring
       // the gate's own bind so self-reference is detectable, and BEFORE
