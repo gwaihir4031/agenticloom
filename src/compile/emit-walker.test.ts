@@ -5019,6 +5019,246 @@ flow:
       /retry: async \(currentVerdict\) => \{[\s\S]+runAgent\("tdd",[\s\S]*?inlinePrompt: "Write the tests\."/,
     );
   });
+
+  it('re-fires inline parallel children with name + inlinePrompt inside an aggregate-gate retry callback', () => {
+    // Aggregate-gate carve-out: the retry callback re-fires the feeding
+    // parallel's children via emitParallelRetry. Inline children must re-fire
+    // by their inline name with the prompt re-baked — a bare-label re-fire
+    // would degrade the retry to a persona `--agent <name>` lookup with no
+    // file, and the runtime roster audit would kill the pipeline mid-recovery.
+    const yamlPath = setupFixture({
+      agents: ['writer'],
+      yaml: `
+pipeline: p
+cli: claude
+inputs: [x]
+flow:
+  - step: writer
+    input: $x
+    produces: out.md
+    bind: writerOut
+  - parallel:
+      - step:
+          prompt: Scan for security issues.
+          name: sec-scanner
+        input: $writerOut
+        produces: sec.json
+        bind: sec
+      - step:
+          prompt: Scan for api drift.
+          name: api-scanner
+        input: $writerOut
+        produces: api.json
+        bind: api
+  - aggregate:
+      inputs: { security: $sec, api: $api }
+      verdict_field: status
+      bind: overall
+      retry_from: writerOut
+      revise_with:
+        prompt: Retry.
+`,
+    });
+    const emitted = compile(yamlPath);
+    // Slice the retry callback (same anchors as the carve-out test in
+    // retry-gate.test.ts) so the assertions pin the RE-FIRE emit, not the
+    // main-pass parallel emit, which carries the same call shape.
+    const startIdx = emitted.indexOf('retry: async (currentVerdict) => {');
+    expect(startIdx).toBeGreaterThan(-1);
+    const endMarker = 'return overall;';
+    const endIdx = emitted.indexOf(endMarker, startIdx);
+    expect(endIdx).toBeGreaterThan(-1);
+    const retryBody = emitted.slice(startIdx, endIdx + endMarker.length);
+    // Line-bound matches ([^\n]*, not [\s\S]*?): the gate re-exec inside the
+    // same callback re-emits rewriteProducerFiles closures that ALSO carry
+    // these inlinePrompt strings, so a multi-line lazy match would pass even
+    // with the re-fire lines stripped of their prompts.
+    expect(retryBody).toMatch(
+      /sec = await runAgent\("sec-scanner",[^\n]*inlinePrompt: "Scan for security issues\."/,
+    );
+    expect(retryBody).toMatch(
+      /api = await runAgent\("api-scanner",[^\n]*inlinePrompt: "Scan for api drift\."/,
+    );
+  });
+
+  it('re-bakes the inline prompt in the rewrite closure for a pre-cursor parallel-hoisted producer (--resume-from)', () => {
+    // Variant of the pre-cursor test above where the inline producer is a
+    // PARALLEL CHILD: under --resume-from the aggregate's rewrite closure is
+    // fed by emitPreCursorItem's hoist-mirror declare (a separate declare
+    // site from the top-level-step one), which must carry the inline child's
+    // agentName + inlinePrompt for the parse-retry re-fire to stay inline.
+    const yamlPath = setupFixture({
+      agents: ['sibling', 'mid-agent'],
+      yaml: `
+pipeline: p
+cli: claude
+inputs: [x]
+flow:
+  - parallel:
+      - step:
+          prompt: Produce the artifact.
+          name: producer
+        input: $x
+        produces: x.json
+        bind: r
+      - step: sibling
+        input: $x
+        produces: sib.md
+        bind: sibOut
+  - step: mid-agent
+    input: $x
+    produces: mid.json
+    bind: mid
+  - aggregate:
+      inputs: { r: $r, mid: $mid }
+      verdict_field: status
+`,
+    });
+    const emitted = compile(yamlPath, { resumeFrom: 'mid' });
+    // The pre-cursor parallel is rewritten to hoist-mirror path literals —
+    // no spawn for the inline child outside the rewrite closure.
+    expect(emitted).toMatch(/const r = "x\.json";/);
+    expect(emitted).not.toMatch(/await parallel\(/);
+    // ...yet the closure still re-fires by the inline label with the baked
+    // prompt, mirroring the main-pass closure shape.
+    expect(emitted).toMatch(
+      /rewriteProducerFiles:[\s\S]+runAgent\("producer", correctivePrompt, "x\.json"/,
+    );
+    expect(emitted).toMatch(/rewriteProducerFiles:[\s\S]+inlinePrompt: "Produce the artifact\."/);
+  });
+
+  it('re-fires an inline on_fail gate by name + inlinePrompt in the gate re-exec line', () => {
+    // The gate ITSELF is the inline step. The retry callback's final line
+    // re-invokes the gate (`return await runAgent(...)`) — that re-exec must
+    // carry the inline name + re-baked prompt. The gate's label must also
+    // resolve through agentLabel everywhere it interpolates (gateAgent:, the
+    // revise scaffold's "gate '<label>' rejected" line) — an unresolved
+    // AgentRef object would stringify as "[object Object]".
+    const yamlPath = setupFixture({
+      agents: ['fbmaker', 'tdd'],
+      yaml: `
+pipeline: p
+cli: claude
+inputs: [x]
+flow:
+  - step: fbmaker
+    input: $x
+    produces: fb.md
+    bind: fb
+  - step: tdd
+    input: $x
+    produces: tests.json
+    bind: tests
+  - step:
+      prompt: Review the tests and emit a verdict.
+      name: gatekeeper
+    input: $tests
+    produces: review.json
+    bind: review
+    on_fail:
+      verdict_field: status
+      retry_from: tests
+      revise_with:
+        inputs: [$fb]
+`,
+    });
+    const emitted = compile(yamlPath);
+    // Slice from the retry callback so the assertion pins the gate RE-EXEC
+    // (the `return await runAgent(...)` line), not the main-pass gate emit.
+    const retryIdx = emitted.indexOf('retry: async (currentVerdict)');
+    expect(retryIdx).toBeGreaterThan(-1);
+    const retryPass = emitted.slice(retryIdx);
+    expect(retryPass).toMatch(
+      /return await runAgent\("gatekeeper",[^\n]*inlinePrompt: "Review the tests and emit a verdict\."/,
+    );
+    // The retryGateZone opts carry the resolved inline name as the gate label.
+    expect(emitted).toContain('gateAgent: "gatekeeper"');
+    // No interpolation site (gateAgent:, revise scaffold, error labels) may
+    // stringify the raw inline AgentRef object.
+    expect(emitted).not.toContain('[object Object]');
+  });
+
+  it('re-fires an inline intermediate zone member with name + inlinePrompt in the retry callback', () => {
+    // The inline step sits BETWEEN the retry_from target and the gate — the
+    // intermediate-member branch of buildRetryBody (not the target's
+    // prompt-override branch, not the gate re-exec) re-emits it, and must
+    // re-bake the inline prompt like every other re-emit path.
+    const yamlPath = setupFixture({
+      agents: ['first', 'gate'],
+      yaml: `
+pipeline: p
+cli: claude
+inputs: [x]
+flow:
+  - step: first
+    input: $x
+    produces: a.md
+    bind: firstOut
+  - step:
+      prompt: Transform the draft.
+      name: mid-inline
+    input: $firstOut
+    produces: b.md
+    bind: midOut
+  - step: gate
+    input: $midOut
+    produces: g.json
+    bind: gateOut
+    on_fail:
+      verdict_field: status
+      retry_from: firstOut
+      revise_with:
+        prompt: Address the feedback.
+`,
+    });
+    const emitted = compile(yamlPath);
+    // Slice from the retry callback so the assertion pins the intermediate
+    // member's RE-FIRE, not its main-pass emit (same call shape).
+    const retryIdx = emitted.indexOf('retry: async (currentVerdict)');
+    expect(retryIdx).toBeGreaterThan(-1);
+    const retryPass = emitted.slice(retryIdx);
+    expect(retryPass).toMatch(
+      /midOut = await runAgent\("mid-inline",[^\n]*inlinePrompt: "Transform the draft\."/,
+    );
+  });
+
+  it('re-bakes the inline prompt in the rewrite closure for a parallel-hoisted producer (main pass)', () => {
+    // Variant of the main-pass rewrite test above where the inline producer
+    // is a PARALLEL CHILD: the aggregate's rewrite closure is fed by the
+    // hoisted copy of the child's ProducerInfo (the parallel emit pulls it
+    // back out of the child scope), which must preserve agentName +
+    // inlinePrompt across the hoist. The hoist's placeholder fallback can't
+    // fire for step children — resultNameFor pre-assigns their bind, so the
+    // child scope always holds the real info under the destructured name.
+    const yamlPath = setupFixture({
+      agents: ['sibling'],
+      yaml: `
+pipeline: p
+cli: claude
+inputs: [x]
+flow:
+  - parallel:
+      - step:
+          prompt: Produce the artifact.
+          name: producer
+        input: $x
+        produces: x.json
+        bind: r
+      - step: sibling
+        input: $x
+        produces: sib.md
+        bind: sibOut
+  - aggregate:
+      inputs: { r: $r }
+      verdict_field: status
+`,
+    });
+    const emitted = compile(yamlPath);
+    expect(emitted).toMatch(
+      /rewriteProducerFiles:[\s\S]+runAgent\("producer", correctivePrompt, "x\.json"/,
+    );
+    expect(emitted).toMatch(/rewriteProducerFiles:[\s\S]+inlinePrompt: "Produce the artifact\."/);
+  });
 });
 
 describe('emit shape — inline-agent review_loop writer/reviewer', () => {
