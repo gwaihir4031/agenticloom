@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Persona steps now spawn through the CLI's native `--agent <name>`** — loom no longer reads the persona file and inlines its body into the prompt. On claude the persona's `tools:` frontmatter now binds (real least privilege on the headless path, even under `--dangerously-skip-permissions`); the copilot interactive `human_gate` delegates the same way instead of baking the persona body into its first message. ([#15](https://github.com/gwaihir4031/agenticloom/pull/15))
+- The compile-time agent-file check validates what the CLI actually loads, per CLI: the file leaf is `.github/agents/<name>.agent.md` for copilot (starter pack migrated); claude personas must carry frontmatter `name:` equal to the reference plus a non-empty `description:`, resolved by-name across the project/global layers; copilot personas must carry a string `description:` (its registration rule, probed on v1.0.61). Errors carry fix-its showing the minimal loadable block, list probed-but-empty layers, and a skipped-but-failing layer warns. **Migration:** persona files written for the old body-inlining runtime that lack `name:`/`description:` frontmatter now fail compile with a fix-it — previously they compiled and would silently run persona-less under `--agent`. ([#15](https://github.com/gwaihir4031/agenticloom/pull/15))
+
+### Added
+
+- **Inline agents** — `step:`, `review_loop.writer`, and `review_loop.reviewer` accept `{ prompt, name }` besides a persona name: a one-off agent defined directly in the pipeline YAML, no persona file, all tools. `prompt` is the task (static text); `name` is required and is the agent's identity in logs, window titles, error messages, and mermaid nodes. The getting-started guide's chapter 6 planner is now one. ([#15](https://github.com/gwaihir4031/agenticloom/pull/15))
+- **General `human_gate`** — an interactive gate may omit `agent:`; the gate's required `prompt:` becomes the agent's whole task (all tools, no persona). ([#15](https://github.com/gwaihir4031/agenticloom/pull/15))
+- **Spawn-time persona verification (claude)** — `runAgent` audits the stream-json init event's agent roster and fails loud, killing the child, when claude did not load the requested persona; claude otherwise exits 0 and runs persona-less on an unknown `--agent`. Older CLIs without the roster field are tolerated; copilot already fails loud. ([#15](https://github.com/gwaihir4031/agenticloom/pull/15))
+- **Parse- and spawn-time guard rails** for the delegation surface: dash-leading prompts rejected on all prompt fields (inline, gate, `revise_with` — the CLI parses a dash-leading argv value as a flag) plus a runtime check on the assembled prompt; persona names must be non-empty and not dash-leading; `--agent`/`--agents` rejected inside `extra_args` (they would silently replace or shadow the compile-validated persona); gate prompts must be non-empty. ([#15](https://github.com/gwaihir4031/agenticloom/pull/15))
+
 ## [0.1.5] - 2026-06-06
 
 ### Added
