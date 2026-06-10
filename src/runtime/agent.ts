@@ -49,7 +49,9 @@ export interface RunAgentOpts {
    *  the discriminator: undefined selects the persona form, where the CLI
    *  resolves `<name>`'s persona file via `--agent` and the `-p` value is the
    *  task alone. Compile bakes the YAML inline `prompt:` here as static text;
-   *  persona steps leave it undefined. */
+   *  persona steps leave it undefined. Must be non-empty when set — runAgent
+   *  throws on `''` (an empty identity is an emit/embedding bug; the YAML
+   *  boundary already enforces min-length 1 on InlineAgent.prompt). */
   inlinePrompt?: string;
   extraArgs: string[];
   role?: AgentRole;
@@ -266,6 +268,20 @@ export async function runAgent(
       `runAgent: prompt must be a string (got ${prompt === undefined ? 'undefined' : typeof prompt}) ` +
         `for agent '${name}'. This is a compile-time-guaranteed contract — the emit should always ` +
         `pass a defined string. A failure here points to a broken compile-time substitution.`,
+    );
+  }
+  // Empty-string inlinePrompt is representable but invalid: PRESENCE selects
+  // the inline spawn form, so '' would spawn an agent whose entire identity is
+  // the blank-line/---/blank-line separator plus the task, with the persona
+  // path (and its tools: scoping) silently skipped. The YAML boundary rejects
+  // it (InlineAgent.prompt min-length 1), so a value reaching here is an emit
+  // or embedding bug, not author error. (`=== ''` alone is the defined-but-
+  // empty test — undefined never strict-equals the empty string.)
+  if (opts.inlinePrompt === '') {
+    throw new Error(
+      `agent '${name}': opts.inlinePrompt is an empty string — the inline spawn form requires ` +
+        `a non-empty baked prompt (the compile layer guarantees this; an empty value means an ` +
+        `emit or embedding bug). Omit inlinePrompt entirely for a persona spawn.`,
     );
   }
   // Pre-spawn input check: validate every declared input path exists on disk

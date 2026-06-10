@@ -163,6 +163,24 @@ describe('runAgent', () => {
     );
   });
 
+  it('rejects an empty-string inlinePrompt before spawning (contract violation)', async () => {
+    // PRESENCE of inlinePrompt selects the inline spawn form, so '' would
+    // spawn an agent whose entire identity is the separator + task with the
+    // persona path (and its tools: scoping) silently skipped. The YAML
+    // boundary rejects it (InlineAgent.prompt min-length 1); a value reaching
+    // runAgent means an emit or embedding bug, so it must fail loud pre-spawn.
+    const { runAgent } = await import('./agent.js');
+    await expect(
+      runAgent('inline-empty', 'the user task', undefined, {
+        cli: 'claude',
+        agentDirs: ['.claude/agents/', '~/.claude/agents/'],
+        extraArgs: [],
+        inlinePrompt: '',
+      }),
+    ).rejects.toThrow(/empty string/);
+    expect(spawnMock).not.toHaveBeenCalled();
+  });
+
   it('dispatches to claude binary with stream-json flags', async () => {
     spawnMock.mockImplementation(() => makeFakeRunAgentChild());
     const { runAgent } = await import('./agent.js');
