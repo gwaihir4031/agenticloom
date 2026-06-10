@@ -26,7 +26,7 @@ You are an acceptance-criteria writer. Read the ticket at the path in
 your prompt and write ACS.md containing Given/When/Then scenarios.
 ```
 
-The frontmatter `name` must match the agent name used in the pipeline. The prompt body is the full system instruction passed to the agent when loom invokes it.
+The frontmatter `name` must match the agent name used in the pipeline. The prompt body is the full system instruction passed to the agent when loom invokes it. A second, file-less agent form exists for one-off steps — an inline `{ prompt, name }` written directly in the pipeline — introduced in chapter 6.
 
 ### You're engineering context, not just chaining agents
 
@@ -262,6 +262,18 @@ flow:
 **Threading `$ac_final`**
 
 `$ac_final` was bound by the `review_loop` in the previous step. The `human_gate` picks it up by name. This is how loom threads outputs through a pipeline: each primitive declares what it produces (`bind`), and downstream primitives consume it by `$name`.
+
+**Gates without a persona**
+
+Naming `ac-writer` here is deliberate: the agent that wrote the ACS is the one refining it with you. When a gate doesn't need that continuity, omit `agent:` entirely — the gate's required `prompt:` becomes the agent's whole task (all tools, no persona file):
+
+```yaml
+- human_gate:
+    interactive: true
+    input: $ac_final
+    prompt: |
+      Walk the user through ACS.md and apply their edits.
+```
 
 ### What changed
 
@@ -585,7 +597,23 @@ flow:
             approve_when: pass
             require: all_approved
             bind: spec_verdict
-  - step: planner
+  - step:
+      name: planner
+      prompt: |
+        You are a task planner. Read the approved spec at the path in your prompt
+        and write `plan.jsonl` to your produces path — one JSON object per line,
+        each an implementation task, ordered so dependencies come first (a module
+        must be planned before the code that imports it).
+
+        CRITICAL formatting rules:
+
+        - ONE JSON object per line. No enclosing array. No prose, no blank lines.
+        - Each object: {"id": "task-N", "title": "<short title>", "details": "<what to implement, and which src/ file>"}
+
+        Example for the rate limiter:
+        {"id": "task-1", "title": "Token-bucket core", "details": "Implement a TokenBucket class in src/tokenBucket.ts: capacity, refill rate, tryConsume()."}
+        {"id": "task-2", "title": "Express middleware", "details": "Implement rateLimiter(opts) in src/rateLimiter.ts using TokenBucket, keyed on req.ip; call next() or send 429."}
+        {"id": "task-3", "title": "429 response", "details": "Add the 429 Too Many Requests response with a Retry-After header in src/rateLimiter.ts."}
     input: $spec
     produces: plan.jsonl
     bind: plan
@@ -624,9 +652,15 @@ flow:
 
 ### Walkthrough
 
-**`planner` step**
+**The `planner` step — an inline agent (new in this chapter)**
 
-`planner` is a standard `step` that reads `$spec` and writes `plan.jsonl` — one JSON object per line, each an ordered module task:
+Every agent so far has been a persona-name string — `step: ac-writer` — resolving to a persona file. `planner` uses loom's second agent form: an **inline agent**, `step: { prompt, name }`. No persona file exists for it; the `prompt:` block, written in the pipeline itself, is the agent's whole task. The prompt is static text — per-run data still arrives through `input:` exactly as before — and `produces:`/`bind:` are unchanged. `name:` is required: it is the agent's identity in logs, window titles, and the diagram below.
+
+The decision rule: a **persona** is the default — reusable across steps and pipelines, and tool-scoped through its frontmatter `tools:`. Both reasons keep every reviewer in this guide a persona: `ac-reviewer` serves every pipeline from chapter 2 on, and `tools: Read, Write` scopes each reviewer to reading work and writing a verdict. An **inline agent** fits a one-off step whose prompt is its whole identity — and the trade is plain: it runs with **all tools**, unscoped. Here that costs little. The planner only reads the spec and writes `plan.jsonl`, so giving up `tools: Read, Write` scoping is acceptable, and a persona file's ceremony buys nothing for a step used exactly once.
+
+**What the planner emits**
+
+The prompt pins the contract `foreach` depends on — `plan.jsonl`, one JSON object per line, each an ordered module task:
 
 ```jsonl
 {"id": "task-1", "title": "Token-bucket core", "details": "Implement a TokenBucket class in src/tokenBucket.ts ..."}
@@ -701,7 +735,7 @@ flowchart TD
 
 ### What changed
 
-Chapter 5's single-shot zone became a `planner` step plus a `foreach` that runs the same `implementer` → `tester` → `code-reviewer` zone once per planned task — each writing into the shared `src/`. The gate now sets `on_max_exceeded: continue`, so one unfixable task doesn't abort the batch.
+Chapter 5's single-shot zone became a `planner` step — the guide's first inline `{ prompt, name }` agent — plus a `foreach` that runs the same `implementer` → `tester` → `code-reviewer` zone once per planned task, each writing into the shared `src/`. The gate now sets `on_max_exceeded: continue`, so one unfixable task doesn't abort the batch.
 
 ---
 
