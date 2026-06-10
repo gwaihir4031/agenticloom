@@ -1098,6 +1098,28 @@ describe('runAgent', () => {
       expect(wasKilled()).toBe(true);
     });
 
+    it("reports an unrecognized roster shape — not '(none)' — when entries exist but none are readable", async () => {
+      // A roster of only unreadable entries means claude DID load agents but
+      // reshaped the entry format (e.g. {id, displayName}). Rendering '(none)'
+      // here would send the user chasing a missing-persona-file problem when
+      // the real issue is a roster-format change in claude itself.
+      const { child, wasKilled } = makeKillObservableChild([
+        initWithAgents([42, { foo: 'bar' }]),
+        resultEvent,
+      ]);
+      spawnMock.mockImplementation(() => child);
+      const { runAgent } = await import('./agent.js');
+      const err = await runAgent('ac-writer', 'prompt', undefined, {
+        cli: 'claude',
+        agentDirs: ['.claude/agents/', '~/.claude/agents/'],
+        extraArgs: [],
+      }).catch((e) => e as Error);
+      expect(err).toBeInstanceOf(Error);
+      expect((err as Error).message).toMatch(/unrecognized shape/);
+      expect((err as Error).message).not.toContain('(none)');
+      expect(wasKilled()).toBe(true);
+    });
+
     it('resolves normally when the roster lists the requested name among others', async () => {
       const writes = captureStdoutWrites();
       const events = [

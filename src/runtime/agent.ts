@@ -162,19 +162,29 @@ Do not emit prose to stdout; the verdict lives in the JSON file's "status" field
  *  (older CLIs don't emit it), so callers skip enforcement entirely rather
  *  than conflating "unknown roster" with "empty roster". Entries are the
  *  frontmatter `name:` values — bare strings today, tolerated as
- *  `{name: string}` objects too; anything else is skipped. */
-function loadedAgentNames(agents: unknown): string[] | null {
+ *  `{name: string}` objects too; anything else counts as `unreadable`
+ *  rather than being silently dropped, so the rejection message can tell
+ *  "claude loaded nothing" apart from "claude reshaped the roster entries
+ *  and we can't read them anymore". */
+function loadedAgentNames(agents: unknown): { names: string[]; unreadable: number } | null {
   if (!Array.isArray(agents)) return null;
   const names: string[] = [];
+  let unreadable = 0;
   for (const entry of agents) {
     if (typeof entry === 'string') {
       names.push(entry);
     } else if (typeof entry === 'object' && entry !== null) {
       const n = (entry as Record<string, unknown>).name;
-      if (typeof n === 'string') names.push(n);
+      if (typeof n === 'string') {
+        names.push(n);
+      } else {
+        unreadable++;
+      }
+    } else {
+      unreadable++;
     }
   }
-  return names;
+  return { names, unreadable };
 }
 
 /** Cap on the rolling stderr failure tail, in UTF-16 code units. The reader
@@ -518,12 +528,25 @@ export async function runAgent(
           // reaches the display paths below.
           if (evt.type === 'system' && evt.subtype === 'init' && opts.inlinePrompt === undefined) {
             const loaded = loadedAgentNames(evt.agents);
-            if (loaded !== null && !loaded.includes(name)) {
+            if (loaded !== null && !loaded.names.includes(name)) {
               if (settled) return;
               settled = true;
               cleanup();
               child.kill('SIGTERM');
               window.finish('error');
+              // Roster rendering distinguishes three rejection shapes: readable
+              // names present → list them (unreadable extras stay omitted, as
+              // pinned by the garbage-rendering test); nothing readable but
+              // entries present → claude likely reshaped the roster format, so
+              // say that instead of the misleading '(none)'; truly empty →
+              // '(none)'.
+              const roster =
+                loaded.names.length > 0
+                  ? `[${loaded.names.join(', ')}]`
+                  : loaded.unreadable > 0
+                    ? `(roster had ${loaded.unreadable} entr${loaded.unreadable === 1 ? 'y' : 'ies'} ` +
+                      `in an unrecognized shape — a claude update may have changed the init event format)`
+                    : '(none)';
               reject(
                 new Error(
                   `claude did not load agent '${name}' — the spawn would run persona-less. ` +
@@ -533,7 +556,7 @@ export async function runAgent(
                     `'${name}', that the file is visible from ${agentCwd}, and that its ` +
                     `frontmatter includes a description: (claude refuses to register agents ` +
                     `without one). ` +
-                    `Agents claude loaded: ${loaded.length === 0 ? '(none)' : `[${loaded.join(', ')}]`}.`,
+                    `Agents claude loaded: ${roster}.`,
                 ),
               );
               return;
