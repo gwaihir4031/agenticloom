@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-06-10
+
 ### Changed
 
 - **Persona steps now spawn through the CLI's native `--agent <name>`** — loom no longer reads the persona file and inlines its body into the prompt. On claude the persona's `tools:` frontmatter now binds (real least privilege on the headless path, even under `--dangerously-skip-permissions`); the copilot interactive `human_gate` delegates the same way instead of baking the persona body into its first message. ([#15](https://github.com/gwaihir4031/agenticloom/pull/15))
@@ -57,7 +59,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Initial release. YAML → TypeScript pipeline compiler for orchestrating CLI coding agents (`claude`, `copilot`) with seven primitives: `step`, `review_loop`, `human_gate`, `parallel`, `branch`, `aggregate`, `foreach`. Ships the `loom` / `agenticloom` CLI plus the `loom-author` Claude/Copilot skill.
 
-[Unreleased]: https://github.com/gwaihir4031/agenticloom/compare/v0.1.5...HEAD
+[Unreleased]: https://github.com/gwaihir4031/agenticloom/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/gwaihir4031/agenticloom/compare/v0.1.5...v0.2.0
 [0.1.5]: https://github.com/gwaihir4031/agenticloom/compare/v0.1.4...v0.1.5
 [0.1.4]: https://github.com/gwaihir4031/agenticloom/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/gwaihir4031/agenticloom/compare/v0.1.2...v0.1.3
