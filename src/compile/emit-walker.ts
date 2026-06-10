@@ -543,11 +543,16 @@ export function emit(
       if (stepGate !== undefined) {
         processRetryGate(stepGate, v, item, i, { scope, currentScopeId, items, activeZones });
       }
-      // Zone members get `let` so the retry callback can re-assign. Plain
-      // (non-zone) steps stay `const` — zoneMembers is empty when the
-      // current scope has no retry gates, preserving byte-identical output
-      // for every shipped pipeline.
-      const decl = zoneMembers.has(v) ? 'let' : 'const';
+      // Zone members get `let` so the retry callback can re-assign. A gate
+      // host needs `let` regardless: the gate emit below reassigns `v` from
+      // retryGateZone, and a BOUND gate is in zoneMembers via the pre-pass
+      // (its walk includes the gate index) while a bindless gate's
+      // synthesized `_N` never enters that set (the pre-pass collects
+      // `getBindName` results only) — without the explicit gate-host check
+      // the emit would declare `const` and throw `TypeError: Assignment to
+      // constant variable` at runtime. Plain (non-zone, non-gate) steps stay
+      // `const`, preserving byte-identical output for every shipped pipeline.
+      const decl = stepGate !== undefined || zoneMembers.has(v) ? 'let' : 'const';
       // Branch-arm terminal threading: when this step is the literal last
       // item of a branch arm's `FlowItem[]` AND the arm's closure declared
       // `revisePromptForTerminal` (signalled by the caller threading
@@ -953,11 +958,16 @@ export function emit(
           );
         }
       }
-      // Zone members (aggregate is in another zone, OR aggregate is a gate
-      // for its own zone) get `let` so the retry callback can reassign.
-      // Plain aggregates stay `const`, preserving byte-identical output for
-      // pipelines that don't use the retry-gate feature.
-      const aggDecl = zoneMembers.has(v) ? 'let' : 'const';
+      // Zone members (aggregate in another zone) get `let` so the retry
+      // callback can reassign. A gate host needs `let` regardless: the gate
+      // emit below reassigns `v` (the retryGateZone result AND the aggregate
+      // re-fire inside the retry callback), and while a BOUND gate is in
+      // zoneMembers via the pre-pass, a bindless gate's synthesized `_N`
+      // never enters that set — `const` would throw `TypeError: Assignment
+      // to constant variable` at runtime. Plain aggregates stay `const`,
+      // preserving byte-identical output for pipelines that don't use the
+      // retry-gate feature.
+      const aggDecl = aggGate !== undefined || zoneMembers.has(v) ? 'let' : 'const';
       const lines = [
         `${pad}${aggDecl} ${v} = await aggregate({`,
         ...emitAggregateCallInner(a, entries, rewriteEntries, `${pad}  `),
@@ -1520,9 +1530,13 @@ export function emit(
       // `<agent> finished its work...` prompt template). For a `$`-prefixed
       // bind we emit the bare JS identifier (substituteBindRefs strips the
       // `$`); for a literal path we emit a JSON-stringified string literal.
-      const bindRhs = f.bind !== undefined ? `const ${f.bind}` : `await`;
-      // Bindless side-effect form needs different shape — `await foreach({...})`
-      // without a `const <bind> =` prefix. Bound form gets the `const`.
+      // Bound form: zone members get `let` — the retry callback reassigns
+      // the bind (buildRetryBody's foreach case re-invokes the closure),
+      // the same pre-pass-keyed decision the step/aggregate/parallel arms
+      // make; plain bound foreaches stay `const`. Bindless side-effect form
+      // has no declaration at all — bare `await foreach({...})`.
+      const feDecl = f.bind !== undefined && zoneMembers.has(f.bind) ? 'let' : 'const';
+      const bindRhs = f.bind !== undefined ? `${feDecl} ${f.bind}` : `await`;
       if (f.bind !== undefined) {
         out.push(`${pad}${bindRhs} = await foreach({`);
       } else {

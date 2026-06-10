@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as path from 'path';
 import { compile } from './index.js';
-import { setupCompileTestEnv, setupFixture } from './test-helpers.js';
+import { setupCompileTestEnv, setupFixture, compileAndTypeCheck } from './test-helpers.js';
 
 let teardown: () => void;
 
@@ -1306,6 +1306,75 @@ flow:
   });
 });
 
+describe('bindless gate hosts: synthesized binds are let-declared', () => {
+  // A gate host without `bind:` is schema-legal (step `on_fail` requires
+  // `produces:` only; aggregate `bind:` is optional), and the gate emit
+  // reassigns the host's variable — `v = await retryGateZone({...})`, plus
+  // the aggregate gate's own re-fire inside the retry callback. The
+  // synthesized `_N` never enters the zone-member pre-pass (it collects
+  // `getBindName` results only), so the declaration must key on
+  // gate-hosthood too: a `const` here makes the emitted script throw
+  // `TypeError: Assignment to constant variable` as soon as the gate
+  // completes. compileAndTypeCheck pins this at tsc level (assignment to
+  // const is a type error) on top of the shape assertions.
+  it('step-host: a bindless on_fail gate step is let-declared', () => {
+    const yamlPath = setupFixture({
+      agents: ['writer', 'rev'],
+      yaml: `
+pipeline: p
+cli: claude
+inputs: [x]
+flow:
+  - step: writer
+    input: $x
+    produces: out.md
+    bind: writerOut
+  - step: rev
+    input: $writerOut
+    produces: rev.json
+    on_fail:
+      verdict_field: status
+      retry_from: writerOut
+      revise_with:
+        inputs: [$writerOut]
+`,
+    });
+    const emitted = compileAndTypeCheck(yamlPath);
+    expect(emitted).toMatch(/let _\d+ = await runAgent\("rev"/);
+    expect(emitted).toMatch(/_\d+ = await retryGateZone\(\{/);
+  });
+
+  it('aggregate-host: a bindless aggregate gate is let-declared', () => {
+    const yamlPath = setupFixture({
+      agents: ['writer', 'rev'],
+      yaml: `
+pipeline: p
+cli: claude
+inputs: [x]
+flow:
+  - step: writer
+    input: $x
+    produces: out.md
+    bind: writerOut
+  - step: rev
+    input: $writerOut
+    produces: rev.json
+    bind: revOut
+  - aggregate:
+      inputs: { r: $revOut }
+      verdict_field: status
+      retry_from: writerOut
+      max_retries: 1
+      revise_with:
+        prompt: Retry.
+`,
+    });
+    const emitted = compileAndTypeCheck(yamlPath);
+    expect(emitted).toMatch(/let _\d+ = await aggregate\(\{/);
+    expect(emitted).toMatch(/_\d+ = await retryGateZone\(\{/);
+  });
+});
+
 describe('retry-target inputPaths derive from revise_with (by mode, both gate hosts)', () => {
   // The retry-target step's prompt is rebuilt from `revise_with`, so its
   // pre-flight inputPaths must derive from `revise_with` too — restoring the
@@ -1529,12 +1598,15 @@ flow:
 });
 
 describe('processRetryGate: foreach admission', () => {
-  it('admits foreach bind as retry_from target (no compile error)', () => {
+  it('admits foreach bind as retry_from target (let-declared, typechecks)', () => {
     // Aggregate's `retry_from: results` targets the foreach — admitted:
     // the retry callback replays the entire foreach from iter-0.
     // processRetryGate's target-check rejects only 'review_loop' | 'parallel';
     // foreach falls through to the aggregate-target warning path, but since
     // the target is foreach (not aggregate), no warning fires either.
+    // The retry callback reassigns the target's bind (`results = await
+    // foreach({...})`), so the main-pass declaration must be `let` —
+    // compileAndTypeCheck pins that as a tsc error on regression.
     const yamlPath = setupFixture({
       agents: ['source', 'worker'],
       yaml: `
@@ -1566,15 +1638,18 @@ flow:
         prompt: "retry"
 `,
     });
-    expect(() => compile(yamlPath)).not.toThrow();
+    const emitted = compileAndTypeCheck(yamlPath);
+    expect(emitted).toMatch(/let results = await foreach\(\{/);
   });
 
-  it('admits foreach as intermediate zone member between retry_from target and gate', () => {
+  it('admits foreach as intermediate zone member (let-declared, typechecks)', () => {
     // retry_from: plan2 targets the planner step; the foreach sits BETWEEN
     // the target and the gate (aggregate) as an intermediate zone member.
     // Per Decision J, the intermediate-walk admits isForeach with
     // `continue`, so the compile succeeds without the generic compound-
-    // intermediate rejection.
+    // intermediate rejection. The retry callback reassigns the member's
+    // bind, so the main-pass declaration must be `let` — compileAndTypeCheck
+    // pins that as a tsc error on regression.
     const yamlPath = setupFixture({
       agents: ['planner', 'worker'],
       yaml: `
@@ -1606,6 +1681,7 @@ flow:
         prompt: "retry"
 `,
     });
-    expect(() => compile(yamlPath)).not.toThrow();
+    const emitted = compileAndTypeCheck(yamlPath);
+    expect(emitted).toMatch(/let results = await foreach\(\{/);
   });
 });
