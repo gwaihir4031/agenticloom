@@ -373,7 +373,7 @@ export function emitPreCursorItem(
  *  varies it — so new pipeline-level constants join this object instead of
  *  growing every recursive call site by another positional param. */
 export interface EmitCtx {
-  readonly agentDirs: string[];
+  readonly agentDirs: readonly string[];
   readonly cli: AgentCli;
 }
 

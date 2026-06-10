@@ -359,7 +359,7 @@ function evaluateCopilotCandidate(candidate: string): PersonaRejection | null {
  *  persona probe) go through `validatePersonaFile`, so no caller can bypass
  *  the per-cli semantics. */
 function resolvePersonaByFrontmatter(
-  agentDirs: string[],
+  agentDirs: readonly string[],
   leaf: string,
   name: string,
   contextLabel: string,
@@ -446,7 +446,7 @@ function resolvePersonaByFrontmatter(
  *    upstream step has already run. This check moves that failure to
  *    compile time. */
 export function validatePersonaFile(
-  agentDirs: string[],
+  agentDirs: readonly string[],
   cli: AgentCli,
   name: string,
   contextLabel: string,
@@ -470,7 +470,7 @@ export function validatePersonaFile(
  *  aggregate. Iterate-and-fix-and-rerun is the preserved UX. */
 export function validateAgentFilesExist(
   flow: FlowItem[],
-  agentDirs: string[],
+  agentDirs: readonly string[],
   cli: AgentCli,
   pipelineLabel: string,
 ): void {
