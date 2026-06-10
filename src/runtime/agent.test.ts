@@ -128,6 +128,41 @@ describe('runAgent', () => {
     await expect(runAgent('a', 'prompt')).rejects.toThrow(/opts is required/);
   });
 
+  it('rejects a dash-leading assembled prompt before spawning (persona form)', async () => {
+    // On the persona form the -p value IS the task, and the task can carry a
+    // dash-leading literal `input:` or a runtime pipeline-input value
+    // (`loom run p.yaml x=--flag`) that compile cannot see. The CLI would
+    // parse that head as a flag, so runAgent must fail loud pre-spawn.
+    const { runAgent } = await import('./agent.js');
+    await expect(
+      runAgent('ac-writer', '--flag-looking runtime input', undefined, {
+        cli: 'claude',
+        agentDirs: ['.claude/agents/', '~/.claude/agents/'],
+        extraArgs: [],
+      }),
+    ).rejects.toThrow(/begins with '-'/);
+    expect(spawnMock).not.toHaveBeenCalled();
+  });
+
+  it('allows a dash-leading task on the inline form (the inline prompt heads the -p value)', async () => {
+    // The guard checks the ASSEMBLED head, not the raw task: with inlinePrompt
+    // set, the task rides after the blank-line/---/blank-line separator, so a
+    // dash-leading task never reaches argv position 0 of the -p value.
+    spawnMock.mockImplementation(() => makeFakeRunAgentChild());
+    const { runAgent } = await import('./agent.js');
+    await runAgent('inline-agent', '--flag-looking runtime input', undefined, {
+      cli: 'claude',
+      agentDirs: ['.claude/agents/', '~/.claude/agents/'],
+      extraArgs: [],
+      inlinePrompt: 'You are a careful reviewer.',
+    });
+    expect(spawnMock).toHaveBeenCalledTimes(1);
+    const args = spawnMock.mock.calls[0][1] as string[];
+    expect(args[args.indexOf('-p') + 1]).toBe(
+      'You are a careful reviewer.\n\n---\n\n--flag-looking runtime input',
+    );
+  });
+
   it('dispatches to claude binary with stream-json flags', async () => {
     spawnMock.mockImplementation(() => makeFakeRunAgentChild());
     const { runAgent } = await import('./agent.js');

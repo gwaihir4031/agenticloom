@@ -307,6 +307,21 @@ export async function runAgent(
     else fullPrompt += stepPostscript(producesPathAbs);
   }
 
+  // Guard the assembled -p value's head at the spawn boundary: both CLIs
+  // parse a dash-leading -p value as a flag, so the child would die with an
+  // "unknown option" error naming the flag instead of the YAML field. Compile
+  // rejects dash-leading InlineAgent / human_gate / revise_with prompts, but
+  // on the persona form the head is the task itself, which can be a
+  // dash-leading literal `input:` or a runtime pipeline-input value
+  // (`loom run p.yaml x=--flag`) that compile cannot see.
+  if (fullPrompt.startsWith('-')) {
+    throw new Error(
+      `agent '${name}': the assembled prompt begins with '-', which the CLI would parse as a ` +
+        `flag instead of the -p value. The step's input or prompt must begin with a word — ` +
+        `see the dash-leading prompt rules in PRIMITIVES.md.`,
+    );
+  }
+
   // Per-CLI base argv. Claude gets stream-JSON args so we can render its
   // progress in real time; copilot has no equivalent flag set, so it streams
   // raw stdout. Persona agents append `--agent <name>` so the CLI resolves the
