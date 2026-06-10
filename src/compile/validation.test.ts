@@ -3,8 +3,9 @@ import { mkdirSync, writeFileSync } from 'fs';
 import { homedir } from 'os';
 import * as path from 'path';
 import { compile } from './index.js';
-import { agentFileLeaf, validatePersonaFile } from './validation.js';
+import { agentFileLeaf, validatePersonaFile, readReviewerArm } from './validation.js';
 import { setupCompileTestEnv, setupFixture } from './test-helpers.js';
+import { FlowItem, ReviewLoopItemT } from '../types.js';
 
 let teardown: () => void;
 
@@ -884,5 +885,76 @@ flow:
 `,
     });
     expect(() => compile(yamlPath)).toThrow(/reviewer subflow's last item must be 'aggregate'/);
+  });
+});
+
+describe('readReviewerArm', () => {
+  // Hand-built review_loop bodies (no schema parse) — exercises the reader's
+  // own narrowing, including the internal-contract throw a schema-bypassing
+  // caller hits instead of leaking `undefined` into emitted code.
+  const loopLabel = "review_loop writer='writer'";
+  const base = (): ReviewLoopItemT['review_loop'] => ({
+    writer: 'writer',
+    reviewer: 'critic',
+    input: '$x',
+    writer_produces: 'draft.md',
+    reviewer_produces: 'review.json',
+    verdict_field: 'status',
+  });
+
+  it('reads a persona-name reviewer as the single arm carrying both verdict fields', () => {
+    expect(readReviewerArm(base(), loopLabel)).toEqual({
+      kind: 'single',
+      reviewer: 'critic',
+      reviewerProduces: 'review.json',
+      verdictField: 'status',
+    });
+  });
+
+  it('routes an inline-object reviewer through the single arm', () => {
+    const r = base();
+    r.reviewer = { name: 'critic', prompt: 'Review the draft.' };
+    expect(readReviewerArm(r, loopLabel)).toEqual({
+      kind: 'single',
+      reviewer: { name: 'critic', prompt: 'Review the draft.' },
+      reviewerProduces: 'review.json',
+      verdictField: 'status',
+    });
+  });
+
+  it('reads an array reviewer as the subflow arm (same array, no verdict fields)', () => {
+    const subflow: FlowItem[] = [
+      { aggregate: { inputs: { d: '$draft' }, verdict_field: 'status', bind: 'agg' } },
+    ];
+    const r = base();
+    r.reviewer = subflow;
+    delete r.reviewer_produces;
+    delete r.verdict_field;
+    const arm = readReviewerArm(r, loopLabel);
+    expect(arm.kind).toBe('subflow');
+    // Identity, not a copy — the emit site walks the SAME array the schema
+    // parsed (it mutates child binds in place via fresh()).
+    if (arm.kind === 'subflow') expect(arm.subflow).toBe(subflow);
+  });
+
+  it('throws a structured internal error naming the loop when a single-agent item omits the verdict fields', () => {
+    const noProduces = base();
+    delete noProduces.reviewer_produces;
+    expect(() => readReviewerArm(noProduces, loopLabel)).toThrow(
+      /Internal compile error: review_loop writer='writer'.*'reviewer_produces'/,
+    );
+
+    const noVerdict = base();
+    delete noVerdict.verdict_field;
+    expect(() => readReviewerArm(noVerdict, loopLabel)).toThrow(
+      /Internal compile error.*'verdict_field'/,
+    );
+
+    const neither = base();
+    delete neither.reviewer_produces;
+    delete neither.verdict_field;
+    expect(() => readReviewerArm(neither, loopLabel)).toThrow(
+      /'reviewer_produces' and 'verdict_field'/,
+    );
   });
 });

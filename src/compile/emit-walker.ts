@@ -11,7 +11,12 @@ import {
   inlinePromptOf,
 } from '../types.js';
 import { ensureTerminalBindForArm, val, resultNameFor, getBindName } from './flow-helpers.js';
-import { validateReviewerSubflow, validatePath, validatePersonaFile } from './validation.js';
+import {
+  validateReviewerSubflow,
+  validatePath,
+  validatePersonaFile,
+  readReviewerArm,
+} from './validation.js';
 // Type-only: `AgentCli` is a string union, erased at emit; keeps emit-walker's
 // module graph free of runtime/agent.ts's heavy deps (same posture as
 // validation.ts, whose helpers this file already shares).
@@ -636,6 +641,12 @@ export function emit(
         agentName: writerLabel,
       };
 
+      // Read the reviewer union as a discriminated arm once; the single arm
+      // carries reviewer_produces/verdict_field as plain strings (the schema
+      // refines' cross-field guarantees, enforced structurally — see
+      // readReviewerArm). Everything below branches on the arm's kind.
+      const reviewerArm = readReviewerArm(r, label);
+
       // Both reviewer forms emit the same reviewLoop({ ... }) scaffold —
       // `kind:` is the only header line that differs, and only the reviewer
       // wiring in the middle is branch-specific. writer: carries the resolved
@@ -645,7 +656,7 @@ export function emit(
       // byte-identical to the pre-inline emit.
       const lines = [
         `${pad}const ${v} = await reviewLoop({`,
-        `${pad}  kind: '${Array.isArray(r.reviewer) ? 'compound' : 'single'}',`,
+        `${pad}  kind: '${reviewerArm.kind === 'subflow' ? 'compound' : 'single'}',`,
         `${pad}  cli: CLI,`,
         `${pad}  agentDirs: AGENT_DIRS,`,
         `${pad}  defaultExtraArgs: DEFAULT_EXTRA_ARGS,`,
@@ -665,19 +676,14 @@ export function emit(
       // on the YAML for the compound form (a refine in types.ts catches it).
       const verdictExtractionLines: string[] = [];
 
-      // Array → subflow (compound) reviewer; string or inline object → single
-      // reviewer. Splitting on Array.isArray (not typeof === 'string') routes
-      // an inline-object reviewer through the single path, where its verdict
-      // comes from reviewer_produces/verdict_field exactly as a persona's does.
-      if (!Array.isArray(r.reviewer)) {
-        // Schema refines guarantee reviewer_produces + verdict_field are set
-        // when reviewer is a single agent. Read once with `!` so the rest of
-        // this branch stays narrowed.
-        const reviewerProduces = r.reviewer_produces!;
-        const verdictField = r.verdict_field!;
+      // An inline-object reviewer routes through the single arm (see
+      // readReviewerArm), where its verdict comes from the arm's
+      // reviewerProduces/verdictField exactly as a persona's does.
+      if (reviewerArm.kind === 'single') {
+        const { reviewerProduces, verdictField } = reviewerArm;
         // Resolve the reviewer's agent reference the same way as the writer.
-        const reviewerLabel = agentLabel(r.reviewer);
-        const reviewerInlinePrompt = inlinePromptOf(r.reviewer);
+        const reviewerLabel = agentLabel(reviewerArm.reviewer);
+        const reviewerInlinePrompt = inlinePromptOf(reviewerArm.reviewer);
         validatePath(reviewerProduces, 'reviewer_produces', label);
         // Intra-block self-collision: each role has its own file. Same path
         // across roles means one overwrites the other between iterations or
@@ -702,7 +708,7 @@ export function emit(
           `${pad}  verdictField: ${JSON.stringify(verdictField)},`,
         );
       } else {
-        const subflow = r.reviewer;
+        const subflow = reviewerArm.subflow;
         validateReviewerSubflow(subflow, label);
 
         // Snapshot the OUTER scope BEFORE declaring the loop's bind in either

@@ -4,6 +4,8 @@ import * as path from 'path';
 import { parse as parseYaml } from 'yaml';
 import {
   FlowItem,
+  AgentRef,
+  ReviewLoopItemT,
   isStep,
   isReviewLoop,
   isParallel,
@@ -530,6 +532,49 @@ export function validateReviewerSubflow(reviewerSubflow: FlowItem[], loopLabel: 
         `Found: ${Object.keys(last as object).join(', ')}.`,
     );
   }
+}
+
+/** The `reviewer:` union read as a discriminated shape. The single arm covers
+ *  both single-agent forms (persona name and inline object) and carries the
+ *  verdict-extraction fields as plain strings; the subflow arm carries the
+ *  `FlowItem[]` whose terminal aggregate does its own verdict extraction. */
+export type ReviewerArm =
+  | { kind: 'single'; reviewer: AgentRef; reviewerProduces: string; verdictField: string }
+  | { kind: 'subflow'; subflow: FlowItem[] };
+
+/** Encode the `reviewer:` union's cross-field invariants as a `ReviewerArm`
+ *  (same cure as `readRetryGate` in retry-gate.ts). The schema's refines
+ *  guarantee `reviewer_produces` + `verdict_field` exactly when the reviewer
+ *  is a single agent and forbid them for a subflow — but refines are invisible
+ *  to the type checker, so direct field reads at the emit site would need `!`,
+ *  and a schema-bypassing caller (hand-built item) would sail past those into
+ *  emitting a literal `undefined`. This reader is the single place that
+ *  knowledge lives: missing fields on the single arm throw a structured
+ *  internal-contract error naming the loop instead.
+ *
+ *  Splits on Array.isArray (not typeof === 'string') so an inline-object
+ *  reviewer routes through the single arm, where its verdict comes from
+ *  reviewer_produces/verdict_field exactly as a persona's does. */
+export function readReviewerArm(r: ReviewLoopItemT['review_loop'], loopLabel: string): ReviewerArm {
+  if (Array.isArray(r.reviewer)) {
+    return { kind: 'subflow', subflow: r.reviewer };
+  }
+  if (r.reviewer_produces === undefined || r.verdict_field === undefined) {
+    const missing: string[] = [];
+    if (r.reviewer_produces === undefined) missing.push("'reviewer_produces'");
+    if (r.verdict_field === undefined) missing.push("'verdict_field'");
+    throw new Error(
+      `Internal compile error: ${loopLabel} has a single-agent reviewer but is missing ` +
+        `${missing.join(' and ')}; the ReviewLoopItem schema refines guarantee both fields ` +
+        `for parsed pipelines, so this item bypassed schema validation.`,
+    );
+  }
+  return {
+    kind: 'single',
+    reviewer: r.reviewer,
+    reviewerProduces: r.reviewer_produces,
+    verdictField: r.verdict_field,
+  };
 }
 
 /** Reject absolute paths and `..` traversal in agent-write fields. Loom only
