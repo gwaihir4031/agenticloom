@@ -349,6 +349,26 @@ function evaluateCopilotCandidate(candidate: string): PersonaRejection | null {
   return null;
 }
 
+/** Warn about each layer skipped on the way to a satisfying one. Skipping is
+ *  CORRECT (the CLIs themselves skip unregistrable files, and compile mirrors
+ *  them), but it is also silent: a user whose project-layer file has a typo'd
+ *  frontmatter name would compile clean and run with the GLOBAL persona
+ *  variant, with zero signal that their file was passed over. One WARN line
+ *  per skipped layer, reusing the rejection's reason fragment and naming the
+ *  layer that does resolve the reference. */
+function warnSkippedLayers(
+  rejections: readonly PersonaRejection[],
+  name: string,
+  winner: string,
+): void {
+  for (const r of rejections) {
+    console.warn(
+      `WARN: persona '${name}': skipped ${r.path} (${r.reason}); ` +
+        `'--agent ${name}' resolves via ${winner}.`,
+    );
+  }
+}
+
 /** Resolve `--agent <name>` across the layered `agentDirs` the way `cli`
  *  itself does: examine the file at the cli-aware `leaf` in each layer and
  *  return the first (project-most) layer whose file satisfies the reference
@@ -357,9 +377,11 @@ function evaluateCopilotCandidate(candidate: string): PersonaRejection | null {
  *  file exists but does not satisfy is recorded and SKIPPED, exactly as the
  *  CLIs themselves skip unregistrable files — live-verified for both clis: a
  *  failing project-layer file does not shadow a satisfying global-layer one.
- *  Throws only when NO layer satisfies, naming every examined file and why
- *  it was rejected — plus, when some probed layer had no file at all, an
- *  `Also checked (no file)` tail naming those paths (`withNoFileTail`).
+ *  Each skipped layer is surfaced as a WARN line (`warnSkippedLayers`) so the
+ *  passed-over file doesn't fail silently. Throws only when NO layer
+ *  satisfies, naming every examined file and why it was rejected — plus, when
+ *  some probed layer had no file at all, an `Also checked (no file)` tail
+ *  naming those paths (`withNoFileTail`).
  *
  *  The returned path is validation-only at every call site (both
  *  `validateAgentFilesExist` and emit-walker's human_gate probe discard it).
@@ -415,7 +437,10 @@ function resolvePersonaByFrontmatter(
       cli === 'claude'
         ? evaluateClaudeCandidate(candidate, name)
         : evaluateCopilotCandidate(candidate);
-    if (rejection === null) return candidate;
+    if (rejection === null) {
+      warnSkippedLayers(rejections, name, candidate);
+      return candidate;
+    }
     rejections.push(rejection);
   }
   if (rejections.length === 0) throw missingPersonaError(contextLabel, name, attempted);

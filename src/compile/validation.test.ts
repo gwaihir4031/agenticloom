@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdirSync, writeFileSync } from 'fs';
 import { homedir } from 'os';
 import * as path from 'path';
@@ -497,7 +497,10 @@ flow:
       // resolves --agent by frontmatter name, so a project reviewer.md
       // declaring `name: other-name` is a DIFFERENT agent, not a broken
       // reference — `--agent reviewer` loads the global file and the run
-      // works. Compile must mirror that and pass.
+      // works. Compile must mirror that and pass — but NOT silently: the
+      // user's project file was passed over, so a WARN must name it and the
+      // layer that actually resolves the reference.
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
       const globalAgents = splitProjectLayerFromGlobal();
       writeFileSync('.claude/agents/reviewer.md', '---\nname: other-name\n---\nbody\n');
       writeFileSync(
@@ -506,6 +509,12 @@ flow:
       );
       const yamlPath = setupFixture({ yaml: yamlReferencing('reviewer') });
       expect(() => compile(yamlPath)).not.toThrow();
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringMatching(
+          /^WARN: persona 'reviewer': skipped \.claude\/agents\/reviewer\.md \(declares frontmatter name: 'other-name'.*'--agent reviewer' resolves via \/[^\n]*\.claude\/agents\/reviewer\.md\.$/,
+        ),
+      );
+      warnSpy.mockRestore();
     });
 
     it('returns the satisfying layer path, not the first existing layer', () => {
@@ -513,6 +522,7 @@ flow:
       // compile()): the path handed back is the file claude will actually
       // load, so a skipped project file must not be returned. The dirs
       // mirror compile's claude AGENT_DIR_DEFAULTS layers.
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {}); // skip warn, silenced
       const globalAgents = splitProjectLayerFromGlobal();
       writeFileSync('.claude/agents/reviewer.md', '---\nname: other-name\n---\nbody\n');
       const globalPath = path.join(globalAgents, 'reviewer.md');
@@ -524,12 +534,15 @@ flow:
         'pipeline test',
       );
       expect(resolved).toBe(globalPath);
+      warnSpy.mockRestore();
     });
 
     it('accepts a matching project layer without consulting the global layer', () => {
       // Project-first precedence: the satisfying project file resolves the
       // reference on its own, so a global file that would fail the check
-      // (mismatched name) must not be able to break compile.
+      // (mismatched name) must not be able to break compile — and nothing
+      // was skipped on the way to the winner, so no skip WARN may fire.
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
       const globalAgents = splitProjectLayerFromGlobal();
       writeFileSync(
         '.claude/agents/reviewer.md',
@@ -538,6 +551,8 @@ flow:
       writeFileSync(path.join(globalAgents, 'reviewer.md'), '---\nname: wrong-name\n---\nbody\n');
       const yamlPath = setupFixture({ yaml: yamlReferencing('reviewer') });
       expect(() => compile(yamlPath)).not.toThrow();
+      expect(warnSpy).not.toHaveBeenCalled();
+      warnSpy.mockRestore();
     });
 
     it('throws one error naming every examined layer when no layer satisfies the reference', () => {
@@ -581,6 +596,7 @@ flow:
       // `--agent reviewer` loads the global file and the run works. Compile
       // must mirror that skip rather than failing on the first name-matched
       // layer.
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {}); // skip warn, silenced
       const globalAgents = splitProjectLayerFromGlobal();
       writeFileSync('.claude/agents/reviewer.md', '---\nname: reviewer\n---\nbody\n');
       writeFileSync(
@@ -589,6 +605,7 @@ flow:
       );
       const yamlPath = setupFixture({ yaml: yamlReferencing('reviewer') });
       expect(() => compile(yamlPath)).not.toThrow();
+      warnSpy.mockRestore();
     });
 
     it('renders a no-description layer reason in the multi-layer listing', () => {
@@ -790,7 +807,10 @@ flow:
       // Probed: with a description-less project probe-lay.agent.md and a
       // registrable global one, `--agent probe-lay` loads the GLOBAL persona
       // — the unregistrable project file does not shadow it. Compile must
-      // mirror that skip rather than failing on the first existing layer.
+      // mirror that skip rather than failing on the first existing layer —
+      // but NOT silently: a WARN must name the passed-over project file and
+      // the layer that resolves the reference.
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
       const globalAgents = splitCopilotLayers();
       writeFileSync('.github/agents/reviewer.agent.md', '---\nname: reviewer\n---\nbody\n');
       writeFileSync(
@@ -799,6 +819,12 @@ flow:
       );
       const yamlPath = setupFixture({ yaml: yamlReferencing('reviewer') });
       expect(() => compile(yamlPath)).not.toThrow();
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringMatching(
+          /^WARN: persona 'reviewer': skipped \.github\/agents\/reviewer\.agent\.md \(has no 'description:' frontmatter\); '--agent reviewer' resolves via \/[^\n]*\.copilot\/agents\/reviewer\.agent\.md\.$/,
+        ),
+      );
+      warnSpy.mockRestore();
     });
 
     it('throws one error naming every examined copilot layer when none is registrable', () => {
